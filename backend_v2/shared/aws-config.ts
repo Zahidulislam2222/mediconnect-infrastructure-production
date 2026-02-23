@@ -7,6 +7,8 @@ import { SSMClient } from "@aws-sdk/client-ssm";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { KMSClient } from "@aws-sdk/client-kms";
 
+declare var process: any;
+
 /**
  * 🏛️ MAIN INGREDIENTS (COGNITO 2026 VAULT)
  * 🟢 SECURITY FIX: Hardcoded IDs removed. System will fail securely if ENV is missing.
