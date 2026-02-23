@@ -58,6 +58,6 @@
   "overrides": {
     "dompurify": "3.2.4",
     "minimatch": "10.2.1",
-    "jspdf": "^4.2.0"
+    "jspdf": "4.2.0"
   }
 }
