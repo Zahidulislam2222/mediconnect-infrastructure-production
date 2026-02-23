@@ -58,14 +58,13 @@ export const getRegionalSSMClient = (region: string = "us-east-1") => {
 export const COGNITO_CONFIG: any = {
     US: {
         REGION: 'us-east-1',
-        // Fallback logic: Try specific US var, then generic var
-        USER_POOL_ID: process.env.COGNITO_USER_POOL_ID_US || process.env.COGNITO_USER_POOL_ID,
-        CLIENT_DOCTOR: process.env.COGNITO_CLIENT_ID_US_DOCTOR || process.env.COGNITO_CLIENT_ID,
+        get USER_POOL_ID() { return process.env.COGNITO_USER_POOL_ID_US || process.env.COGNITO_USER_POOL_ID || '' },
+        get CLIENT_DOCTOR() { return process.env.COGNITO_CLIENT_ID_US_DOCTOR || process.env.COGNITO_CLIENT_ID || '' },
     },
     EU: {
         REGION: 'eu-central-1',
-        USER_POOL_ID: process.env.COGNITO_USER_POOL_ID_EU,
-        CLIENT_DOCTOR: process.env.COGNITO_CLIENT_ID_EU_DOCTOR,
+        get USER_POOL_ID() { return process.env.COGNITO_USER_POOL_ID_EU || '' },
+        get CLIENT_DOCTOR() { return process.env.COGNITO_CLIENT_ID_EU_DOCTOR || '' },
     }
 };
 

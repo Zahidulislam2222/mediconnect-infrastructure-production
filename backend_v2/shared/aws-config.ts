@@ -14,9 +14,8 @@ import { KMSClient } from "@aws-sdk/client-kms";
 export const COGNITO_CONFIG = {
     US: {
         REGION: 'us-east-1',
-        // 🟢 FIX: 'get' forces it to read the env AFTER the vault has synced
         get USER_POOL_ID() { return process.env.COGNITO_USER_POOL_ID_US || process.env.COGNITO_USER_POOL_ID || '' },
-        get CLIENT_PATIENT() { return process.env.COGNITO_CLIENT_ID_US_PATIENT || '' }, 
+        get CLIENT_PATIENT() { return process.env.COGNITO_CLIENT_ID_US_PATIENT || process.env.COGNITO_CLIENT_ID || '' }, 
         get CLIENT_DOCTOR() { return process.env.COGNITO_CLIENT_ID_US_DOCTOR || process.env.COGNITO_CLIENT_ID || '' },
     },
     EU: {

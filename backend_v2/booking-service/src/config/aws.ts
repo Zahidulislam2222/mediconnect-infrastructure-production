@@ -48,15 +48,16 @@ export const getRegionalKMSClient = (region: string = "us-east-1") => {
 export const COGNITO_CONFIG: any = {
     US: {
         REGION: 'us-east-1',
-        USER_POOL_ID: process.env.COGNITO_USER_POOL_ID_US || process.env.COGNITO_USER_POOL_ID,
-        CLIENT_PATIENT: process.env.COGNITO_CLIENT_ID_US_PATIENT,
-        CLIENT_DOCTOR: process.env.COGNITO_CLIENT_ID_US_DOCTOR
+        // 🟢 THE FIX: 'get' forces the app to read these values AFTER loadSecrets() finishes
+        get USER_POOL_ID() { return process.env.COGNITO_USER_POOL_ID_US || process.env.COGNITO_USER_POOL_ID || '' },
+        get CLIENT_PATIENT() { return process.env.COGNITO_CLIENT_ID_US_PATIENT || '' },
+        get CLIENT_DOCTOR() { return process.env.COGNITO_CLIENT_ID_US_DOCTOR || '' }
     },
     EU: {
         REGION: 'eu-central-1',
-        USER_POOL_ID: process.env.COGNITO_USER_POOL_ID_EU,
-        CLIENT_PATIENT: process.env.COGNITO_CLIENT_ID_EU_PATIENT,
-        CLIENT_DOCTOR: process.env.COGNITO_CLIENT_ID_EU_DOCTOR
+        get USER_POOL_ID() { return process.env.COGNITO_USER_POOL_ID_EU || '' },
+        get CLIENT_PATIENT() { return process.env.COGNITO_CLIENT_ID_EU_PATIENT || '' },
+        get CLIENT_DOCTOR() { return process.env.COGNITO_CLIENT_ID_EU_DOCTOR || '' }
     }
 };
 
