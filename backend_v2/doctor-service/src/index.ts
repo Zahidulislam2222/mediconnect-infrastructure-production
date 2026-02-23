@@ -9,37 +9,38 @@ import rateLimit from 'express-rate-limit';
 
 import { GetParametersCommand } from "@aws-sdk/client-ssm";
 import { safeLog, safeError } from '../../shared/logger';
-// 🟢 ARCHITECTURE FIX: Use Shared Factory for Regional Secret Loading
 import { getRegionalSSMClient } from './config/aws';
 
 dotenv.config();
 
 const app = express();
 
-// 🟢 SECURITY: DDoS Protection (100 requests / 15 mins)
+// 🟢 FIX 1: Azure Proxy Trust (MUST be before the limiter)
+// This solves the 'ERR_ERL_UNEXPECTED_X_FORWARDED_FOR' error in your logs
+app.set('trust proxy', 1);
+
+// 🟢 SECURITY: DDoS Protection
 const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
     max: 100, 
     message: { error: "Too many requests. Please try again later." }
 });
 app.use(globalLimiter);
+
 const PORT = process.env.PORT || 8082;
 
-// --- 1. COMPLIANT CORS (HIPAA/GDPR) ---
+// --- 1. COMPLIANT CORS ---
 const allowedOrigins = [
     'http://localhost:8080',
     'http://localhost:5173',
-    /\.web\.app$/,               // Firebase
-    /\.azurecontainerapps\.io$/  // Azure Internal
+    /\.web\.app$/,
+    /\.azurecontainerapps\.io$/
 ];
+if (process.env.FRONTEND_URL) allowedOrigins.push(process.env.FRONTEND_URL);
 
-if (process.env.FRONTEND_URL) {
-    allowedOrigins.push(process.env.FRONTEND_URL);
-}
-
-// --- 2. SECURITY MIDDLEWARE (STRICT COMPLIANCE) ---
+// --- 2. SECURITY MIDDLEWARE ---
 app.use(helmet({
-    hsts: { maxAge: 31536000, includeSubDomains: true, preload: true }, // 1 Year HSTS
+    hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
     contentSecurityPolicy: {
         directives: {
             defaultSrc: ["'self'"],
@@ -58,50 +59,30 @@ app.use(cors({
 }));
 app.options('*', cors());
 
-// HIPAA Requirement: Limit payload size to prevent DoS
 app.use(express.json({ limit: '2mb' }));
 
-/**
- * 🟢 HIPAA AUDIT FIX: Secure Identity Logging
- * We no longer trust 'req.headers'. We check 'req.user' which comes from the Verified Token.
- */
 morgan.token('verified-user', (req: any) => {
     return req.user?.sub ? `User:${req.user.sub}` : 'Unauthenticated';
 });
 
 app.use(morgan((tokens, req, res) => {
     return [
-        `[AUDIT]`,
-        tokens.method(req, res),
-        tokens.url(req, res),
-        tokens.status(req, res),
-        tokens['response-time'](req, res), 'ms',
-        tokens['verified-user'](req, res), // 🟢 The Fix
-        `IP:${req.ip}`
+        `[AUDIT]`, tokens.method(req, res), tokens.url(req, res),
+        tokens.status(req, res), tokens['response-time'](req, res), 'ms',
+        tokens['verified-user'](req, res), `IP:${req.ip}`
     ].join(' ');
-}, {
-    skip: (req) => req.method === 'OPTIONS'
-}));
+}, { skip: (req) => req.method === 'OPTIONS' }));
 
-// Professional Health Check (Azure Liveness Probe)
 app.get('/health', (req, res) => {
-    res.status(200).json({ 
-        status: 'UP', 
-        service: 'doctor-service',
-        timestamp: new Date().toISOString()
-    });
+    res.status(200).json({ status: 'UP', service: 'doctor-service', timestamp: new Date().toISOString() });
 });
 
-// --- 3. ROUTE MOUNTING ---
 app.use('/', doctorRoutes);
 app.use('/', clinicalRoutes);
 
-// --- 4. SECRETS LOADER (Resilient Architecture) ---
+// --- 4. SECRETS LOADER ---
 async function loadSecrets() {
-    // Determine Region from Env (Default US)
     const region = process.env.AWS_REGION || 'us-east-1';
-    
-    // 🟢 INFRA FIX: Use Regional Factory (Prevents Cross-Region Dependency)
     const ssm = getRegionalSSMClient(region);
 
     try {
@@ -111,49 +92,45 @@ async function loadSecrets() {
                 '/mediconnect/prod/kms/signing_key_id',
                 // US Identity
                 '/mediconnect/prod/cognito/client_id_doctor',
+                '/mediconnect/prod/cognito/client_id_patient', // 🟢 FIX 2: Added missing Patient ID
                 '/mediconnect/prod/cognito/user_pool_id',
-                // EU Identity (GDPR)
+                // EU Identity
                 '/mediconnect/prod/cognito/user_pool_id_eu',
-                // Shared Infrastructure
+                '/mediconnect/prod/cognito/client_id_eu_doctor',  // 🟢 Added EU IDs
+                '/mediconnect/prod/cognito/client_id_eu_patient', // 🟢 Added EU IDs
+                // Shared
                 '/mediconnect/prod/db/dynamo_table'
             ],
             WithDecryption: true
         });
 
         const { Parameters } = await ssm.send(command);
+        if (!Parameters || Parameters.length === 0) throw new Error("No secrets found.");
 
-        if (!Parameters || Parameters.length === 0) {
-            throw new Error("No secrets found in Parameter Store.");
-        }
-
-        Parameters?.forEach((p: any) => {
-            
-            if (p.Name && p.Name.includes('kms/signing_key_id')) process.env.KMS_KEY_ID = p.Value;
-            
-            // Map US
+        Parameters.forEach((p: any) => {
+            if (p.Name.includes('kms/signing_key_id')) process.env.KMS_KEY_ID = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/client_id_doctor') process.env.COGNITO_CLIENT_ID = p.Value;
+            if (p.Name === '/mediconnect/prod/cognito/client_id_patient') process.env.COGNITO_CLIENT_ID_US_PATIENT = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/user_pool_id') process.env.COGNITO_USER_POOL_ID = p.Value;
-            
-            // Map EU
             if (p.Name === '/mediconnect/prod/cognito/user_pool_id_eu') process.env.COGNITO_USER_POOL_ID_EU = p.Value;
-
-            // 🟢 THE FIX FOR PROBLEM 2: Save the database table name
+            if (p.Name === '/mediconnect/prod/cognito/client_id_eu_doctor') process.env.COGNITO_CLIENT_ID_EU_DOCTOR = p.Value;
+            if (p.Name === '/mediconnect/prod/cognito/client_id_eu_patient') process.env.COGNITO_CLIENT_ID_EU_PATIENT = p.Value;
             if (p.Name === '/mediconnect/prod/db/dynamo_table') process.env.DYNAMO_TABLE = p.Value;
         });
+
+        // Backward compatibility mapping
+        if (!process.env.COGNITO_CLIENT_ID_US_DOCTOR) process.env.COGNITO_CLIENT_ID_US_DOCTOR = process.env.COGNITO_CLIENT_ID;
+
         console.log("✅ AWS Vault Sync Complete.");
     } catch (e: any) {
-        safeError(`❌ FATAL: Vault Sync Failed. System cannot start securely.`, e.message);
+        safeError(`❌ FATAL: Vault Sync Failed.`, e.message);
         process.exit(1); 
     }
 }
 
-// --- 5. START SERVER ---
 const startServer = async () => {
     try {
-        // 1. Load Secrets (Blocking Operation)
         await loadSecrets();
-
-        // 2. Start Listener
         app.listen(Number(PORT), '0.0.0.0', () => {
             safeLog(`🚀 Doctor Service Production Ready on port ${PORT} `);
         });
@@ -163,4 +140,4 @@ const startServer = async () => {
     }
 };
 
-startServer(); // Triggering deployment fix
+startServer();
