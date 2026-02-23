@@ -122,7 +122,7 @@ export const checkSymptoms = async (req: Request, res: Response) => {
         const wrappedDisclaimer = doc.splitTextToSize(disclaimer, 185);
         doc.text(wrappedDisclaimer, 10, 275);
 
-        const pdfBase64 = doc.output('datauristring').split(',')[1];
+        const pdfBase64 = Buffer.from(doc.output('arraybuffer')).toString('base64');
 
         // 7. AUDIT LOG (HIPAA Compliance)
         // 🟢 HIPAA FIX: Include IP and Region

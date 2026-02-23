@@ -6,6 +6,7 @@ import { scrubPII, mapToFHIRImagingReport } from "../utils/fhir-mapper";
 import { writeAuditLog } from "../../../shared/audit";
 import { v4 as uuidv4 } from "uuid";
 import { jsPDF } from "jspdf";
+import autoTable from 'jspdf-autotable';
 
 const aiService = new AICircuitBreaker();
 
@@ -87,7 +88,7 @@ export const analyzeClinicalImage = async (req: Request, res: Response) => {
         doc.setTextColor(150, 150, 150);
         doc.text(wrappedDisclaimer, 10, pageHeight - 15);
 
-        const pdfBase64 = doc.output('datauristring').split(',')[1];
+        const pdfBase64 = Buffer.from(doc.output('arraybuffer')).toString('base64');
 
         // 🟢 Switches between Azure (US) and Firestore (EU) automatically
         try {
