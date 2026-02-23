@@ -10,7 +10,7 @@ import {
     deleteProfile,
     getPatientById,
     searchPatients,
-    extractRegion // Imported from the controller fix
+    extractRegion
 } from '../controllers/patient.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { writeAuditLog } from '../../../shared/audit';
@@ -29,7 +29,6 @@ export const getPublicKnowledge = async (req: Request, res: Response) => {
         const { Items } = await dynamicDb.send(new ScanCommand({ TableName: "mediconnect-knowledge-base" }));
         if (!Items || Items.length === 0) return res.json([]);
 
-        // 🟢 FHIR: Map public articles to DocumentReference
         const fhirArticles = Items.map((art: any) => ({
             id: art.topic || art.id,
             resourceType: "DocumentReference",
@@ -65,7 +64,6 @@ export const getPublicArticle = async (req: Request, res: Response) => {
             legacyData: { category: art.category, content: art.content, slug: art.slug }
         };
 
-        // 🟢 HIPAA: Log IP address even for public guests accessing medical articles
         await writeAuditLog("GUEST", id, "READ_KB_ITEM", `Read article: ${art.title}`, { 
             region: userRegion, 
             ipAddress: req.ip 
@@ -89,25 +87,24 @@ router.use(authMiddleware);
 // 🛡️ 3. PROTECTED ROUTES (HIPAA Enforced)
 // ==========================================
 
-// Dashboards & Analytics
+// 1. Specific Static Routes (MUST COME FIRST)
+// If these are below /:id, "stats" or "search" will be treated as a userId.
 router.get('/stats/demographics', getDemographics);
 router.get('/search', searchPatients); 
 
-// Registration (Requires Cognito Token)
-router.post('/register-patient', createPatient); 
-router.post('/', createPatient);
+// 2. Registration & Identity
+router.post(['/register-patient', '/'], createPatient); 
+router.post('/verify-identity', verifyIdentity); // ✅ Matches Frontend API exactly
 
-// Identity Verification
-router.post('/identity/verify', verifyIdentity);
-
-// Profile Management
-router.get('/register-patient', getProfile); // Load own profile
-router.get('/:userId', getPatientById);
-router.get(['/patients/:id', '/:id'], getProfile);
-
-router.put(['/patients/:id', '/:id'], updateProfile);
-
-// GDPR Right to be Forgotten
+// 3. Current User Profile (No ID param required)
+router.get(['/register-patient', '/me'], getProfile); // ✅ Frontend checks this path to confirm session
 router.delete('/me', deleteProfile);
+
+// 4. Dynamic ID Routes (Wildcards come LAST)
+// GET: Fetch specific patient by ID
+router.get(['/patients/:id', '/:id'], getPatientById);
+
+// PUT: Update specific patient by ID
+router.put(['/patients/:id', '/:id'], updateProfile);
 
 export default router;

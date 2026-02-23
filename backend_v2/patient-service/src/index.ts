@@ -241,6 +241,13 @@ const startServer = async () => {
         app.get('/health', (req, res) => res.status(200).json({ status: 'UP', service: 'patient-service' }));
         app.use('/', patientRoutes);
         app.use('/', iotRoutes);
+
+        app.use('*', (req, res) => {
+    res.status(404).json({ 
+        error: "Route Not Found", 
+        message: `Cannot ${req.method} ${req.originalUrl}` 
+    });
+});
         
         startIoTBridge();
 

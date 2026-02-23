@@ -131,6 +131,12 @@ async function loadSecrets() {
 const startServer = async () => {
     try {
         await loadSecrets();
+        app.use('*', (req, res) => {
+    res.status(404).json({ 
+        error: "Route Not Found", 
+        message: `Cannot ${req.method} ${req.originalUrl}` 
+    });
+});
         app.listen(Number(PORT), '0.0.0.0', () => {
             safeLog(`🚀 Doctor Service Production Ready on port ${PORT} `);
         });
