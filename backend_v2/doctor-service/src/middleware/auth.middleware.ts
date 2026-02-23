@@ -79,24 +79,28 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
 
         // 🟢 2026 SECURITY ENFORCEMENT: Explicit Group Check
         const groups = payload['cognito:groups'] || [];
-        const isAuthorizedDoctor = groups.includes('doctor') || groups.includes('doctors');
+        const isDoctor = groups.includes('doctor') || groups.includes('doctors');
+        const isPatient = !isDoctor; // Default to patient if not in doctor group
 
-        if (!isAuthorizedDoctor) {
-            await writeAuditLog(payload.sub, "SYSTEM", "UNAUTHORIZED_ACCESS_DENIED", "User attempted to access doctor-service without being in 'doctor' group", {
+        // 🟢 2. Permission Logic: Allow Patients to READ, but only Doctors to WRITE
+        const isReadRequest = req.method === 'GET';
+
+        if (!isDoctor && !isReadRequest) {
+            await writeAuditLog(payload.sub, "SYSTEM", "UNAUTHORIZED_WRITE_ATTEMPT", "Blocked patient attempt to modify doctor-service", {
                 region: userRegion,
                 ipAddress: req.ip,
-                role: "REJECTED_CLIENT"
+                role: "REJECTED_PATIENT"
             });
-            return res.status(403).json({ error: "Access Denied: High-security role required." });
+            return res.status(403).json({ error: "Access Denied: Only verified practitioners can modify clinical data." });
         }
 
-        // 🟢 CONTEXT INJECTION: Attach Region and Claims to Request
-        // This allows downstream controllers to enforce HIPAA/GDPR rules
+        // 🟢 3. Context Injection
         (req as any).user = { 
             ...payload, 
+            sub: payload.sub,
             region: userRegion,
-            // Helper to check roles easily later
-            isDoctor: payload['cognito:groups']?.includes('doctor') || payload['cognito:groups']?.includes('doctors')
+            isDoctor,
+            isPatient
         };
         
         next();

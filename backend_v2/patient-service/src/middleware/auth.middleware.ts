@@ -56,18 +56,17 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
         const payload = await v.verify(token);
 
         // 🟢 CONTEXT INJECTION & FHIR MAPPING
-        const groups = payload['cognito:groups'] || [];
-        const isDoctor = groups.includes('doctor') || groups.includes('doctors');
-        const isPatient = groups.includes('patient') || groups.includes('patients');
+        const groups = (payload['cognito:groups'] as string[]) || [];
+        const isDoctor = groups.some((g: string) => g.toLowerCase() === 'doctor' || g.toLowerCase() === 'doctors');
+        
+        const isPatient = !isDoctor; 
 
-        if (!isDoctor && !isPatient) {
-            return res.status(403).json({ error: "Access Denied: Unrecognized User Role" });
-        }
-
+        // 🟢 2. Context Injection
         (req as any).user = { 
             id: payload.sub,
             email: payload.email,
-            fhirId: payload["custom:fhir_id"] || payload.sub,
+            // Fallback for custom attributes
+            fhirId: payload["custom:fhir_id"] || payload.sub, 
             region: userRegion,
             isDoctor,
             isPatient
