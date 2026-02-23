@@ -86,6 +86,7 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
     ipAddress: req.ip 
 });
 logDoctorOnboarding(finalId, "SIGNUP", "UNVERIFIED", extractRegion(req)).catch(console.error);
+res.status(201).json(item);
 });
 
 export const getDoctor = catchAsync(async (req: Request, res: Response) => {
@@ -114,6 +115,7 @@ export const getDoctor = catchAsync(async (req: Request, res: Response) => {
     region: region, 
     ipAddress: req.ip 
 });
+res.status(200).json(doctor);
 });
 
 export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
@@ -170,6 +172,7 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
     region: extractRegion(req), 
     ipAddress: req.ip 
 });
+res.status(200).json({ message: "Doctor profile updated", attributes: response.Attributes });
 });
 
 export const getDoctors = catchAsync(async (req: Request, res: Response) => {
@@ -386,6 +389,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
     region: extractRegion(req), 
     ipAddress: req.ip 
 });
+res.status(200).json({ message: "Profile successfully anonymized/deleted." });
 });
 
 // 🟢 GDPR FIX: Track doctor onboarding progress
