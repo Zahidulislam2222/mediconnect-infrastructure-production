@@ -1,0 +1,10 @@
+{
+  "name": "mediconnect-cognito-triggers",
+  "version": "1.0.0",
+  "description": "Auto-assign groups based on Client ID",
+  "main": "index.mjs",
+  "type": "module",
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.0.0"
+  }
+}

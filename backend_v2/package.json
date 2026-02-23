@@ -10,9 +10,9 @@
   ],
   "main": "verify_consolidation.js",
   "scripts": {
-  "test": "npm test --workspaces --if-present",
-  "lint": "echo 'Linting passed'" 
-},
+    "test": "npm test --workspaces --if-present",
+    "lint": "echo 'Linting passed'"
+  },
   "keywords": [],
   "author": "",
   "license": "ISC",
@@ -54,5 +54,10 @@
     "@types/uuid": "^10.0.0",
     "typescript": "^5.9.3"
   },
-  "description": ""
+  "description": "",
+  "overrides": {
+    "dompurify": "3.2.4",
+    "minimatch": "10.2.1",
+    "jspdf": "^4.2.0"
+  }
 }
