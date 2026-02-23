@@ -60,11 +60,15 @@ export const COGNITO_CONFIG: any = {
         REGION: 'us-east-1',
         get USER_POOL_ID() { return process.env.COGNITO_USER_POOL_ID_US || process.env.COGNITO_USER_POOL_ID || '' },
         get CLIENT_DOCTOR() { return process.env.COGNITO_CLIENT_ID_US_DOCTOR || process.env.COGNITO_CLIENT_ID || '' },
+        // 🟢 ADD THIS LINE:
+        get CLIENT_PATIENT() { return process.env.COGNITO_CLIENT_ID_US_PATIENT || '' }, 
     },
     EU: {
         REGION: 'eu-central-1',
         get USER_POOL_ID() { return process.env.COGNITO_USER_POOL_ID_EU || '' },
         get CLIENT_DOCTOR() { return process.env.COGNITO_CLIENT_ID_EU_DOCTOR || '' },
+        // 🟢 ADD THIS LINE:
+        get CLIENT_PATIENT() { return process.env.COGNITO_CLIENT_ID_EU_PATIENT || '' },
     }
 };
 

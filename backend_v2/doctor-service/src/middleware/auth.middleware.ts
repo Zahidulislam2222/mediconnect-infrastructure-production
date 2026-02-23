@@ -41,7 +41,7 @@ const getVerifier = async (userRegion: string) => {
         // 5. Create Verifier
         const verifier = JwtRsaVerifier.create({
             issuer: issuerUrl,
-            audience: config.CLIENT_DOCTOR, // Strict Role Isolation (Only Doctors)
+            audience: [config.CLIENT_DOCTOR, config.CLIENT_PATIENT].filter(Boolean),
             tokenUse: "id",
             jwks: jwks // Inject keys directly
         });
