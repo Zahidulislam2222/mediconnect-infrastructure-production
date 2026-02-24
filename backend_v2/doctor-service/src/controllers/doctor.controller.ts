@@ -70,15 +70,20 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
     };
 
     const item = {
-        doctorId: finalId, email, name,
+        doctorId: finalId, 
+        email, 
+        name,
         specialization: specialization || 'General Practice',
-        licenseNumber: licenseNumber || 'PENDING_VERIFICATION',
+        licenseNumber: licenseNumber || 'PENDING_VERIFICATION',       
         verificationStatus: 'UNVERIFIED',
+        isEmailVerified: true,  
+        isIdentityVerified: false, 
+        identityStatus: 'IDLE',
         role: role === 'provider' ? 'doctor' : 'doctor',
         createdAt: new Date().toISOString(),
         consultationFee: 50, 
         resource: fhirResource,
-        consent: verifiedConsent // 🟢 SAVED TO DYNAMODB
+        consent: verifiedConsent
     };
 
     try {

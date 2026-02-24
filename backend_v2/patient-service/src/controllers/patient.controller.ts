@@ -112,7 +112,7 @@ export const createPatient = catchAsync(async (req: Request, res: Response) => {
         email,
         name,
         role,
-        isEmailVerified: false,
+        isEmailVerified: true,
         isIdentityVerified: false,
         createdAt: timestamp,
         avatar: null,
