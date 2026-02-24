@@ -194,7 +194,9 @@ export const updateProfile = catchAsync(async (req: Request, res: Response) => {
         return res.status(403).json({ error: "Unauthorized to edit this profile." });
     }
 
-    const allowedUpdates = ['name', 'avatar', 'phone', 'address', 'preferences', 'dob', 'fcmToken'];
+    // Find this line inside updateProfile
+const allowedUpdates = ['name', 'avatar', 'phone', 'address', 'preferences', 'dob', 'fcmToken', 'isEmailVerified']; 
+// 👆 I added 'isEmailVerified' to the end
     const body = req.body;
     const parts: string[] = [];
     const names: any = {};

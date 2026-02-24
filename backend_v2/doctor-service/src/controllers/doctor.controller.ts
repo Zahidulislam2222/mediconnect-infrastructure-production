@@ -148,7 +148,7 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
     const parts: string[] = [];
     const names: any = {};
     const values: any = {};
-    const allowed = ['name', 'specialization', 'bio', 'avatar', 'consultationFee'];
+    const allowed = ['name', 'specialization', 'bio', 'avatar', 'consultationFee', 'isEmailVerified'];
 
     Object.keys(updates).forEach(key => {
         if (allowed.includes(key) || key === 'schedule') {
