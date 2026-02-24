@@ -256,19 +256,22 @@ export const verifyIdentity = catchAsync(async (req: Request, res: Response) => 
     if (!authUser?.id || !selfieImage) return res.status(400).json({ error: "Missing identity data" });
 
     const userId = authUser.id;
+
+    const isDoctor = authUser.isDoctor; 
     const dynamicDb = getRegionalClient(region); 
 
-    // 🛑 SECURITY FIX: Check if User actually exists in DB before uploading anything
+    const targetTable = isDoctor ? CONFIG.DOCTOR_TABLE : CONFIG.DYNAMO_TABLE;
+    const primaryKeyName = isDoctor ? "doctorId" : "patientId";
+
     const userCheck = await dynamicDb.send(new GetCommand({
-        TableName: CONFIG.DYNAMO_TABLE,
-        Key: { patientId: userId }
+        TableName: targetTable,
+        Key: { [primaryKeyName]: userId }
     }));
 
     if (!userCheck.Item) {
         return res.status(401).json({ error: "Security Alert: Account no longer exists." });
     }
 
-    const isDoctor = authUser.isDoctor;
     const userRole = isDoctor ? 'doctor' : 'patient';
     const idCardKey = `${userRole}/${userId}/id_card.jpg`;
     
@@ -305,9 +308,6 @@ export const verifyIdentity = catchAsync(async (req: Request, res: Response) => 
         Bucket: bucketName, Key: selfieKey,
         Body: Buffer.from(selfieImage, 'base64'), ContentType: 'image/jpeg'
     }));
-
-    const targetTable = isDoctor ? CONFIG.DOCTOR_TABLE : CONFIG.DYNAMO_TABLE;
-    const primaryKeyName = isDoctor ? "doctorId" : "patientId";
 
     await dynamicDb.send(new UpdateCommand({
         TableName: targetTable,
