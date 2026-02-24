@@ -267,7 +267,7 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req) as string;
     const docClient = getRegionalClient(region);
     
-    // 🟢 GDPR FIX: AI Processing now matches the User's Legal Jurisdiction
+    // 🟢 RESTORED: Textract Client Initialization
     const regionalTextract = new TextractClient({ 
         region: region.toUpperCase() === 'EU' ? 'eu-central-1' : 'us-east-1', 
         credentials 
@@ -278,6 +278,16 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
     const authUser = (req as any).user;
 
     if (!authUser || authUser.sub !== id) return res.status(403).json({ error: "Unauthorized" });
+
+    // 🛑 SECURITY FIX: Check DB Existence First
+    const userCheck = await docClient.send(new GetCommand({
+        TableName: TABLE_DOCTORS,
+        Key: { doctorId: id }
+    }));
+
+    if (!userCheck.Item) {
+         return res.status(401).json({ error: "Security Alert: Doctor account no longer exists." });
+    }
     if (!s3Key || !bucketName) return res.status(400).json({ error: "Missing file data" });
 
     const command = new AnalyzeDocumentCommand({
@@ -295,7 +305,7 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
     try {
         const response = await regionalTextract.send(command);
 
-        const fullOcrText = response.Blocks?.filter(b => b.BlockType === 'LINE').map(b => b.Text).join(" ") || "";
+        const fullOcrText = response.Blocks?.filter((b: any) => b.BlockType === 'LINE').map((b: any) => b.Text).join(" ") || "";
         const nameMatched = fullOcrText.toLowerCase().includes(expectedName.toLowerCase().split(' ')[0]);
 
         const medicalKeywords = ["Doctor", "Medicine", "Surgeon", "Medical", "Physician", "MD", "License"];

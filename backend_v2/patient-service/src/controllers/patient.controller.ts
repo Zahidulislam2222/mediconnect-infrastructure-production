@@ -256,17 +256,27 @@ export const verifyIdentity = catchAsync(async (req: Request, res: Response) => 
     if (!authUser?.id || !selfieImage) return res.status(400).json({ error: "Missing identity data" });
 
     const userId = authUser.id;
+    const dynamicDb = getRegionalClient(region); 
+
+    // 🛑 SECURITY FIX: Check if User actually exists in DB before uploading anything
+    const userCheck = await dynamicDb.send(new GetCommand({
+        TableName: CONFIG.DYNAMO_TABLE,
+        Key: { patientId: userId }
+    }));
+
+    if (!userCheck.Item) {
+        return res.status(401).json({ error: "Security Alert: Account no longer exists." });
+    }
+
     const isDoctor = authUser.isDoctor;
     const userRole = isDoctor ? 'doctor' : 'patient';
     const idCardKey = `${userRole}/${userId}/id_card.jpg`;
     
-    // 🟢 GDPR: ID cards are auto-deleted after 24h via S3 Lifecycle tags (Patients Only)
     const fileTags = !isDoctor ? "auto-delete=true" : undefined; 
 
     const regionalS3 = getRegionalS3Client(region);
     const regionalRek = getRegionalRekognitionClient(region);
-    const dynamicDb = getRegionalClient(region);
-
+    
     const bucketName = region.toUpperCase() === 'EU' ? `${CONFIG.BUCKET_NAME}-eu` : CONFIG.BUCKET_NAME;
 
     if (idImage) {
@@ -296,7 +306,6 @@ export const verifyIdentity = catchAsync(async (req: Request, res: Response) => 
         Body: Buffer.from(selfieImage, 'base64'), ContentType: 'image/jpeg'
     }));
 
-    // Update the corresponding correct table
     const targetTable = isDoctor ? CONFIG.DOCTOR_TABLE : CONFIG.DYNAMO_TABLE;
     const primaryKeyName = isDoctor ? "doctorId" : "patientId";
 
