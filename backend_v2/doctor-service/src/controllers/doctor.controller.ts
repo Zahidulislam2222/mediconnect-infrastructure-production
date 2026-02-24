@@ -39,17 +39,27 @@ export const extractRegion = (req: Request): string => {
 export const createDoctor = catchAsync(async (req: Request, res: Response) => {
     const docClient = getRegionalClient(extractRegion(req) as string);
     
-    // 🟢 SECURITY FIX: We stop trusting req.body.userId. 
-    // We strictly use the authenticated Token ID.
     const authUser = (req as any).user;
     if (!authUser || !authUser.sub) {
         return res.status(401).json({ error: "Unauthorized: You must be logged in to create a profile." });
     }
     
-    const finalId = authUser.sub; // 🔒 Locked to the token
-    const { email, name, specialization, licenseNumber, role } = req.body;
+    const finalId = authUser.sub; 
+    // 🟢 ADDED: Extract consentDetails
+    const { email, name, specialization, licenseNumber, role, consentDetails } = req.body;
 
     if (!email) return res.status(400).json({ error: 'Missing email' });
+
+    // 🟢 GDPR & HIPAA STRICT CHECK: Explicit Consent Validation
+    if (!consentDetails || consentDetails.agreedToTerms !== true) {
+        return res.status(400).json({ error: "Legal compliance failure: Explicit consent to Terms and Privacy Policy is required." });
+    }
+
+    const verifiedConsent = {
+        ...consentDetails,
+        backendVerifiedIp: req.ip,
+        recordedAt: new Date().toISOString()
+    };
 
     const fhirResource = {
         resourceType: "Practitioner",
@@ -67,7 +77,8 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
         role: role === 'provider' ? 'doctor' : 'doctor',
         createdAt: new Date().toISOString(),
         consultationFee: 50, 
-        resource: fhirResource 
+        resource: fhirResource,
+        consent: verifiedConsent // 🟢 SAVED TO DYNAMODB
     };
 
     try {
@@ -81,12 +92,15 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
         throw e;
     }
 
-    await writeAuditLog(finalId, finalId, "CREATE_DOCTOR", "Doctor profile created", { 
-    region: extractRegion(req), 
-    ipAddress: req.ip 
-});
-logDoctorOnboarding(finalId, "SIGNUP", "UNVERIFIED", extractRegion(req)).catch(console.error);
-res.status(201).json(item);
+    // 🟢 AUDIT LOG FIX
+    await writeAuditLog(finalId, finalId, "CREATE_DOCTOR", "Doctor profile created and explicit GDPR/HIPAA consent captured", { 
+        region: extractRegion(req), 
+        ipAddress: req.ip,
+        policyVersion: consentDetails.policyVersion || "v1.0"
+    });
+    
+    logDoctorOnboarding(finalId, "SIGNUP", "UNVERIFIED", extractRegion(req)).catch(console.error);
+    res.status(201).json({ message: "Doctor profile created", profile: item });
 });
 
 export const getDoctor = catchAsync(async (req: Request, res: Response) => {

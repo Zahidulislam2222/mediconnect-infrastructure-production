@@ -69,21 +69,33 @@ export const createPatient = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req);
     const dynamicDb = getRegionalClient(region);
     
-    // 🟢 SECURITY FIX: Stop trusting req.body.userId! Hackers can spoof it.
-    // Strictly use the Verified Token ID from Cognito.
     const authUser = (req as any).user;
     if (!authUser || !authUser.id) {
         return res.status(401).json({ error: "Unauthorized: You must be logged in." });
     }
 
-    const finalId = authUser.id; // 🔒 Locked to the cryptographic token
-    const { email, name, role = 'patient', dob, gender = 'unknown', phone } = req.body;
+    const finalId = authUser.id; 
+    // 🟢 ADDED: Extract consentDetails from the frontend request
+    const { email, name, role = 'patient', dob, gender = 'unknown', phone, consentDetails } = req.body;
 
     if (!email) return res.status(400).json({ error: "Missing email" });
 
+    // 🟢 GDPR & HIPAA STRICT CHECK: Explicit Consent Validation
+    if (!consentDetails || consentDetails.agreedToTerms !== true) {
+        // Block the registration completely if consent is missing
+        await writeAuditLog(finalId, finalId, "CONSENT_FAILURE", "Failed registration: Missing explicit consent.", { region, ipAddress: req.ip });
+        return res.status(400).json({ error: "Legal compliance failure: Explicit consent to Terms and Privacy Policy is required." });
+    }
+
+    // Lock down the consent record with server-side timestamps and IPs to prevent spoofing
+    const verifiedConsent = {
+        ...consentDetails,
+        backendVerifiedIp: req.ip,
+        recordedAt: new Date().toISOString()
+    };
+
     const timestamp = new Date().toISOString();
 
-    // 🟢 FHIR Compliance: Standardized Patient Resource
     const fhirResource = {
         resourceType: "Patient",
         id: finalId,
@@ -106,7 +118,8 @@ export const createPatient = catchAsync(async (req: Request, res: Response) => {
         avatar: null,
         dob,
         resource: fhirResource,
-        region: region
+        region: region,
+        consent: verifiedConsent // 🟢 SAVED TO DYNAMODB FOREVER (Required for Audits)
     };
 
     try {
@@ -120,12 +133,14 @@ export const createPatient = catchAsync(async (req: Request, res: Response) => {
         throw e;
     }
 
-    // 🟢 HIPAA FIX: IP Address added to audit log
-    await writeAuditLog(finalId, finalId, "CREATE_PROFILE", "Patient registration completed", { 
-        region, ipAddress: req.ip 
+    // 🟢 AUDIT LOG FIX: Explicitly log that consent was given
+    await writeAuditLog(finalId, finalId, "CREATE_PROFILE", "Patient registration and explicit GDPR/HIPAA consent captured", { 
+        region, 
+        ipAddress: req.ip,
+        policyVersion: consentDetails.policyVersion || "v1.0"
     });
 
-    res.status(200).json({ message: "Patient Registration Processed", region });
+    res.status(200).json({ message: "Patient Registration Processed", region, profile: item });
 });
 
 /**

@@ -69,7 +69,8 @@ app.use(cors({
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Internal-Secret', 'X-User-ID', 'Prefer', 'If-Match', 'x-user-region']
 }));
 
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '5mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 // HIPAA Logging
 morgan.token('verified-user', (req: any) => {
