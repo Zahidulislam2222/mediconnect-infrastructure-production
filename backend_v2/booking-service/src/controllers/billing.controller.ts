@@ -21,12 +21,18 @@ export const getPatientBilling = async (req: Request, res: Response) => {
     try {
         const region = extractRegion(req);
         const regionalDb = getRegionalClient(region);
-        
-        const { patientId } = req.query;
+
+        const { patientId, startKey } = req.query;
         const authReq = req as AuthRequest;
         const requesterId = authReq.user?.sub || authReq.user?.id;
 
-        // 🛡️ HIPAA SECURITY CHECK
+        let exclusiveStartKey: any = undefined;
+        if (startKey) {
+            try {
+                exclusiveStartKey = JSON.parse(decodeURIComponent(startKey as string));
+            } catch (e) { console.error("Malformed startKey ignored"); }
+        }
+
         if (requesterId && requesterId !== patientId) {
             await writeAuditLog(requesterId, String(patientId), "UNAUTHORIZED_BILLING_ACCESS", "Blocked access to financial records", { region, ipAddress: req.ip });
             return res.status(403).json({ message: "Unauthorized access to billing records." });
@@ -37,7 +43,9 @@ export const getPatientBilling = async (req: Request, res: Response) => {
             IndexName: "PatientIndex",
             KeyConditionExpression: "patientId = :pid",
             ExpressionAttributeValues: { ":pid": patientId },
-            ScanIndexForward: false
+            ScanIndexForward: false,
+            Limit: 50, 
+            ExclusiveStartKey: exclusiveStartKey 
         });
 
         const response = await regionalDb.send(command);
@@ -47,10 +55,14 @@ export const getPatientBilling = async (req: Request, res: Response) => {
             .filter(t => t.status === 'PENDING' || t.status === 'DUE' || t.status === 'UNPAID')
             .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
 
-        // 🟢 HIPAA AUDIT LOG
         await writeAuditLog(requesterId || "SYSTEM", String(patientId), "READ_BILLING", "Viewed billing history", { region, ipAddress: req.ip });
 
-        res.status(200).json({ transactions, outstandingBalance, currency: "USD" });
+        res.status(200).json({ 
+            transactions, 
+            outstandingBalance, 
+            currency: "USD",
+            lastEvaluatedKey: response.LastEvaluatedKey 
+        });
 
     } catch (error: any) {
         res.status(500).json({ error: error.message });
@@ -140,14 +152,33 @@ export const getDoctorAnalytics = async (req: Request, res: Response) => {
         const region = extractRegion(req);
         const regionalDb = getRegionalClient(region);
 
-        const { doctorId } = req.query;
+        // 🟢 1. GET PERIOD FROM QUERY
+        const { doctorId, period = "6m" } = req.query; 
         if (!doctorId) return res.status(400).json({ error: "Missing Doctor ID" });
+
+        // 🟢 2. DYNAMIC FILTER LOGIC
+        let keyCondition = "doctorId = :did";
+        let expressionValues: any = { ":did": doctorId };
+
+        if (period !== "all") {
+            const now = new Date();
+            let monthsToSubtract = 6;
+            if (period === "3m") monthsToSubtract = 3;
+            if (period === "1y") monthsToSubtract = 12;
+
+            const cutoffDate = new Date();
+            cutoffDate.setMonth(now.getMonth() - monthsToSubtract);
+            
+            // Add date filter to the query
+            keyCondition += " AND createdAt >= :cutoff";
+            expressionValues[":cutoff"] = cutoffDate.toISOString();
+        }
 
         const command = new QueryCommand({
             TableName: TABLE_TRANSACTIONS,
             IndexName: "DoctorIndex",
-            KeyConditionExpression: "doctorId = :did",
-            ExpressionAttributeValues: { ":did": doctorId }
+            KeyConditionExpression: keyCondition, // 🟢 USE DYNAMIC CONDITION
+            ExpressionAttributeValues: expressionValues
         });
 
         const response = await regionalDb.send(command);

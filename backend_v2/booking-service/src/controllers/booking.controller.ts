@@ -261,7 +261,17 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
 export const getAppointments = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req);
     const docClient = getRegionalClient(region);
-    const { doctorId, patientId } = req.query;
+    
+    const { doctorId, patientId, startKey } = req.query;
+
+    let exclusiveStartKey: any = undefined;
+    if (startKey) {
+        try {
+            exclusiveStartKey = JSON.parse(decodeURIComponent(startKey as string));
+        } catch (e) {
+            console.error("Malformed startKey ignored");
+        }
+    }
 
     if (patientId) {
         const command = new QueryCommand({
@@ -269,10 +279,15 @@ export const getAppointments = catchAsync(async (req: Request, res: Response) =>
             IndexName: "PatientIndex",
             KeyConditionExpression: "patientId = :pid",
             ExpressionAttributeValues: { ":pid": patientId },
-            ScanIndexForward: false
+            ScanIndexForward: false,
+            Limit: 50,
+            ExclusiveStartKey: exclusiveStartKey 
         });
         const response = await docClient.send(command);
-        return res.status(200).json({ existingBookings: response.Items || [] });
+        return res.status(200).json({ 
+            existingBookings: response.Items || [],
+            lastEvaluatedKey: response.LastEvaluatedKey
+         });
     }
 
     if (doctorId) {
@@ -281,9 +296,15 @@ export const getAppointments = catchAsync(async (req: Request, res: Response) =>
             IndexName: "DoctorIndex",
             KeyConditionExpression: "doctorId = :did",
             ExpressionAttributeValues: { ":did": doctorId },
+            ScanIndexForward: false, 
+            Limit: 50,               
+            ExclusiveStartKey: exclusiveStartKey 
         });
         const bookingRes = await docClient.send(bookingCommand);
-        return res.status(200).json({ existingBookings: bookingRes.Items || [] });
+        return res.status(200).json({ 
+            existingBookings: bookingRes.Items || [],
+            lastEvaluatedKey: bookingRes.LastEvaluatedKey 
+        });
     }
 
     res.status(400).json({ error: "Missing doctorId or patientId" });
@@ -301,12 +322,14 @@ export const cleanupAppointments = catchAsync(async (req: Request, res: Response
         return res.status(403).json({ error: "Unauthorized" });
     }
 
-    const scanRes = await docClient.send(new ScanCommand({
-        TableName: TABLE_APPOINTMENTS,
-        FilterExpression: "#s = :confirmed",
-        ExpressionAttributeNames: { "#s": "status" },
-        ExpressionAttributeValues: { ":confirmed": "CONFIRMED" }
-    }));
+    const scanRes = await docClient.send(new QueryCommand({
+    TableName: TABLE_APPOINTMENTS,
+    IndexName: "StatusIndex", 
+    KeyConditionExpression: "#s = :confirmed", 
+    ExpressionAttributeNames: { "#s": "status" },
+    ExpressionAttributeValues: { ":confirmed": "CONFIRMED" },
+    Limit: 100 
+}));
 
     const appointments = scanRes.Items || [];
     const now = new Date();

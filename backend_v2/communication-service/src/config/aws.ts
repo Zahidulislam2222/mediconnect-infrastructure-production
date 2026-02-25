@@ -48,10 +48,9 @@ export const getRegionalKMSClient = (region: string = "us-east-1") => {
 export const COGNITO_CONFIG: any = {
     US: {
         REGION: 'us-east-1',
-        // 🟢 FIX: 'get' properties ensure the app reads the secrets AFTER the vault syncs
         get USER_POOL_ID() { return process.env.COGNITO_USER_POOL_ID_US || process.env.COGNITO_USER_POOL_ID || '' },
         get CLIENT_PATIENT() { return process.env.COGNITO_CLIENT_ID_US_PATIENT || process.env.COGNITO_CLIENT_ID || '' },
-        get CLIENT_DOCTOR() { return process.env.COGNITO_CLIENT_ID_US_DOCTOR || '' }
+        get CLIENT_DOCTOR() { return process.env.COGNITO_CLIENT_ID_US_DOCTOR || process.env.COGNITO_CLIENT_ID || '' }
     },
     EU: {
         REGION: 'eu-central-1',

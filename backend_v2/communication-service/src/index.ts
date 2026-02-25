@@ -87,33 +87,55 @@ async function loadSecrets() {
     const ssm = getRegionalSSMClient(region);
 
     try {
-        console.log(`🔐 Synchronizing Communication secrets with AWS Vault [${region}]...`);
+        console.log(`🔐 Synchronizing Booking secrets with AWS Vault [${region}]...`);
         const command = new GetParametersCommand({
             Names: [
+                // US Identity
                 '/mediconnect/prod/cognito/user_pool_id',
-                '/mediconnect/prod/cognito/client_id',
-                '/mediconnect/prod/cognito/user_pool_id_eu',
+                '/mediconnect/prod/cognito/client_id_patient',
                 '/mediconnect/prod/cognito/client_id_doctor',
-                '/mediconnect/prod/cognito/client_id_eu_doctor'
+                '/mediconnect/prod/cognito/client_id', 
+                
+                // EU Identity (MISSING IN YOUR OLD CODE)
+                '/mediconnect/prod/cognito/user_pool_id_eu',
+                '/mediconnect/prod/cognito/client_id_eu_patient',
+                '/mediconnect/prod/cognito/client_id_eu_doctor',
+
+                // Stripe
+                '/mediconnect/stripe/keys',      
+                '/mediconnect/stripe/webhook_secret'
             ],
             WithDecryption: true
         });
 
         const { Parameters } = await ssm.send(command);
 
-        if (!Parameters || Parameters.length === 0) throw new Error("No secrets found in Parameter Store.");
+        if (!Parameters || Parameters.length === 0) throw new Error("No secrets found.");
 
         Parameters.forEach(p => {
-            if (p.Name?.endsWith('/user_pool_id')) process.env.COGNITO_USER_POOL_ID = p.Value;
+            // US MAPPING
+            if (p.Name?.endsWith('/user_pool_id')) process.env.COGNITO_USER_POOL_ID_US = p.Value;
             if (p.Name?.endsWith('/client_id')) process.env.COGNITO_CLIENT_ID = p.Value;
-            if (p.Name?.endsWith('/user_pool_id_eu')) process.env.COGNITO_USER_POOL_ID_EU = p.Value;
-            if (p.Name?.endsWith('/client_id_doctor')) process.env.COGNITO_CLIENT_ID_DOCTOR = p.Value;
-            if (p.Name?.endsWith('/client_id_eu_doctor')) process.env.COGNITO_CLIENT_ID_EU_DOCTOR = p.Value;
+            if (p.Name?.endsWith('/client_id_patient')) process.env.COGNITO_CLIENT_ID_US_PATIENT = p.Value;
+            if (p.Name?.endsWith('/client_id_doctor')) process.env.COGNITO_CLIENT_ID_US_DOCTOR = p.Value;
+
+            // EU MAPPING
+            if (p.Name?.includes('user_pool_id_eu')) process.env.COGNITO_USER_POOL_ID_EU = p.Value;
+            if (p.Name?.includes('client_id_eu_patient')) process.env.COGNITO_CLIENT_ID_EU_PATIENT = p.Value;
+            if (p.Name?.includes('client_id_eu_doctor')) process.env.COGNITO_CLIENT_ID_EU_DOCTOR = p.Value;
+
+            // STRIPE
+            if (p.Name?.includes('stripe/keys')) process.env.STRIPE_SECRET_KEY = p.Value;
+            if (p.Name?.includes('webhook_secret')) process.env.STRIPE_WEBHOOK_SECRET = p.Value;
         });
+
+        // 🟢 CRITICAL FALLBACKS (Fixes the 503 Crash)
+        if (!process.env.COGNITO_CLIENT_ID_US_PATIENT) process.env.COGNITO_CLIENT_ID_US_PATIENT = process.env.COGNITO_CLIENT_ID;
+        if (!process.env.COGNITO_CLIENT_ID_US_DOCTOR) process.env.COGNITO_CLIENT_ID_US_DOCTOR = process.env.COGNITO_CLIENT_ID;
 
         console.log("✅ AWS Vault Sync Complete.");
     } catch (e: any) {
-        console.error(`❌ FATAL: Vault Sync Failed. System cannot start securely.`, e.message);
+        console.error(`❌ FATAL: Vault Sync Failed.`, e.message);
         process.exit(1);
     }
 }

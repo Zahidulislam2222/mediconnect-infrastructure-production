@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import Stripe from 'stripe';
 import { getRegionalClient, getSSMParameter } from '../config/aws';
-import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { TransactWriteCommand, GetCommand } from "@aws-sdk/lib-dynamodb";
 
 const STRIPE_SECRET_NAME = "/mediconnect/stripe/keys";
 const STRIPE_WEBHOOK_SECRET_NAME = "/mediconnect/stripe/webhook_secret";
@@ -57,6 +57,20 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
     if (!billId) {
         console.warn("Skipping Webhook: Missing 'billId' in metadata.");
         return;
+    }
+
+    try {
+        const existingTx = await regionalDb.send(new GetCommand({
+            TableName: TABLE_TRANSACTIONS,
+            Key: { billId }
+        }));
+
+        if (existingTx.Item && existingTx.Item.status === 'PAID') {
+            console.log(`⚠️ Idempotency Check: Transaction ${billId} is already PAID. Skipping.`);
+            return; // STOP EXECUTION HERE
+        }
+    } catch (err) {
+        console.warn("Idempotency check failed, proceeding cautiously...", err);
     }
 
     const timestamp = new Date().toISOString();
