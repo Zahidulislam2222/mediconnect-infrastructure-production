@@ -95,9 +95,14 @@ async function loadSecrets() {
             WithDecryption: true
         });
         const cmd2 = new GetParametersCommand({
-            Names: [
+            Names:[
                 '/mediconnect/prod/db/doctor_table',
-                '/mediconnect/prod/kms/signing_key_id'
+                '/mediconnect/prod/kms/signing_key_id',
+                '/mediconnect/prod/sns/topic_arn_us', 
+                '/mediconnect/prod/sns/topic_arn_eu',  
+                '/mediconnect/prod/google/client_id',   
+                '/mediconnect/prod/google/client_secret',  
+                '/mediconnect/prod/google/redirect_uri'     
             ],
             WithDecryption: true
         });

@@ -82,16 +82,30 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
     // 1. Data Enrichment (Age, Avatar)
     let patientAge = "N/A";
     let patientAvatar: string | null = null;
-    try {
-        const patientRes = await docClient.send(new GetCommand({ TableName: TABLE_PATIENTS, Key: { patientId } }));
-        if (patientRes.Item) {
-            patientAvatar = patientRes.Item.avatar || null;
-            if (patientRes.Item.dob) {
-                const dob = new Date(patientRes.Item.dob);
-                patientAge = Math.abs(new Date(Date.now() - dob.getTime()).getUTCFullYear() - 1970).toString();
-            }
-        }
-    } catch (e) { console.warn("Enrichment failed", e); }
+    let amountToCharge = 5000; 
+
+    // 1. STRICT EXISTENCE & REGION CHECK
+    const [patientRes, doctorRes] = await Promise.all([
+        docClient.send(new GetCommand({ TableName: TABLE_PATIENTS, Key: { patientId } })),
+        docClient.send(new GetCommand({ TableName: TABLE_DOCTORS, Key: { doctorId } }))
+    ]);
+
+    if (!patientRes.Item || patientRes.Item.status === 'DELETED') {
+        return res.status(401).json({ message: "Patient account invalid or deleted. Booking aborted." });
+    }
+    if (!doctorRes.Item || doctorRes.Item.verificationStatus === 'DELETED') {
+        return res.status(404).json({ message: "Doctor not found in your region or no longer available." });
+    }
+
+    // Safely extract data
+    patientAvatar = patientRes.Item.avatar || null;
+    if (patientRes.Item.dob) {
+        const dob = new Date(patientRes.Item.dob);
+        patientAge = Math.abs(new Date(Date.now() - dob.getTime()).getUTCFullYear() - 1970).toString();
+    }
+    if (doctorRes.Item.consultationFee) {
+        amountToCharge = Math.round(Number(doctorRes.Item.consultationFee) * 100);
+    }
 
     // 2. Atomic Locking (Condition: attribute_not_exists)
     try {
@@ -112,20 +126,6 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         }
         throw e;
     }
-
-    // 3. Payment Processing
-    let amountToCharge = 5000; // Default $50.00 (in cents)
-
-    // 🟢 SECURE PRICING LOGIC (DynamoDB instead of Postgres)
-    try {
-        const doctorRes = await docClient.send(new GetCommand({ TableName: TABLE_DOCTORS, Key: { doctorId } }));
-        if (doctorRes.Item && doctorRes.Item.consultationFee) {
-            amountToCharge = Math.round(Number(doctorRes.Item.consultationFee) * 100);
-            console.log(`✅ Dynamic Price Found: $${doctorRes.Item.consultationFee} -> ${amountToCharge} cents`);
-        }
-    } catch (dbError) {
-        console.warn("⚠️ Could not fetch dynamic price from DynamoDB, using default $50", dbError);
-    } 
 
     const stripeKey = await getSSMParameter(STRIPE_SECRET_NAME, region, true);
     if (!stripeKey) throw new Error("Stripe secret not found");

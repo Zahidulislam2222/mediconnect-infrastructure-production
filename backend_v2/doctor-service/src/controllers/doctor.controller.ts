@@ -1,10 +1,14 @@
+// C:\Dev\mediconnect-project\mediconnect-infrastructure-develop\backend_v2\doctor-service\src\controllers\doctor.controller.ts
+
 import { NextFunction, Request, Response } from 'express';
 import { generatePresignedUrl } from '../utils/s3';
+import { GetObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { TextractClient, AnalyzeDocumentCommand } from "@aws-sdk/client-textract";
 import { SNSClient, PublishCommand } from "@aws-sdk/client-sns";
 import { google } from 'googleapis';
 import { PutCommand, GetCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
-import { getRegionalClient, getSSMParameter } from '../config/aws';
+import { getRegionalClient, getRegionalS3Client, getSSMParameter } from '../config/aws';
 import { writeAuditLog } from '../../../shared/audit';
 import jwt from 'jsonwebtoken';
 
@@ -15,25 +19,36 @@ const credentials = {
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || ''
 };
 
-const oauth2Client = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET,
-    process.env.GOOGLE_REDIRECT_URI
-);
-
 // Helper to handle async errors
 const catchAsync = (fn: any) => (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(fn(req, res, next)).catch(next);
 };
 
-// 🟢 COMPILER FIX: Safely parse headers
 export const extractRegion = (req: Request): string => {
     const rawRegion = req.headers['x-user-region'];
     return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
 };
 
+async function signAvatarUrl(avatarKey: string | null, region: string): Promise<string | null> {
+    if (!avatarKey) return null;
+    if (avatarKey.startsWith('http')) return avatarKey;
+
+    try {
+        const regionalS3 = getRegionalS3Client(region);
+        const bucketName = region.toUpperCase() === 'EU' 
+            ? 'mediconnect-identity-verification-eu' 
+            : 'mediconnect-identity-verification';
+            
+        const command = new GetObjectCommand({ Bucket: bucketName, Key: avatarKey });
+        return await getSignedUrl(regionalS3, command, { expiresIn: 900 });
+    } catch (e) {
+        console.error(`[Avatar Sign Error]`, e);
+        return null;
+    }
+}
+
 // =============================================================================
-// 1. PROFILE MANAGEMENT (DYNAMODB MIGRATED)
+// 1. PROFILE MANAGEMENT
 // =============================================================================
 
 export const createDoctor = catchAsync(async (req: Request, res: Response) => {
@@ -45,12 +60,10 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
     }
     
     const finalId = authUser.sub; 
-    // 🟢 ADDED: Extract consentDetails
     const { email, name, specialization, licenseNumber, role, consentDetails } = req.body;
 
     if (!email) return res.status(400).json({ error: 'Missing email' });
 
-    // 🟢 GDPR & HIPAA STRICT CHECK: Explicit Consent Validation
     if (!consentDetails || consentDetails.agreedToTerms !== true) {
         return res.status(400).json({ error: "Legal compliance failure: Explicit consent to Terms and Privacy Policy is required." });
     }
@@ -66,7 +79,7 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
         id: finalId,
         active: true,
         name: [{ text: name }],
-        qualification: [{ code: { text: specialization || 'General Practice' } }]
+        qualification:[{ code: { text: specialization || 'General Practice' } }]
     };
 
     const item = {
@@ -99,7 +112,6 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
         throw e;
     }
 
-    // 🟢 AUDIT LOG FIX
     await writeAuditLog(finalId, finalId, "CREATE_DOCTOR", "Doctor profile created and explicit GDPR/HIPAA consent captured", { 
         region: extractRegion(req), 
         ipAddress: req.ip,
@@ -126,17 +138,14 @@ export const getDoctor = catchAsync(async (req: Request, res: Response) => {
 
     const doctor = result.Item;
 
-    if (doctor.avatar && !doctor.avatar.startsWith('http')) {
-        // 🟢 GDPR FIX: Ensure presigned URLs point to the correct regional bucket
-        const bucket = region.toUpperCase() === 'EU' ? 'mediconnect-identity-verification-eu' : 'mediconnect-identity-verification';
-        doctor.avatar = await generatePresignedUrl(bucket, doctor.avatar);
-    }
+    doctor.avatar = await signAvatarUrl(doctor.avatar, region);
 
     await writeAuditLog((req as any).user?.sub || "SYSTEM", String(id), "READ_DOCTOR", "Profile viewed", { 
-    region: region, 
-    ipAddress: req.ip 
-});
-res.status(200).json(doctor);
+        region: region, 
+        ipAddress: req.ip 
+    });
+    
+    res.status(200).json(doctor);
 });
 
 export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
@@ -152,10 +161,11 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
         return res.status(403).json({ error: "HIPAA Violation: Unauthorized." });
     }
 
-    const parts: string[] = [];
+    const parts: string[] =[];
     const names: any = {};
     const values: any = {};
-    const allowed = ['name', 'specialization', 'bio', 'avatar', 'consultationFee', 'isEmailVerified'];
+    
+    const allowed =['name', 'specialization', 'bio', 'avatar', 'isEmailVerified'];
 
     Object.keys(updates).forEach(key => {
         if (allowed.includes(key) || key === 'schedule') {
@@ -167,7 +177,6 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
 
     if (parts.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 
-    // 🟢 FHIR R4 FIX: Synchronize Flat DB Fields with the FHIR JSON Object
     if (updates.name) {
         parts.push("resource.name[0].text = :fhirName");
         values[":fhirName"] = updates.name;
@@ -190,16 +199,16 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
     }));
 
     await writeAuditLog(authUser.sub, id, "UPDATE_DOCTOR", "Profile updated", { 
-    region: extractRegion(req), 
-    ipAddress: req.ip 
-});
-res.status(200).json({ message: "Doctor profile updated", attributes: response.Attributes });
+        region: extractRegion(req), 
+        ipAddress: req.ip 
+    });
+    res.status(200).json({ message: "Doctor profile updated", attributes: response.Attributes });
 });
 
 export const getDoctors = catchAsync(async (req: Request, res: Response) => {
-    const docClient = getRegionalClient(extractRegion(req) as string);
+    const region = extractRegion(req) as string;
+    const docClient = getRegionalClient(region);
     
-    // 🟢 HIPAA FIX: Filter out unverified doctors so patients don't see them
     const response = await docClient.send(new ScanCommand({ 
         TableName: TABLE_DOCTORS,
         FilterExpression: "verificationStatus <> :unverified AND verificationStatus <> :rejected",
@@ -209,17 +218,16 @@ export const getDoctors = catchAsync(async (req: Request, res: Response) => {
         }
     }));
 
-    // 🟢 DATA MINIMIZATION: Sanitize the output (Don't leak private keys or PII in a public list)
-    const safeDoctors = (response.Items || []).map((doc: any) => ({
+    const safeDoctors = await Promise.all((response.Items ||[]).map(async (doc: any) => ({
         doctorId: doc.doctorId,
         name: doc.name,
         specialization: doc.specialization,
-        avatar: doc.avatar,
+        avatar: await signAvatarUrl(doc.avatar, region), // Signed URL
         bio: doc.bio,
         consultationFee: doc.consultationFee,
         verificationStatus: doc.verificationStatus,
-        schedule: doc.schedule // Needed for booking
-    }));
+        schedule: doc.schedule 
+    })));
 
     res.status(200).json({ doctors: safeDoctors });
 });
@@ -235,7 +243,8 @@ export const getSchedule = catchAsync(async (req: Request, res: Response) => {
     const result = await docClient.send(new GetCommand({
         TableName: TABLE_DOCTORS,
         Key: { doctorId: id },
-        ProjectionExpression: "schedule, timezone"
+        ProjectionExpression: "schedule, #tz",
+        ExpressionAttributeNames: { "#tz": "timezone" }
     }));
 
     if (!result.Item) return res.status(404).json({ error: 'Doctor not found' });
@@ -253,7 +262,8 @@ export const updateSchedule = catchAsync(async (req: Request, res: Response) => 
 
     await docClient.send(new UpdateCommand({
         TableName: TABLE_DOCTORS, Key: { doctorId: id },
-        UpdateExpression: "SET schedule = :s, timezone = :t",
+        UpdateExpression: "SET schedule = :s, #tz = :t",
+        ExpressionAttributeNames: { "#tz": "timezone" },
         ExpressionAttributeValues: { ":s": schedule, ":t": timezone || 'UTC' },
         ReturnValues: "UPDATED_NEW"
     }));
@@ -269,7 +279,6 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req) as string;
     const docClient = getRegionalClient(region);
     
-    // 🟢 RESTORED: Textract Client Initialization
     const regionalTextract = new TextractClient({ 
         region: region.toUpperCase() === 'EU' ? 'eu-central-1' : 'us-east-1', 
         credentials 
@@ -281,7 +290,6 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
 
     if (!authUser || authUser.sub !== id) return res.status(403).json({ error: "Unauthorized" });
 
-    // 🛑 SECURITY FIX: Check DB Existence First
     const userCheck = await docClient.send(new GetCommand({
         TableName: TABLE_DOCTORS,
         Key: { doctorId: id }
@@ -296,7 +304,7 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
         Document: { S3Object: { Bucket: bucketName, Name: s3Key } },
         FeatureTypes: ["QUERIES"],
         QueriesConfig: {
-            Queries: [
+            Queries:[
                 { Text: "What is the full name of the graduate or person on this document?", Alias: "GRADUATE_NAME" },
                 { Text: "What is the name of the medical school or institution?", Alias: "INSTITUTION" },
                 { Text: "What is the degree type or license number?", Alias: "DEGREE" }
@@ -310,7 +318,7 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
         const fullOcrText = response.Blocks?.filter((b: any) => b.BlockType === 'LINE').map((b: any) => b.Text).join(" ") || "";
         const nameMatched = fullOcrText.toLowerCase().includes(expectedName.toLowerCase().split(' ')[0]);
 
-        const medicalKeywords = ["Doctor", "Medicine", "Surgeon", "Medical", "Physician", "MD", "License"];
+        const medicalKeywords =["Doctor", "Medicine", "Surgeon", "Medical", "Physician", "MD", "License"];
         const hasMedicalContext = medicalKeywords.some(k => fullOcrText.includes(k));
 
         const isLegit = nameMatched && hasMedicalContext;
@@ -329,13 +337,16 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
         }));
 
         if (isLegit) {
-            // 🟢 HIPAA FIX: Masked PII in SNS Ops Alerts
             const maskedId = `${String(id).substring(0, 4)}****`;
             const regionalSns = new SNSClient({ region: region.toUpperCase() === 'EU' ? 'eu-central-1' : 'us-east-1', credentials });
             logDoctorOnboarding(id, "AI_VERIFICATION", "PENDING_OFFICER_APPROVAL", region).catch(console.error);
             
+            const topicArn = region.toUpperCase() === 'EU' 
+                ? process.env.SNS_TOPIC_ARN_EU 
+                : process.env.SNS_TOPIC_ARN_US;
+            
             await regionalSns.send(new PublishCommand({
-                TopicArn: process.env.SNS_TOPIC_ARN || "arn:aws:sns:us-east-1:950110266426:mediconnect-ops-alerts",
+                TopicArn: topicArn,
                 Message: `STRICT VERIFICATION: A Doctor (ID: ${maskedId}) uploaded a diploma. AI Confidence: HIGH. Awaiting human officer approval.`,
                 Subject: "Doctor Credential Alert"
             }));
@@ -365,6 +376,13 @@ export const connectGoogleCalendar = catchAsync(async (req: Request, res: Respon
     const { id } = req.query; 
     const secret = process.env.GOOGLE_CLIENT_SECRET || 'fallback_secret';
     const secureState = jwt.sign({ doctorId: id }, secret, { expiresIn: '15m' });
+    
+    const oauth2Client = new google.auth.OAuth2(
+        process.env.GOOGLE_CLIENT_ID,
+        process.env.GOOGLE_CLIENT_SECRET,
+        process.env.GOOGLE_REDIRECT_URI
+    );
+    
     const url = oauth2Client.generateAuthUrl({ access_type: 'offline', scope: ['https://www.googleapis.com/auth/calendar'], state: secureState });
     res.json({ url });
 });
@@ -382,6 +400,12 @@ export const googleCallback = catchAsync(async (req: Request, res: Response) => 
         targetDoctorId = decoded.doctorId;
     } catch (err) { return res.status(403).json({ error: "Security Violation: Invalid state." }); }
 
+    const oauth2Client = new google.auth.OAuth2(
+        process.env.GOOGLE_CLIENT_ID,
+        process.env.GOOGLE_CLIENT_SECRET,
+        process.env.GOOGLE_REDIRECT_URI
+    );
+    
     const { tokens } = await oauth2Client.getToken(code as string);
 
     if (tokens.refresh_token) {
@@ -405,7 +429,7 @@ export const disconnectGoogleCalendar = catchAsync(async (req: Request, res: Res
 });
 
 // =============================================================================
-// 5. GDPR RIGHT TO ERASURE
+// 5. GDPR RIGHT TO ERASURE & UTILS
 // =============================================================================
 
 export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
@@ -423,13 +447,12 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
     }));
 
     await writeAuditLog(authUser.sub, id, "DELETE_PROFILE", "Account anonymized per GDPR Right to be Forgotten", { 
-    region: extractRegion(req), 
-    ipAddress: req.ip 
-});
-res.status(200).json({ message: "Profile successfully anonymized/deleted." });
+        region: extractRegion(req), 
+        ipAddress: req.ip 
+    });
+    res.status(200).json({ message: "Profile successfully anonymized/deleted." });
 });
 
-// 🟢 GDPR FIX: Track doctor onboarding progress
 const logDoctorOnboarding = async (doctorId: string, eventType: string, status: string, region: string) => {
     try {
         const saKey = await getSSMParameter("/mediconnect/prod/gcp/service-account", region, true);
@@ -442,7 +465,7 @@ const logDoctorOnboarding = async (doctorId: string, eventType: string, status: 
         await fetch(url, {
             method: "POST",
             body: JSON.stringify({
-                rows: [{
+                rows:[{
                     json: {
                         doctor_id: doctorId,
                         event_type: eventType,
@@ -455,14 +478,12 @@ const logDoctorOnboarding = async (doctorId: string, eventType: string, status: 
     } catch (e) { console.error("BigQuery Onboarding Log Failed"); }
 };
 
-// 🟢 NEW: Admin-only Human Approval Route (HIPAA Board-Certified Logic)
 export const approveDoctorByOfficer = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req);
     const docClient = getRegionalClient(region);
     const { id } = req.params; 
     const authUser = (req as any).user;
 
-    // 🛡️ SECURITY: Verify the requester is not the doctor themselves
     if (authUser.sub === id) {
         return res.status(403).json({ error: "Conflict of Interest: Doctors cannot approve their own credentials." });
     }
@@ -470,7 +491,6 @@ export const approveDoctorByOfficer = catchAsync(async (req: Request, res: Respo
     await docClient.send(new UpdateCommand({
         TableName: TABLE_DOCTORS,
         Key: { doctorId: id },
-        // 🟢 Update human flag, status, and FHIR resource activity
         UpdateExpression: "SET isOfficerApproved = :t, verificationStatus = :s, #res.active = :t",
         ExpressionAttributeNames: { "#res": "resource" },
         ExpressionAttributeValues: { 
@@ -479,7 +499,6 @@ export const approveDoctorByOfficer = catchAsync(async (req: Request, res: Respo
         }
     }));
 
-    // 🟢 HIPAA AUDIT: Crucial to prove WHO approved this doctor
     await writeAuditLog(authUser.sub, id, "OFFICER_APPROVAL", "Human Medical Officer manually verified AI data and diploma", { 
         region, 
         ipAddress: req.ip 
@@ -487,3 +506,50 @@ export const approveDoctorByOfficer = catchAsync(async (req: Request, res: Respo
 
     res.json({ message: "Doctor officially board-certified and approved for practice." });
 });
+
+export async function syncToGoogleCalendar(doctorId: string, timeSlot: string, patientName: string, reason: string, region: string) {
+    try {
+        const docClient = getRegionalClient(region);
+        
+        const res = await docClient.send(new GetCommand({ 
+            TableName: TABLE_DOCTORS, 
+            Key: { doctorId },
+            ProjectionExpression: "googleRefreshToken"
+        }));
+        
+        const refreshToken = res.Item?.googleRefreshToken;
+
+        if (!refreshToken) {
+            console.log(`[Calendar] No Google Token found for doctor ${doctorId}`);
+            return;
+        }
+
+        // 🟢 FIX: Instantiate locally
+        const oauth2Client = new google.auth.OAuth2(
+            process.env.GOOGLE_CLIENT_ID,
+            process.env.GOOGLE_CLIENT_SECRET,
+            process.env.GOOGLE_REDIRECT_URI
+        );
+        oauth2Client.setCredentials({ refresh_token: refreshToken });
+        const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+
+        const startTime = new Date(timeSlot);
+        const endTime = new Date(startTime.getTime() + 30 * 60000); 
+
+        await calendar.events.insert({
+            calendarId: 'primary',
+            requestBody: {
+                summary: `Consultation: ${patientName}`,
+                description: `Reason: ${reason}\n\nManaged by MediConnect`,
+                start: { dateTime: startTime.toISOString() },
+                end: { dateTime: endTime.toISOString() },
+                reminders: { useDefault: false, overrides: [{ method: 'popup', minutes: 10 }] }
+            }
+        });
+
+        console.log(`[Calendar] Event created for ${doctorId}`);
+
+    } catch (error: any) {
+        console.error("[Calendar Sync Failed]:", error.message);
+    }
+}
