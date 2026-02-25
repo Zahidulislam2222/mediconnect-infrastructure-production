@@ -84,33 +84,58 @@ async function loadSecrets() {
     const ssm = getRegionalSSMClient(region);
 
     try {
-        console.log(`🔐 Synchronizing Booking secrets with AWS Vault [${region}]...`);
-        const command = new GetParametersCommand({
+        console.log(`🔐 Synchronizing secrets with AWS Vault [${region}]...`);
+
+        // 🟢 BATCH 1: Identity (Strictly matching your screenshot names)
+        const cmd1 = new GetParametersCommand({
             Names: [
                 '/mediconnect/prod/cognito/user_pool_id',
-                '/mediconnect/prod/cognito/client_id',
+                '/mediconnect/prod/cognito/client_id_patient',
+                '/mediconnect/prod/cognito/client_id_doctor',
                 '/mediconnect/prod/cognito/user_pool_id_eu',
-                '/mediconnect/stripe/keys',      
+                '/mediconnect/prod/cognito/client_id_eu_patient',
+                '/mediconnect/prod/cognito/client_id_eu_doctor'
+            ],
+            WithDecryption: true
+        });
+
+        // 🟢 BATCH 2: Infrastructure & Stripe
+        const cmd2 = new GetParametersCommand({
+            Names: [
+                '/mediconnect/prod/db/dynamo_table',
+                '/mediconnect/prod/kms/signing_key_id',
+                '/mediconnect/stripe/keys',
                 '/mediconnect/stripe/webhook_secret'
             ],
             WithDecryption: true
         });
 
-        const { Parameters } = await ssm.send(command);
+        const [res1, res2] = await Promise.all([ssm.send(cmd1), ssm.send(cmd2)]);
+        const allParams = [...(res1.Parameters || []), ...(res2.Parameters || [])];
 
-        if (!Parameters || Parameters.length === 0) throw new Error("No secrets found in Parameter Store.");
+        if (allParams.length === 0) throw new Error("Vault is empty.");
 
-        Parameters.forEach(p => {
-            if (p.Name?.includes('user_pool_id') && !p.Name.includes('_eu')) process.env.COGNITO_USER_POOL_ID = p.Value;
-            if (p.Name?.includes('client_id')) process.env.COGNITO_CLIENT_ID = p.Value;
-            if (p.Name?.includes('user_pool_id_eu')) process.env.COGNITO_USER_POOL_ID_EU = p.Value;
-            if (p.Name?.includes('stripe/keys')) process.env.STRIPE_SECRET_KEY = p.Value;
-            if (p.Name?.includes('webhook_secret')) process.env.STRIPE_WEBHOOK_SECRET = p.Value;
+        allParams.forEach(p => {
+            // US Identity Mapping
+            if (p.Name === '/mediconnect/prod/cognito/user_pool_id') process.env.COGNITO_USER_POOL_ID_US = p.Value;
+            if (p.Name === '/mediconnect/prod/cognito/client_id_patient') process.env.COGNITO_CLIENT_ID_US_PATIENT = p.Value;
+            if (p.Name === '/mediconnect/prod/cognito/client_id_doctor') process.env.COGNITO_CLIENT_ID_US_DOCTOR = p.Value;
+
+            // EU Identity Mapping
+            if (p.Name === '/mediconnect/prod/cognito/user_pool_id_eu') process.env.COGNITO_USER_POOL_ID_EU = p.Value;
+            if (p.Name === '/mediconnect/prod/cognito/client_id_eu_patient') process.env.COGNITO_CLIENT_ID_EU_PATIENT = p.Value;
+            if (p.Name === '/mediconnect/prod/cognito/client_id_eu_doctor') process.env.COGNITO_CLIENT_ID_EU_DOCTOR = p.Value;
+
+            // Global/Stripe
+            if (p.Name === '/mediconnect/prod/db/dynamo_table') process.env.DYNAMO_TABLE = p.Value;
+            if (p.Name === '/mediconnect/prod/kms/signing_key_id') process.env.KMS_KEY_ID = p.Value;
+            if (p.Name === '/mediconnect/stripe/keys') process.env.STRIPE_SECRET_KEY = p.Value;
+            if (p.Name === '/mediconnect/stripe/webhook_secret') process.env.STRIPE_WEBHOOK_SECRET = p.Value;
         });
 
-        console.log("✅ AWS Vault Sync Complete.");
+        console.log("✅ AWS Vault Sync Complete. Identity and Stripe Keys mapped.");
     } catch (e: any) {
-        console.error(`❌ FATAL: Vault Sync Failed. System cannot start securely.`, e.message);
+        console.error(`❌ FATAL: Vault Sync Failed.`, e.message);
         process.exit(1);
     }
 }

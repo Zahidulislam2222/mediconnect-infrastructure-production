@@ -48,8 +48,7 @@ export const getRegionalKMSClient = (region: string = "us-east-1") => {
 export const COGNITO_CONFIG: any = {
     US: {
         REGION: 'us-east-1',
-        // 🟢 THE FIX: 'get' forces the app to read these values AFTER loadSecrets() finishes
-        get USER_POOL_ID() { return process.env.COGNITO_USER_POOL_ID_US || process.env.COGNITO_USER_POOL_ID || '' },
+        get USER_POOL_ID() { return process.env.COGNITO_USER_POOL_ID_US || '' },
         get CLIENT_PATIENT() { return process.env.COGNITO_CLIENT_ID_US_PATIENT || '' },
         get CLIENT_DOCTOR() { return process.env.COGNITO_CLIENT_ID_US_DOCTOR || '' }
     },
