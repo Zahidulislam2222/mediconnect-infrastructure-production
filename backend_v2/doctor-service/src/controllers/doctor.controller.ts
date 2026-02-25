@@ -155,17 +155,12 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
     const authUser = (req as any).user;
 
     if (!id) return res.status(400).json({ error: 'Missing ID' });
-
-    if (!authUser || authUser.sub !== id) {
-        await writeAuditLog(authUser?.sub || "UNKNOWN", id, "UNAUTHORIZED_UPDATE_ATTEMPT", "Blocked attempt to modify another doctor.");
-        return res.status(403).json({ error: "HIPAA Violation: Unauthorized." });
-    }
+    if (!authUser || authUser.sub !== id) return res.status(403).json({ error: "HIPAA Violation: Unauthorized." });
 
     const parts: string[] =[];
     const names: any = {};
     const values: any = {};
-    
-    const allowed =['name', 'specialization', 'bio', 'avatar', 'isEmailVerified'];
+    const allowed = ['name', 'specialization', 'bio', 'avatar', 'isEmailVerified'];
 
     Object.keys(updates).forEach(key => {
         if (allowed.includes(key) || key === 'schedule') {
@@ -177,16 +172,26 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
 
     if (parts.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 
+    // 🟢 DYNAMODB RESERVED WORD FIX (Escaping 'name' and 'text')
     if (updates.name) {
-        parts.push("resource.name[0].text = :fhirName");
+        parts.push("#res.#nm[0].#txt = :fhirName");
+        names["#res"] = "resource";
+        names["#nm"] = "name";
+        names["#txt"] = "text";
         values[":fhirName"] = updates.name;
     }
     if (updates.specialization) {
-        parts.push("resource.qualification[0].code.text = :fhirSpec");
+        parts.push("#res.#qual[0].#cd.#txt = :fhirSpec");
+        names["#res"] = "resource";
+        names["#qual"] = "qualification";
+        names["#cd"] = "code";
+        names["#txt"] = "text";
         values[":fhirSpec"] = updates.specialization;
     }
 
-    parts.push("resource.meta.lastUpdated = :now");
+    parts.push("#res.#meta.#lu = :now");
+    names["#meta"] = "meta";
+    names["#lu"] = "lastUpdated";
     values[":now"] = new Date().toISOString();
 
     const response = await docClient.send(new UpdateCommand({
@@ -198,10 +203,7 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
         ReturnValues: "ALL_NEW"
     }));
 
-    await writeAuditLog(authUser.sub, id, "UPDATE_DOCTOR", "Profile updated", { 
-        region: extractRegion(req), 
-        ipAddress: req.ip 
-    });
+    await writeAuditLog(authUser.sub, id, "UPDATE_DOCTOR", "Profile updated", { region: extractRegion(req), ipAddress: req.ip });
     res.status(200).json({ message: "Doctor profile updated", attributes: response.Attributes });
 });
 
@@ -240,11 +242,12 @@ export const getSchedule = catchAsync(async (req: Request, res: Response) => {
     const docClient = getRegionalClient(extractRegion(req) as string);
     const { id } = req.params;
 
+    // 🟢 DYNAMODB RESERVED WORD FIX (Escaping 'schedule')
     const result = await docClient.send(new GetCommand({
         TableName: TABLE_DOCTORS,
         Key: { doctorId: id },
-        ProjectionExpression: "schedule, #tz",
-        ExpressionAttributeNames: { "#tz": "timezone" }
+        ProjectionExpression: "#sch, #tz",
+        ExpressionAttributeNames: { "#sch": "schedule", "#tz": "timezone" }
     }));
 
     if (!result.Item) return res.status(404).json({ error: 'Doctor not found' });
@@ -260,10 +263,11 @@ export const updateSchedule = catchAsync(async (req: Request, res: Response) => 
     if (!authUser || authUser.sub !== id) return res.status(403).json({ error: "Unauthorized" });
     if (!schedule || typeof schedule !== 'object') return res.status(400).json({ error: 'Invalid schedule format.' });
 
+    // 🟢 DYNAMODB RESERVED WORD FIX (Escaping 'schedule')
     await docClient.send(new UpdateCommand({
         TableName: TABLE_DOCTORS, Key: { doctorId: id },
-        UpdateExpression: "SET schedule = :s, #tz = :t",
-        ExpressionAttributeNames: { "#tz": "timezone" },
+        UpdateExpression: "SET #sch = :s, #tz = :t",
+        ExpressionAttributeNames: { "#sch": "schedule", "#tz": "timezone" },
         ExpressionAttributeValues: { ":s": schedule, ":t": timezone || 'UTC' },
         ReturnValues: "UPDATED_NEW"
     }));

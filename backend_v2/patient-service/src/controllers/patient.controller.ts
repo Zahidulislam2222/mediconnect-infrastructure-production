@@ -194,11 +194,9 @@ export const updateProfile = catchAsync(async (req: Request, res: Response) => {
         return res.status(403).json({ error: "Unauthorized to edit this profile." });
     }
 
-    // Find this line inside updateProfile
-const allowedUpdates = ['name', 'avatar', 'phone', 'address', 'preferences', 'dob', 'fcmToken', 'isEmailVerified']; 
-// 👆 I added 'isEmailVerified' to the end
+    const allowedUpdates =['name', 'avatar', 'phone', 'address', 'preferences', 'dob', 'fcmToken', 'isEmailVerified']; 
     const body = req.body;
-    const parts: string[] = [];
+    const parts: string[] =[];
     const names: any = {};
     const values: any = {};
 
@@ -208,16 +206,23 @@ const allowedUpdates = ['name', 'avatar', 'phone', 'address', 'preferences', 'do
             names[`#${field}`] = field;
             values[`:${field}`] = body[field];
 
-            // 🟢 FHIR SYNC: Automatically update nested FHIR properties
+            // 🟢 DYNAMODB RESERVED WORD FIX (Escaping 'name', 'text', 'value')
             if (field === 'name') {
-                parts.push("resource.name[0].text = :fhirName");
+                parts.push("#res.#nm[0].#txt = :fhirName");
+                names["#res"] = "resource";
+                names["#nm"] = "name";
+                names["#txt"] = "text";
                 values[":fhirName"] = body[field];
             }
             if (field === 'dob') {
-                parts.push("resource.birthDate = :dob");
+                parts.push("#res.#bd = :dob");
+                names["#res"] = "resource";
+                names["#bd"] = "birthDate";
             }
             if (field === 'phone') {
-                parts.push("resource.telecom[1].value = :phone");
+                parts.push("#res.telecom[1].#val = :phone");
+                names["#res"] = "resource";
+                names["#val"] = "value";
             }
         }
     });
@@ -225,8 +230,10 @@ const allowedUpdates = ['name', 'avatar', 'phone', 'address', 'preferences', 'do
     if (parts.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 
     const now = new Date().toISOString();
-    parts.push("#updatedAt = :now", "resource.meta.lastUpdated = :now");
+    parts.push("#updatedAt = :now", "#res.#meta.#lu = :now");
     names["#updatedAt"] = "updatedAt";
+    names["#meta"] = "meta";
+    names["#lu"] = "lastUpdated";
     values[":now"] = now;
 
     const response = await dynamicDb.send(new UpdateCommand({
