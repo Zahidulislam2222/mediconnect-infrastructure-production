@@ -79,6 +79,8 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
         isEmailVerified: true,  
         isIdentityVerified: false, 
         identityStatus: 'IDLE',
+        isDiplomaAutoVerified: false,
+        isOfficerApproved: false,
         role: role === 'provider' ? 'doctor' : 'doctor',
         createdAt: new Date().toISOString(),
         consultationFee: 50, 
@@ -316,8 +318,14 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
 
         await docClient.send(new UpdateCommand({
             TableName: TABLE_DOCTORS, Key: { doctorId: id },
-            UpdateExpression: "SET isDiplomaAutoVerified = :v, verificationStatus = :s, diplomaUrl = :u, aiExtractedText = :txt",
-            ExpressionAttributeValues: { ":v": isLegit, ":s": status, ":u": `s3://${bucketName}/${s3Key}`, ":txt": fullOcrText.substring(0, 500) }
+            UpdateExpression: "SET isDiplomaAutoVerified = :v, isOfficerApproved = :o, verificationStatus = :s, diplomaUrl = :u, aiExtractedText = :txt",
+            ExpressionAttributeValues: { 
+                ":v": isLegit, 
+                ":o": false,
+                ":s": status, 
+                ":u": `s3://${bucketName}/${s3Key}`, 
+                ":txt": fullOcrText.substring(0, 500) 
+            }
         }));
 
         if (isLegit) {
@@ -446,3 +454,36 @@ const logDoctorOnboarding = async (doctorId: string, eventType: string, status: 
         });
     } catch (e) { console.error("BigQuery Onboarding Log Failed"); }
 };
+
+// 🟢 NEW: Admin-only Human Approval Route (HIPAA Board-Certified Logic)
+export const approveDoctorByOfficer = catchAsync(async (req: Request, res: Response) => {
+    const region = extractRegion(req);
+    const docClient = getRegionalClient(region);
+    const { id } = req.params; 
+    const authUser = (req as any).user;
+
+    // 🛡️ SECURITY: Verify the requester is not the doctor themselves
+    if (authUser.sub === id) {
+        return res.status(403).json({ error: "Conflict of Interest: Doctors cannot approve their own credentials." });
+    }
+
+    await docClient.send(new UpdateCommand({
+        TableName: TABLE_DOCTORS,
+        Key: { doctorId: id },
+        // 🟢 Update human flag, status, and FHIR resource activity
+        UpdateExpression: "SET isOfficerApproved = :t, verificationStatus = :s, #res.active = :t",
+        ExpressionAttributeNames: { "#res": "resource" },
+        ExpressionAttributeValues: { 
+            ":t": true, 
+            ":s": "APPROVED" 
+        }
+    }));
+
+    // 🟢 HIPAA AUDIT: Crucial to prove WHO approved this doctor
+    await writeAuditLog(authUser.sub, id, "OFFICER_APPROVAL", "Human Medical Officer manually verified AI data and diploma", { 
+        region, 
+        ipAddress: req.ip 
+    });
+
+    res.json({ message: "Doctor officially board-certified and approved for practice." });
+});
