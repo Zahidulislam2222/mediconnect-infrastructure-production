@@ -82,62 +82,46 @@ app.use('/', bookingRoutes);
 async function loadSecrets() {
     const region = process.env.AWS_REGION || 'us-east-1';
     const ssm = getRegionalSSMClient(region);
-
     try {
-        console.log(`🔐 Synchronizing secrets with AWS Vault [${region}]...`);
-
-        // 🟢 BATCH 1: Identity (Strictly matching your screenshot names)
+        console.log(`🔐 Synchronizing Booking secrets with AWS Vault...`);
         const cmd1 = new GetParametersCommand({
             Names: [
-                '/mediconnect/prod/cognito/user_pool_id',
-                '/mediconnect/prod/cognito/client_id_patient',
-                '/mediconnect/prod/cognito/client_id_doctor',
-                '/mediconnect/prod/cognito/user_pool_id_eu',
-                '/mediconnect/prod/cognito/client_id_eu_patient',
-                '/mediconnect/prod/cognito/client_id_eu_doctor'
+                '/mediconnect/prod/cognito/user_pool_id', '/mediconnect/prod/cognito/client_id_patient', '/mediconnect/prod/cognito/client_id_doctor',
+                '/mediconnect/prod/cognito/user_pool_id_eu', '/mediconnect/prod/cognito/client_id_eu_patient', '/mediconnect/prod/cognito/client_id_eu_doctor'
             ],
             WithDecryption: true
         });
-
-        // 🟢 BATCH 2: Infrastructure & Stripe
         const cmd2 = new GetParametersCommand({
             Names: [
-                '/mediconnect/prod/db/dynamo_table',
-                '/mediconnect/prod/kms/signing_key_id',
-                '/mediconnect/stripe/keys',
-                '/mediconnect/stripe/webhook_secret'
+                '/mediconnect/prod/db/patient_table', '/mediconnect/prod/db/doctor_table',
+                '/mediconnect/stripe/keys', '/mediconnect/stripe/webhook_secret'
             ],
             WithDecryption: true
         });
-
         const [res1, res2] = await Promise.all([ssm.send(cmd1), ssm.send(cmd2)]);
         const allParams = [...(res1.Parameters || []), ...(res2.Parameters || [])];
 
-        if (allParams.length === 0) throw new Error("Vault is empty.");
-
         allParams.forEach(p => {
-            // US Identity Mapping
+            // Identity US
             if (p.Name === '/mediconnect/prod/cognito/user_pool_id') process.env.COGNITO_USER_POOL_ID_US = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/client_id_patient') process.env.COGNITO_CLIENT_ID_US_PATIENT = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/client_id_doctor') process.env.COGNITO_CLIENT_ID_US_DOCTOR = p.Value;
-
-            // EU Identity Mapping
+            // Identity EU
             if (p.Name === '/mediconnect/prod/cognito/user_pool_id_eu') process.env.COGNITO_USER_POOL_ID_EU = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/client_id_eu_patient') process.env.COGNITO_CLIENT_ID_EU_PATIENT = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/client_id_eu_doctor') process.env.COGNITO_CLIENT_ID_EU_DOCTOR = p.Value;
-
-            // Global/Stripe
-            if (p.Name === '/mediconnect/prod/db/dynamo_table') process.env.DYNAMO_TABLE = p.Value;
-            if (p.Name === '/mediconnect/prod/kms/signing_key_id') process.env.KMS_KEY_ID = p.Value;
+            // 🟢 CORRECTED: Separate variables to prevent overwrite
+            if (p.Name === '/mediconnect/prod/db/patient_table') process.env.TABLE_PATIENTS = p.Value;
+            if (p.Name === '/mediconnect/prod/db/doctor_table') process.env.TABLE_DOCTORS = p.Value;
+            // Stripe
             if (p.Name === '/mediconnect/stripe/keys') process.env.STRIPE_SECRET_KEY = p.Value;
             if (p.Name === '/mediconnect/stripe/webhook_secret') process.env.STRIPE_WEBHOOK_SECRET = p.Value;
         });
-
-        console.log("✅ AWS Vault Sync Complete. Identity and Stripe Keys mapped.");
-    } catch (e: any) {
-        console.error(`❌ FATAL: Vault Sync Failed.`, e.message);
-        process.exit(1);
-    }
+        // Safety Fallbacks
+        process.env.COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID_US;
+        process.env.COGNITO_CLIENT_ID = process.env.COGNITO_CLIENT_ID_US_PATIENT;
+        console.log("✅ Booking Vault Complete.");
+    } catch (e: any) { process.exit(1); }
 }
 
 const startServer = async () => {

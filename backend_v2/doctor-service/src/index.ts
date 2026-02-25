@@ -85,48 +85,41 @@ app.use('/', clinicalRoutes);
 async function loadSecrets() {
     const region = process.env.AWS_REGION || 'us-east-1';
     const ssm = getRegionalSSMClient(region);
-
     try {
-        console.log(`🔐 Synchronizing secrets with AWS Vault [${region}]...`);
-        const command = new GetParametersCommand({
+        console.log(`🔐 Synchronizing Doctor secrets with AWS Vault...`);
+        const cmd1 = new GetParametersCommand({
             Names: [
-                '/mediconnect/prod/kms/signing_key_id',
-                // US Identity
-                '/mediconnect/prod/cognito/client_id_doctor',
-                '/mediconnect/prod/cognito/client_id_patient', // 🟢 FIX 2: Added missing Patient ID
-                '/mediconnect/prod/cognito/user_pool_id',
-                // EU Identity
-                '/mediconnect/prod/cognito/user_pool_id_eu',
-                '/mediconnect/prod/cognito/client_id_eu_doctor',  // 🟢 Added EU IDs
-                '/mediconnect/prod/cognito/client_id_eu_patient', // 🟢 Added EU IDs
-                // Shared
-                '/mediconnect/prod/db/dynamo_table'
+                '/mediconnect/prod/cognito/user_pool_id', '/mediconnect/prod/cognito/client_id_doctor', '/mediconnect/prod/cognito/client_id_patient',
+                '/mediconnect/prod/cognito/user_pool_id_eu', '/mediconnect/prod/cognito/client_id_eu_doctor', '/mediconnect/prod/cognito/client_id_eu_patient'
             ],
             WithDecryption: true
         });
+        const cmd2 = new GetParametersCommand({
+            Names: [
+                '/mediconnect/prod/db/doctor_table',
+                '/mediconnect/prod/kms/signing_key_id'
+            ],
+            WithDecryption: true
+        });
+        const [res1, res2] = await Promise.all([ssm.send(cmd1), ssm.send(cmd2)]);
+        const allParams = [...(res1.Parameters || []), ...(res2.Parameters || [])];
 
-        const { Parameters } = await ssm.send(command);
-        if (!Parameters || Parameters.length === 0) throw new Error("No secrets found.");
-
-        Parameters.forEach((p: any) => {
-            if (p.Name.includes('kms/signing_key_id')) process.env.KMS_KEY_ID = p.Value;
-            if (p.Name === '/mediconnect/prod/cognito/client_id_doctor') process.env.COGNITO_CLIENT_ID = p.Value;
+        allParams.forEach(p => {
+            if (p.Name === '/mediconnect/prod/cognito/user_pool_id') process.env.COGNITO_USER_POOL_ID_US = p.Value;
+            if (p.Name === '/mediconnect/prod/cognito/client_id_doctor') process.env.COGNITO_CLIENT_ID_US_DOCTOR = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/client_id_patient') process.env.COGNITO_CLIENT_ID_US_PATIENT = p.Value;
-            if (p.Name === '/mediconnect/prod/cognito/user_pool_id') process.env.COGNITO_USER_POOL_ID = p.Value;
+
             if (p.Name === '/mediconnect/prod/cognito/user_pool_id_eu') process.env.COGNITO_USER_POOL_ID_EU = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/client_id_eu_doctor') process.env.COGNITO_CLIENT_ID_EU_DOCTOR = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/client_id_eu_patient') process.env.COGNITO_CLIENT_ID_EU_PATIENT = p.Value;
-            if (p.Name === '/mediconnect/prod/db/dynamo_table') process.env.DYNAMO_TABLE = p.Value;
+            
+            if (p.Name === '/mediconnect/prod/db/doctor_table') process.env.DYNAMO_TABLE = p.Value;
+            if (p.Name === '/mediconnect/prod/kms/signing_key_id') process.env.KMS_KEY_ID = p.Value;
         });
-
-        // Backward compatibility mapping
-        if (!process.env.COGNITO_CLIENT_ID_US_DOCTOR) process.env.COGNITO_CLIENT_ID_US_DOCTOR = process.env.COGNITO_CLIENT_ID;
-
-        console.log("✅ AWS Vault Sync Complete.");
-    } catch (e: any) {
-        safeError(`❌ FATAL: Vault Sync Failed.`, e.message);
-        process.exit(1); 
-    }
+        process.env.COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID_US;
+        process.env.COGNITO_CLIENT_ID = process.env.COGNITO_CLIENT_ID_US_DOCTOR;
+        console.log("✅ Doctor Vault Complete.");
+    } catch (e: any) { process.exit(1); }
 }
 
 const startServer = async () => {

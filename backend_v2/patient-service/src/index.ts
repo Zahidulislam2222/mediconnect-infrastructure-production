@@ -91,12 +91,12 @@ async function loadSecrets() {
     const ssm = getRegionalSSMClient(region);
 
     try {
-        console.log(`🔐 Synchronizing secrets with AWS Vault [${region}]...`);
+        console.log(`🔐 Synchronizing Patient secrets with AWS Vault [${region}]...`);
 
-        // Batch 1: Infrastructure
+        // 🟢 BATCH 1: Infrastructure & IoT (5 params)
         const cmdInfra = new GetParametersCommand({
             Names: [
-                '/mediconnect/prod/db/dynamo_table',
+                '/mediconnect/prod/db/patient_table',
                 '/mediconnect/prod/s3/patient_identity_bucket',
                 '/mediconnect/prod/mqtt/endpoint',
                 '/mediconnect/prod/sns/topic_arn_us',
@@ -105,14 +105,12 @@ async function loadSecrets() {
             WithDecryption: true
         });
 
-        // Batch 2: Identity
+        // 🟢 BATCH 2: Identity (6 params)
         const cmdIdentity = new GetParametersCommand({
             Names: [
                 '/mediconnect/prod/cognito/user_pool_id',
                 '/mediconnect/prod/cognito/client_id_patient',
                 '/mediconnect/prod/cognito/client_id_doctor',
-                '/mediconnect/prod/cognito/client_id_us_patient',
-                '/mediconnect/prod/cognito/client_id_us_doctor',
                 '/mediconnect/prod/cognito/user_pool_id_eu',
                 '/mediconnect/prod/cognito/client_id_eu_patient',
                 '/mediconnect/prod/cognito/client_id_eu_doctor'
@@ -127,35 +125,34 @@ async function loadSecrets() {
 
         const allParams = [...(infraRes.Parameters || []), ...(identityRes.Parameters || [])];
 
-        if (allParams.length === 0) {
-            throw new Error("No secrets found in Parameter Store.");
-        }
+        if (allParams.length === 0) throw new Error("Vault empty.");
 
         allParams.forEach((p: any) => {
-            if (p.Name.includes('dynamo_table')) process.env.DYNAMO_TABLE = p.Value;
-            if (p.Name.includes('patient_identity_bucket')) process.env.BUCKET_NAME = p.Value;
-            if (p.Name.includes('mqtt/endpoint')) process.env.MQTT_BROKER_URL = p.Value;
-            if (p.Name.includes('topic_arn_us')) process.env.SNS_TOPIC_ARN_US = p.Value;
-            if (p.Name.includes('topic_arn_eu')) process.env.SNS_TOPIC_ARN_EU = p.Value;
+            // Infrastructure & IoT
+            if (p.Name === '/mediconnect/prod/db/patient_table') process.env.DYNAMO_TABLE = p.Value;
+            if (p.Name === '/mediconnect/prod/s3/patient_identity_bucket') process.env.BUCKET_NAME = p.Value;
+            if (p.Name === '/mediconnect/prod/mqtt/endpoint') process.env.MQTT_BROKER_URL = p.Value;
+            if (p.Name === '/mediconnect/prod/sns/topic_arn_us') process.env.SNS_TOPIC_ARN_US = p.Value;
+            if (p.Name === '/mediconnect/prod/sns/topic_arn_eu') process.env.SNS_TOPIC_ARN_EU = p.Value;
             
-            if (p.Name.endsWith('/cognito/user_pool_id')) process.env.COGNITO_USER_POOL_ID_US = p.Value;
-            if (p.Name.endsWith('/client_id_patient')) process.env.COGNITO_CLIENT_ID = p.Value; 
-            if (p.Name.endsWith('/client_id_doctor')) process.env.COGNITO_CLIENT_ID_DOCTOR_LOCAL = p.Value; 
+            // US Identity (STRICT MAPPING)
+            if (p.Name === '/mediconnect/prod/cognito/user_pool_id') process.env.COGNITO_USER_POOL_ID_US = p.Value;
+            if (p.Name === '/mediconnect/prod/cognito/client_id_patient') process.env.COGNITO_CLIENT_ID_US_PATIENT = p.Value;
+            if (p.Name === '/mediconnect/prod/cognito/client_id_doctor') process.env.COGNITO_CLIENT_ID_US_DOCTOR = p.Value;
 
-            if (p.Name.endsWith('/client_id_us_patient')) process.env.COGNITO_CLIENT_ID_US_PATIENT = p.Value;
-            if (p.Name.endsWith('/client_id_us_doctor')) process.env.COGNITO_CLIENT_ID_US_DOCTOR = p.Value;
-
-            if (p.Name.includes('user_pool_id_eu')) process.env.COGNITO_USER_POOL_ID_EU = p.Value;
-            if (p.Name.includes('client_id_eu_patient')) process.env.COGNITO_CLIENT_ID_EU_PATIENT = p.Value;
-            if (p.Name.includes('client_id_eu_doctor')) process.env.COGNITO_CLIENT_ID_EU_DOCTOR = p.Value;
+            // EU Identity (STRICT MAPPING)
+            if (p.Name === '/mediconnect/prod/cognito/user_pool_id_eu') process.env.COGNITO_USER_POOL_ID_EU = p.Value;
+            if (p.Name === '/mediconnect/prod/cognito/client_id_eu_patient') process.env.COGNITO_CLIENT_ID_EU_PATIENT = p.Value;
+            if (p.Name === '/mediconnect/prod/cognito/client_id_eu_doctor') process.env.COGNITO_CLIENT_ID_EU_DOCTOR = p.Value;
         });
 
-        if (!process.env.COGNITO_CLIENT_ID_US_PATIENT) process.env.COGNITO_CLIENT_ID_US_PATIENT = process.env.COGNITO_CLIENT_ID;
-        if (!process.env.COGNITO_CLIENT_ID_US_DOCTOR) process.env.COGNITO_CLIENT_ID_US_DOCTOR = process.env.COGNITO_CLIENT_ID_DOCTOR_LOCAL;
+        // 🟢 REQUIRED FALLBACKS for auth.middleware and legacy logic
+        if (!process.env.COGNITO_USER_POOL_ID) process.env.COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID_US;
+        if (!process.env.COGNITO_CLIENT_ID) process.env.COGNITO_CLIENT_ID = process.env.COGNITO_CLIENT_ID_US_PATIENT;
 
-        console.log("✅ AWS Vault Sync Complete.");
+        console.log("✅ AWS Vault Sync Complete. All IoT and Identity keys mapped.");
     } catch (e: any) {
-        safeError(`❌ FATAL: Vault Sync Failed. System cannot start securely.`, e.message);
+        safeError(`❌ FATAL: Vault Sync Failed.`, e.message);
         process.exit(1);
     }
 }
