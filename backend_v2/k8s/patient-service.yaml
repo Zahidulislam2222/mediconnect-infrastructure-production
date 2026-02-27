@@ -34,6 +34,10 @@ spec:
               value: "8081"
             - name: AWS_REGION
               value: "__AWS_REGION__"
+            - name: AWS_ROLE_ARN
+              value: "arn:aws:iam::950110266426:role/Azure-to-AWS-Bridge-Role"
+            - name: AWS_WEB_IDENTITY_TOKEN_FILE
+              value: "/var/run/secrets/azure/tokens/azure-identity-token"
           resources:
             requests:
               cpu: "100m"
