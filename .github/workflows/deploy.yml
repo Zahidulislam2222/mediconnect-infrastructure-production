@@ -85,22 +85,21 @@ jobs:
       - run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
       # --- BUILD & PUSH ---
+      # --- BUILD & PUSH ---
       - name: "🐳 Build and Push Immutable Artifact"
         run: |
-          cd backend_v2
           IMAGE_TAG=${{ github.sha }}
-          # Build
-          docker build -t local-img -f ${{ matrix.service }}/Dockerfile .
+          docker build -t local-img -f backend_v2/${{ matrix.service }}/Dockerfile .
           
-          # Push Azure
+          # Tag and Push Azure
           docker tag local-img ${{ env.AZURE_ACR }}/${{ matrix.service }}:$IMAGE_TAG
           docker push ${{ env.AZURE_ACR }}/${{ matrix.service }}:$IMAGE_TAG
           
-          # Push AWS
+          # Tag and Push AWS
           docker tag local-img ${{ env.AWS_ECR }}/${{ matrix.service }}:$IMAGE_TAG
           docker push ${{ env.AWS_ECR }}/${{ matrix.service }}:$IMAGE_TAG
           
-          # Push GCP
+          # Tag and Push GCP
           docker tag local-img ${{ env.GCP_GAR }}/${{ matrix.service }}:$IMAGE_TAG
           docker push ${{ env.GCP_GAR }}/${{ matrix.service }}:$IMAGE_TAG
 
