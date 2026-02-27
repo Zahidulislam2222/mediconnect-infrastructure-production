@@ -6,7 +6,6 @@ on:
     paths:
       - 'backend_v2/**'
 
-# 🟢 REQUIRED FOR OIDC (Zero-Trust Identity)
 permissions:
   id-token: write
   contents: read
@@ -20,9 +19,6 @@ env:
   EKS_CLUSTER: "mediconnect-eks-eu"
 
 jobs:
-  # ==========================================
-  # 🛡️ GATEKEEPER: Tests
-  # ==========================================
   test-and-lint:
     runs-on: ubuntu-latest
     steps:
@@ -35,9 +31,6 @@ jobs:
       - run: cd backend_v2 && npm ci
       - run: cd backend_v2 && npm test
 
-  # ==========================================
-  # 🐳 BUILD & PUSH ONCE (Parallel Matrix)
-  # ==========================================
   build-and-push:
     needs: [test-and-lint]
     runs-on: ubuntu-latest
@@ -54,57 +47,36 @@ jobs:
             port: 8084
     steps:
       - uses: actions/checkout@v4
-      
-      # --- AUTHENTICATION ---
-      - name: "🔐 Azure OIDC Auth"
-        uses: azure/login@v1
+      - uses: azure/login@v1
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-          
-      - name: "🔐 AWS OIDC Auth"
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: eu-central-1
-
-      - name: "🔐 GCP OIDC Auth"
-        uses: google-github-actions/auth@v2
+      - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+      - uses: google-github-actions/setup-gcloud@v2
 
-      - name: "🛠️ Setup gcloud CLI"
-        uses: google-github-actions/setup-gcloud@v2
-
-      # --- REGISTRY LOGIN ---
       - run: az acr login --name zahidmediconnectacr
       - run: aws ecr get-login-password --region eu-central-1 | docker login --username AWS --password-stdin ${{ env.AWS_ECR }}
       - run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
-      # --- BUILD & PUSH ---
-      # --- BUILD & PUSH ---
       - name: "🐳 Build and Push Immutable Artifact"
         run: |
           IMAGE_TAG=${{ github.sha }}
           docker build -t local-img -f backend_v2/${{ matrix.service }}/Dockerfile .
-          
-          # Tag and Push Azure
           docker tag local-img ${{ env.AZURE_ACR }}/${{ matrix.service }}:$IMAGE_TAG
           docker push ${{ env.AZURE_ACR }}/${{ matrix.service }}:$IMAGE_TAG
-          
-          # Tag and Push AWS
           docker tag local-img ${{ env.AWS_ECR }}/${{ matrix.service }}:$IMAGE_TAG
           docker push ${{ env.AWS_ECR }}/${{ matrix.service }}:$IMAGE_TAG
-          
-          # Tag and Push GCP
           docker tag local-img ${{ env.GCP_GAR }}/${{ matrix.service }}:$IMAGE_TAG
           docker push ${{ env.GCP_GAR }}/${{ matrix.service }}:$IMAGE_TAG
 
-  # ==========================================
-  # 🧪 DEPLOY TO STAGING (Kubernetes Only)
-  # ==========================================
   deploy-staging:
     needs: [build-and-push]
     runs-on: ubuntu-latest
@@ -121,84 +93,55 @@ jobs:
             port: 8084
     steps:
       - uses: actions/checkout@v4
-
-      # --- AUTHENTICATION (Repeated for Security) ---
       - uses: azure/login@v1
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: eu-central-1
-
-      # --- GET KUBECONFIGS ---
+      
       - name: "🔐 Fetch Kubeconfigs"
         run: |
           az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
           aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
 
-      - name: "🏗️ Prepare Cluster Foundation"
+      - name: "🏗️ Prepare Cluster Foundation & Secrets"
         run: |
-          # 1. Apply to AKS (Uses Azure Bridge Role)
-          sed -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
-              -e "s|__AWS_ROLE_ARN__|arn:aws:iam::950110266426:role/Azure-to-AWS-Bridge-Role|g" \
-              backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=aks.kubeconfig apply -f -
-          
-          # 2. Apply to EKS (Uses Native AWS Role)
-          sed -e "s|__AZURE_CLIENT_ID__|none|g" \
-              -e "s|__AWS_ROLE_ARN__|arn:aws:iam::950110266426:role/GitHubActionsRole|g" \
-              backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=eks.kubeconfig apply -f -
+          kubectl --kubeconfig=aks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
+          kubectl --kubeconfig=eks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
+          kubectl --kubeconfig=aks.kubeconfig create secret generic aws-vault-keys --from-literal=AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} --from-literal=AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} -n mediconnect-staging --dry-run=client -o yaml | kubectl --kubeconfig=aks.kubeconfig apply -f -
+          kubectl --kubeconfig=eks.kubeconfig create secret generic aws-vault-keys --from-literal=AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} --from-literal=AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} -n mediconnect-staging --dry-run=client -o yaml | kubectl --kubeconfig=eks.kubeconfig apply -f -
 
-      # --- DEPLOY STAGING AKS ---
       - name: "🚀 Deploy Staging (AKS)"
         run: |
           IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
-          # Inject Image & Region -> Apply
-          sed -e "s|__IMAGE_URI__|$IMAGE|g" \
-              -e "s|__AWS_REGION__|us-east-1|g" \
-              -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
-              -e "s|__AWS_ROLE_ARN__|arn:aws:iam::950110266426:role/Azure-to-AWS-Bridge-Role|g" \
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|us-east-1|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-staging -f -
-          # Wait for Rollout
           kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=90s
 
-      # --- DEPLOY STAGING EKS ---
       - name: "🚀 Deploy Staging (EKS)"
         run: |
           IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
-          sed -e "s|__IMAGE_URI__|$IMAGE|g" \
-              -e "s|__AWS_REGION__|eu-central-1|g" \
-              -e "s|__AZURE_CLIENT_ID__|none|g" \
-              -e "s|__AWS_ROLE_ARN__|arn:aws:iam::950110266426:role/GitHubActionsRole|g" \
+          # 🟢 FIXED: Targeted Staging Namespace
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|eu-central-1|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-staging -f -
           kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=90s
 
-      # --- SMOKE TESTS (In-Cluster Curl) ---
       - name: "🧪 Smoke Test (AKS)"
         run: |
-          # Spin up a temp pod to hit the internal service URL
           kubectl --kubeconfig=aks.kubeconfig run smoke-test-${{ matrix.service }} --image=curlimages/curl --restart=Never -n mediconnect-staging -- curl -f -v http://${{ matrix.service }}:80/ready
-          # Allow time for pod to run
           kubectl --kubeconfig=aks.kubeconfig wait --for=condition=Ready pod/smoke-test-${{ matrix.service }} -n mediconnect-staging --timeout=60s
-          # Check if curl succeeded
-          kubectl --kubeconfig=aks.kubeconfig logs smoke-test-${{ matrix.service }} -n mediconnect-staging
-          # Cleanup
           kubectl --kubeconfig=aks.kubeconfig delete pod smoke-test-${{ matrix.service }} -n mediconnect-staging
 
-      # --- SMOKE TESTS (EKS) ---
       - name: "🧪 Smoke Test (EKS)"
         run: |
           kubectl --kubeconfig=eks.kubeconfig run smoke-test-eks-${{ matrix.service }} --image=curlimages/curl --restart=Never -n mediconnect-staging -- curl -f -v http://${{ matrix.service }}:80/ready
           kubectl --kubeconfig=eks.kubeconfig wait --for=condition=Ready pod/smoke-test-eks-${{ matrix.service }} -n mediconnect-staging --timeout=60s
-          kubectl --kubeconfig=eks.kubeconfig logs smoke-test-eks-${{ matrix.service }} -n mediconnect-staging
           kubectl --kubeconfig=eks.kubeconfig delete pod smoke-test-eks-${{ matrix.service }} -n mediconnect-staging
 
-  # ==========================================
-  # 🌍 PROMOTE TO PRODUCTION
-  # ==========================================
   deploy-production:
     needs: [deploy-staging]
     runs-on: ubuntu-latest
@@ -216,93 +159,73 @@ jobs:
             port: 8084
     steps:
       - uses: actions/checkout@v4
-
-      # --- AUTHENTICATION ---
       - uses: azure/login@v1
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: eu-central-1
-      
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
-
-      - name: "🛠️ Setup gcloud CLI"
-        uses: google-github-actions/setup-gcloud@v2
+      - uses: google-github-actions/setup-gcloud@v2
 
       - name: "🔐 Fetch Kubeconfigs"
         run: |
           az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
           aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
 
-      - name: "🏗️ Prepare Cluster Foundation"
+      - name: "🏗️ Prepare Cluster Foundation & Secrets"
         run: |
-          # 1. Apply to AKS (Uses Azure Bridge Role)
-          sed -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
-              -e "s|__AWS_ROLE_ARN__|arn:aws:iam::950110266426:role/Azure-to-AWS-Bridge-Role|g" \
-              backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=aks.kubeconfig apply -f -
-          
-          # 2. Apply to EKS (Uses Native AWS Role)
-          sed -e "s|__AZURE_CLIENT_ID__|none|g" \
-              -e "s|__AWS_ROLE_ARN__|arn:aws:iam::950110266426:role/GitHubActionsRole|g" \
-              backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=eks.kubeconfig apply -f -
+          kubectl --kubeconfig=aks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
+          kubectl --kubeconfig=eks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
+          kubectl --kubeconfig=aks.kubeconfig create secret generic aws-vault-keys --from-literal=AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} --from-literal=AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} -n mediconnect-prod --dry-run=client -o yaml | kubectl --kubeconfig=aks.kubeconfig apply -f -
+          kubectl --kubeconfig=eks.kubeconfig create secret generic aws-vault-keys --from-literal=AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} --from-literal=AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} -n mediconnect-prod --dry-run=client -o yaml | kubectl --kubeconfig=eks.kubeconfig apply -f -
 
-      # --- DEPLOY PRODUCTION AKS ---
       - name: "🚀 Deploy Prod (AKS)"
         run: |
           IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
-          # 🟢 Corrected: Using AKS config, US region, and PROD namespace
-          sed -e "s|__IMAGE_URI__|$IMAGE|g" \
-              -e "s|__AWS_REGION__|us-east-1|g" \
-              -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
-              -e "s|__AWS_ROLE_ARN__|arn:aws:iam::950110266426:role/Azure-to-AWS-Bridge-Role|g" \
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|us-east-1|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-prod -f -
           kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=120s
 
-      # --- DEPLOY PRODUCTION EKS ---
       - name: "🚀 Deploy Prod (EKS)"
         run: |
           IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
-          sed -e "s|__IMAGE_URI__|$IMAGE|g" \
-              -e "s|__AWS_REGION__|eu-central-1|g" \
-              -e "s|__AZURE_CLIENT_ID__|none|g" \
-              -e "s|__AWS_ROLE_ARN__|arn:aws:iam::950110266426:role/GitHubActionsRole|g" \
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|eu-central-1|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-prod -f -
           kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=120s
 
-      # --- AUTOMATED ROLLBACK (If Failure) ---
       - name: "🔄 Auto Rollback If Failed"
         if: failure()
         run: |
-          echo "🚨 Deployment Failed! Rolling back..."
           kubectl --kubeconfig=aks.kubeconfig rollout undo deployment/${{ matrix.service }} -n mediconnect-prod || true
           kubectl --kubeconfig=eks.kubeconfig rollout undo deployment/${{ matrix.service }} -n mediconnect-prod || true
 
-      # --- DEPLOY BACKUPS (GDPR Compliant) ---
-      # We deploy BOTH regions so Frontend can choose
       - name: "🚀 Deploy Backup (GCP US)"
         run: |
+          # 🟢 FIXED: Added AWS Secrets for Vault Sync
           gcloud run deploy ${{ matrix.service }}-us-backup \
             --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region us-central1 \
             --port ${{ matrix.port }} \
             --min-instances 0 \
+            --set-env-vars "NODE_ENV=production,AWS_REGION=us-east-1,AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }},AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
             --platform managed \
             --allow-unauthenticated
 
       - name: "🚀 Deploy Backup (GCP EU)"
         run: |
+          # 🟢 FIXED: Added AWS Secrets for Vault Sync
           gcloud run deploy ${{ matrix.service }}-eu-backup \
             --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region europe-west3 \
             --port ${{ matrix.port }} \
             --min-instances 0 \
+            --set-env-vars "NODE_ENV=production,AWS_REGION=eu-central-1,AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }},AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
             --platform managed \
             --allow-unauthenticated

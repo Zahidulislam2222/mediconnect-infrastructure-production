@@ -18,19 +18,9 @@ kind: ServiceAccount
 metadata:
   name: mediconnect-sa
   namespace: mediconnect-staging
-  labels:
-    azure.workload.identity/use: "true" 
-  annotations:
-    azure.workload.identity/client-id: "__AZURE_CLIENT_ID__"
-    eks.amazonaws.com/role-arn: "__AWS_ROLE_ARN__"
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: mediconnect-sa
   namespace: mediconnect-prod
-  labels:
-    azure.workload.identity/use: "true"
-  annotations:
-    azure.workload.identity/client-id: "__AZURE_CLIENT_ID__"
-    eks.amazonaws.com/role-arn: "__AWS_ROLE_ARN__"
