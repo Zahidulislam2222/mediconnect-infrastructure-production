@@ -16,6 +16,7 @@ const app = express();
 app.set('trust proxy', 1); // 🟢 REQUIRED for Rate Limiting behind Azure/GCP Load Balancers
 
 const PORT = process.env.PORT || 8083;
+let isAppReady = false;
 
 // 🟢 SECURITY: DDoS Protection (100 requests / 15 mins)
 const globalLimiter = rateLimit({
@@ -75,7 +76,14 @@ app.use(morgan((tokens, req, res) => {
 }, { skip: (req) => req.url === '/health' || req.method === 'OPTIONS' }));
 
 // --- 3. ROUTES ---
-app.get('/health', (req, res) => res.status(200).json({ status: 'UP', service: 'booking-service' }));
+app.get('/health', (req, res) => res.status(200).json({ status: 'UP', type: 'liveness' }));
+app.get('/ready', (req, res) => {
+    if (isAppReady) {
+        res.status(200).json({ status: 'READY', type: 'readiness', service: 'booking-service' });
+    } else {
+        res.status(503).json({ status: 'BOOTING', type: 'readiness', service: 'booking-service' });
+    }
+});
 app.use('/', bookingRoutes);
 
 // --- 4. 100% COMPLIANT VAULT SYNC ---
@@ -128,6 +136,7 @@ const startServer = async () => {
     try {
         await loadSecrets();
         app.listen(Number(PORT), '0.0.0.0', () => {
+            isAppReady = true;
             console.log(`🚀 Booking Service Production Ready on port ${PORT}`);
         });
     } catch (error) {

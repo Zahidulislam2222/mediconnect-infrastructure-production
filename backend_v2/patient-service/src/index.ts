@@ -35,6 +35,7 @@ app.use(globalLimiter);
 
 const httpServer = createServer(app);
 const PORT = process.env.PORT || 8081;
+let isAppReady = false;
 
 // --- 1. COMPLIANT CORS ---
 const allowedOrigins = [
@@ -83,6 +84,14 @@ app.use(morgan((tokens, req, res) => {
         tokens['verified-user'](req, res), `IP:${req.ip}`
     ].join(' ');
 }, { skip: (req) => req.url === '/health' || req.method === 'OPTIONS' }));
+app.get('/health', (req, res) => res.status(200).json({ status: 'UP', type: 'liveness' }));
+app.get('/ready', (req, res) => {
+    if (isAppReady) {
+        res.status(200).json({ status: 'READY', type: 'readiness', service: 'patient-service' });
+    } else {
+        res.status(503).json({ status: 'BOOTING', type: 'readiness', service: 'patient-service' });
+    }
+});
 
 
 // --- 3. 100% COMPLIANT VAULT SYNC ---
@@ -236,7 +245,6 @@ const startServer = async () => {
     try {
         await loadSecrets();
         
-        app.get('/health', (req, res) => res.status(200).json({ status: 'UP', service: 'patient-service' }));
         app.use('/', patientRoutes);
         app.use('/', iotRoutes);
 
@@ -250,6 +258,7 @@ const startServer = async () => {
         startIoTBridge();
 
         httpServer.listen(Number(PORT), '0.0.0.0', () => {
+            isAppReady = true;
             safeLog(`🚀 Patient Service Production Ready on port ${PORT}`);
         });
     } catch (err: any) {

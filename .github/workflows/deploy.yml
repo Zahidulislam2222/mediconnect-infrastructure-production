@@ -1,310 +1,261 @@
-name: "🚀 Global Multi-Cloud Deploy (Mediconnect Suite)"
+name: "🚀 Enterprise Multi-Cloud Deploy (Mediconnect)"
 
 on:
   push:
     branches: [ "main" ]
     paths:
-      - 'backend_v2/doctor-service/**'
-      - 'backend_v2/patient-service/**'
-      - 'backend_v2/booking-service/**'
-      - 'backend_v2/communication-service/**'
-      - 'backend_v2/shared/**'
+      - 'backend_v2/**'
+
+# 🟢 REQUIRED FOR OIDC (Zero-Trust Identity)
+permissions:
+  id-token: write
+  contents: read
 
 env:
-  AZURE_CONTAINER_REGISTRY: "zahidmediconnectacr"
-  AZURE_RESOURCE_GROUP: "mediconnect-rg"
-  GCP_PROJECT_ID: "mediconnect-analytics"
-  GCP_REPO: "us-central1-docker.pkg.dev/mediconnect-analytics/mediconnect-repo"
-  GCP_SERVICE_ACCOUNT: "data-logger@mediconnect-analytics.iam.gserviceaccount.com"
+  AZURE_ACR: "zahidmediconnectacr.azurecr.io"
+  # 🔴 REPLACE THIS WITH YOUR REAL AWS ACCOUNT ID
+  AWS_ECR: "123456789012.dkr.ecr.eu-central-1.amazonaws.com"
+  GCP_GAR: "us-central1-docker.pkg.dev/mediconnect-analytics/mediconnect-repo"
+  AKS_CLUSTER: "mediconnect-aks-us"
+  AKS_RESOURCE_GROUP: "mediconnect-rg"
+  EKS_CLUSTER: "mediconnect-eks-eu"
 
 jobs:
-
   # ==========================================
-  # 🛡️ GATEKEEPER: Run Tests & Linting
+  # 🛡️ GATEKEEPER: Tests
   # ==========================================
   test-and-lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: "🧰 Setup Node.js"
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: 'npm'
           cache-dependency-path: backend_v2/package-lock.json
-
-      - name: "📦 Install Dependencies"
-        run: |
-          cd backend_v2
-          npm ci
-
-      - name: "🧪 Run Unit Tests"
-        run: |
-          cd backend_v2
-          npm test
+      - run: cd backend_v2 && npm ci
+      - run: cd backend_v2 && npm test
 
   # ==========================================
-  # 🩺 DOCTOR SERVICE JOBS (Untouched)
+  # 🐳 BUILD & PUSH ONCE (Parallel Matrix)
   # ==========================================
-  deploy-doctor-azure-us:
+  build-and-push:
     needs: [test-and-lint]
-    runs-on: "ubuntu-latest"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - service: patient-service
+            port: 8081
+          - service: doctor-service
+            port: 8082
+          - service: booking-service
+            port: 8083
+          - service: communication-service
+            port: 8084
     steps:
       - uses: actions/checkout@v4
+      
+      # --- AUTHENTICATION ---
+      - name: "🔐 Azure OIDC Auth"
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          
+      - name: "🔐 AWS OIDC Auth"
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: eu-central-1
+
+      - name: "🔐 GCP OIDC Auth"
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+
+      - name: "🛠️ Setup gcloud CLI"
+        uses: google-github-actions/setup-gcloud@v2
+
+      # --- REGISTRY LOGIN ---
+      - run: az acr login --name zahidmediconnectacr
+      - run: aws ecr get-login-password --region eu-central-1 | docker login --username AWS --password-stdin ${{ env.AWS_ECR }}
+      - run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      # --- BUILD & PUSH ---
+      - name: "🐳 Build and Push Immutable Artifact"
+        run: |
+          cd backend_v2
+          IMAGE_TAG=${{ github.sha }}
+          # Build
+          docker build -t local-img -f ${{ matrix.service }}/Dockerfile .
+          
+          # Push Azure
+          docker tag local-img ${{ env.AZURE_ACR }}/${{ matrix.service }}:$IMAGE_TAG
+          docker push ${{ env.AZURE_ACR }}/${{ matrix.service }}:$IMAGE_TAG
+          
+          # Push AWS
+          docker tag local-img ${{ env.AWS_ECR }}/${{ matrix.service }}:$IMAGE_TAG
+          docker push ${{ env.AWS_ECR }}/${{ matrix.service }}:$IMAGE_TAG
+          
+          # Push GCP
+          docker tag local-img ${{ env.GCP_GAR }}/${{ matrix.service }}:$IMAGE_TAG
+          docker push ${{ env.GCP_GAR }}/${{ matrix.service }}:$IMAGE_TAG
+
+  # ==========================================
+  # 🧪 DEPLOY TO STAGING (Kubernetes Only)
+  # ==========================================
+  deploy-staging:
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - service: patient-service
+            port: 8081
+          - service: doctor-service
+            port: 8082
+          - service: booking-service
+            port: 8083
+          - service: communication-service
+            port: 8084
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- AUTHENTICATION (Repeated for Security) ---
       - uses: azure/login@v1
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-      - run: az acr login --name ${{ env.AZURE_CONTAINER_REGISTRY }}
-      - run: find . -name ".dockerignore" -delete
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
       
-      - name: "🐳 Build and Push to Azure"
-        run: |
-          IMAGE_TAG=${{ env.AZURE_CONTAINER_REGISTRY }}.azurecr.io/doctor-service:${{ github.sha }}
-          docker build -t $IMAGE_TAG -f backend_v2/doctor-service/Dockerfile .
-          docker push $IMAGE_TAG
-
-      - name: "🔐 Push Secrets to Azure"
-        run: |
-          az containerapp secret set \
-            --name doctor-service \
-            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
-            --secrets "aws-access-key-id=${{ secrets.AWS_ACCESS_KEY_ID }}" "aws-secret-access-key=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
-      
-      - name: "🚀 Deploy Azure Container App"
-        uses: azure/container-apps-deploy-action@v1
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
-          acrName: ${{ env.AZURE_CONTAINER_REGISTRY }}
-          containerAppName: "doctor-service"
-          resourceGroup: ${{ env.AZURE_RESOURCE_GROUP }}
-          imageToDeploy: "${{ env.AZURE_CONTAINER_REGISTRY }}.azurecr.io/doctor-service:${{ github.sha }}"
-          environmentVariables: "NODE_ENV=production AWS_REGION=us-east-1 AWS_ACCESS_KEY_ID=secretref:aws-access-key-id AWS_SECRET_ACCESS_KEY=secretref:aws-secret-access-key"
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: eu-central-1
 
-  deploy-doctor-gcp-eu:
-    needs: [test-and-lint]
-    runs-on: "ubuntu-latest"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
-      - uses: google-github-actions/setup-gcloud@v2
-      - run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
-      - run: find . -name ".dockerignore" -delete
-        
-      - name: "🐳 Build and Push to GCP"
+      # --- GET KUBECONFIGS ---
+      - name: "🔐 Fetch Kubeconfigs"
         run: |
-          IMAGE_TAG=${{ env.GCP_REPO }}/doctor-service-eu:${{ github.sha }}
-          docker build -t $IMAGE_TAG -f backend_v2/doctor-service/Dockerfile .
-          docker push $IMAGE_TAG
+          az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
+          aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
 
-      - name: "🚀 Deploy GCP Cloud Run"
+      # --- DEPLOY STAGING AKS ---
+      - name: "🚀 Deploy Staging (AKS)"
         run: |
-          IMAGE_TAG=${{ env.GCP_REPO }}/doctor-service-eu:${{ github.sha }}
-          gcloud run deploy doctor-service-eu \
-            --image "$IMAGE_TAG" \
-            --project ${{ env.GCP_PROJECT_ID }} \
-            --region europe-west3 \
-            --port 8082 \
-            --platform managed \
-            --service-account ${{ env.GCP_SERVICE_ACCOUNT }} \
-            --set-env-vars "NODE_ENV=production,AWS_REGION=eu-central-1" \
-            --update-secrets "AWS_ACCESS_KEY_ID=aws_access_key_id:latest,AWS_SECRET_ACCESS_KEY=aws_secret_access_key:latest"
+          IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
+          # Inject Image & Region -> Apply
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|us-east-1|g" backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-staging -f -
+          # Wait for Rollout
+          kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=90s
+
+      # --- DEPLOY STAGING EKS ---
+      - name: "🚀 Deploy Staging (EKS)"
+        run: |
+          IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|eu-central-1|g" backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-staging -f -
+          kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=90s
+
+      # --- SMOKE TESTS (In-Cluster Curl) ---
+      - name: "🧪 Smoke Test (AKS)"
+        run: |
+          # Spin up a temp pod to hit the internal service URL
+          kubectl --kubeconfig=aks.kubeconfig run smoke-test-${{ matrix.service }} --image=curlimages/curl --restart=Never -n mediconnect-staging -- curl -f -v http://${{ matrix.service }}:80/ready
+          # Allow time for pod to run
+          kubectl --kubeconfig=aks.kubeconfig wait --for=condition=Ready pod/smoke-test-${{ matrix.service }} -n mediconnect-staging --timeout=60s
+          # Check if curl succeeded
+          kubectl --kubeconfig=aks.kubeconfig logs smoke-test-${{ matrix.service }} -n mediconnect-staging
+          # Cleanup
+          kubectl --kubeconfig=aks.kubeconfig delete pod smoke-test-${{ matrix.service }} -n mediconnect-staging
 
   # ==========================================
-  # 🛌 PATIENT SERVICE JOBS (Untouched)
+  # 🌍 PROMOTE TO PRODUCTION
   # ==========================================
-  deploy-patient-gcp-us:
-    needs: [test-and-lint]
-    runs-on: "ubuntu-latest"
+  deploy-production:
+    needs: [deploy-staging]
+    runs-on: ubuntu-latest
+    environment: production
+    strategy:
+      matrix:
+        include:
+          - service: patient-service
+            port: 8081
+          - service: doctor-service
+            port: 8082
+          - service: booking-service
+            port: 8083
+          - service: communication-service
+            port: 8084
     steps:
       - uses: actions/checkout@v4
+
+      # --- AUTHENTICATION ---
+      - uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+      
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: eu-central-1
+      
       - uses: google-github-actions/auth@v2
         with:
-          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
-      - uses: google-github-actions/setup-gcloud@v2
-      - run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
-      - run: find . -name ".dockerignore" -delete
-        
-      - name: "🐳 Build and Push Patient US to GCP"
-        run: |
-          IMAGE_TAG=${{ env.GCP_REPO }}/patient-service-us:${{ github.sha }}
-          docker build -t $IMAGE_TAG -f backend_v2/patient-service/Dockerfile .
-          docker push $IMAGE_TAG
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
 
-      - name: "🚀 Deploy GCP Cloud Run (Patient US)"
+      - name: "🛠️ Setup gcloud CLI"
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: "🔐 Fetch Kubeconfigs"
         run: |
-          IMAGE_TAG=${{ env.GCP_REPO }}/patient-service-us:${{ github.sha }}
-          gcloud run deploy patient-service-us \
-            --image "$IMAGE_TAG" \
-            --project ${{ env.GCP_PROJECT_ID }} \
+          az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
+          aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
+
+      # --- DEPLOY PRODUCTION AKS ---
+      - name: "🚀 Deploy Prod (AKS)"
+        run: |
+          IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|us-east-1|g" backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-prod -f -
+          kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=120s
+
+      # --- DEPLOY PRODUCTION EKS ---
+      - name: "🚀 Deploy Prod (EKS)"
+        run: |
+          IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|eu-central-1|g" backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-prod -f -
+          kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=120s
+
+      # --- AUTOMATED ROLLBACK (If Failure) ---
+      - name: "🔄 Auto Rollback If Failed"
+        if: failure()
+        run: |
+          echo "🚨 Deployment Failed! Rolling back..."
+          kubectl --kubeconfig=aks.kubeconfig rollout undo deployment/${{ matrix.service }} -n mediconnect-prod || true
+          kubectl --kubeconfig=eks.kubeconfig rollout undo deployment/${{ matrix.service }} -n mediconnect-prod || true
+
+      # --- DEPLOY BACKUPS (GDPR Compliant) ---
+      # We deploy BOTH regions so Frontend can choose
+      - name: "🚀 Deploy Backup (GCP US)"
+        run: |
+          gcloud run deploy ${{ matrix.service }}-us-backup \
+            --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region us-central1 \
-            --port 8081 \
+            --port ${{ matrix.port }} \
+            --min-instances 0 \
             --platform managed \
-            --service-account ${{ env.GCP_SERVICE_ACCOUNT }} \
-            --set-env-vars "NODE_ENV=production,AWS_REGION=us-east-1" \
-            --update-secrets "AWS_ACCESS_KEY_ID=aws_access_key_id:latest,AWS_SECRET_ACCESS_KEY=aws_secret_access_key:latest"
+            --allow-unauthenticated
 
-  deploy-patient-gcp-eu:
-    needs: [test-and-lint]
-    runs-on: "ubuntu-latest"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
-      - uses: google-github-actions/setup-gcloud@v2
-      - run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
-      - run: find . -name ".dockerignore" -delete
-        
-      - name: "🐳 Build and Push Patient EU to GCP"
+      - name: "🚀 Deploy Backup (GCP EU)"
         run: |
-          IMAGE_TAG=${{ env.GCP_REPO }}/patient-service-eu:${{ github.sha }}
-          docker build -t $IMAGE_TAG -f backend_v2/patient-service/Dockerfile .
-          docker push $IMAGE_TAG
-
-      - name: "🚀 Deploy GCP Cloud Run (Patient EU)"
-        run: |
-          IMAGE_TAG=${{ env.GCP_REPO }}/patient-service-eu:${{ github.sha }}
-          gcloud run deploy patient-service-eu \
-            --image "$IMAGE_TAG" \
-            --project ${{ env.GCP_PROJECT_ID }} \
+          gcloud run deploy ${{ matrix.service }}-eu-backup \
+            --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region europe-west3 \
-            --port 8081 \
+            --port ${{ matrix.port }} \
+            --min-instances 0 \
             --platform managed \
-            --service-account ${{ env.GCP_SERVICE_ACCOUNT }} \
-            --set-env-vars "NODE_ENV=production,AWS_REGION=eu-central-1" \
-            --update-secrets "AWS_ACCESS_KEY_ID=aws_access_key_id:latest,AWS_SECRET_ACCESS_KEY=aws_secret_access_key:latest"
-
-  # ==========================================
-  # 📅 BOOKING SERVICE JOBS (NEW)
-  # ==========================================
-  deploy-booking-azure-us:
-    needs: [test-and-lint]
-    runs-on: "ubuntu-latest"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-      - run: az acr login --name ${{ env.AZURE_CONTAINER_REGISTRY }}
-      - run: find . -name ".dockerignore" -delete
-      
-      - name: "🐳 Build and Push Booking US to Azure"
-        run: |
-          IMAGE_TAG=${{ env.AZURE_CONTAINER_REGISTRY }}.azurecr.io/booking-service:${{ github.sha }}
-          docker build -t $IMAGE_TAG -f backend_v2/booking-service/Dockerfile .
-          docker push $IMAGE_TAG
-
-      - name: "🔐 Push Secrets to Azure"
-        run: |
-          az containerapp secret set \
-            --name booking-service \
-            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
-            --secrets "aws-access-key-id=${{ secrets.AWS_ACCESS_KEY_ID }}" "aws-secret-access-key=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
-      
-      - name: "🚀 Deploy Azure Container App"
-        uses: azure/container-apps-deploy-action@v1
-        with:
-          acrName: ${{ env.AZURE_CONTAINER_REGISTRY }}
-          containerAppName: "booking-service"
-          resourceGroup: ${{ env.AZURE_RESOURCE_GROUP }}
-          imageToDeploy: "${{ env.AZURE_CONTAINER_REGISTRY }}.azurecr.io/booking-service:${{ github.sha }}"
-          environmentVariables: "NODE_ENV=production AWS_REGION=us-east-1 AWS_ACCESS_KEY_ID=secretref:aws-access-key-id AWS_SECRET_ACCESS_KEY=secretref:aws-secret-access-key"
-
-  deploy-booking-gcp-eu:
-    needs: [test-and-lint]
-    runs-on: "ubuntu-latest"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
-      - uses: google-github-actions/setup-gcloud@v2
-      - run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
-      - run: find . -name ".dockerignore" -delete
-        
-      - name: "🐳 Build and Push Booking EU to GCP"
-        run: |
-          IMAGE_TAG=${{ env.GCP_REPO }}/booking-service-eu:${{ github.sha }}
-          docker build -t $IMAGE_TAG -f backend_v2/booking-service/Dockerfile .
-          docker push $IMAGE_TAG
-
-      - name: "🚀 Deploy GCP Cloud Run (Booking EU)"
-        run: |
-          IMAGE_TAG=${{ env.GCP_REPO }}/booking-service-eu:${{ github.sha }}
-          gcloud run deploy booking-service-eu \
-            --image "$IMAGE_TAG" \
-            --project ${{ env.GCP_PROJECT_ID }} \
-            --region europe-west3 \
-            --port 8083 \
-            --platform managed \
-            --service-account ${{ env.GCP_SERVICE_ACCOUNT }} \
-            --set-env-vars "NODE_ENV=production,AWS_REGION=eu-central-1" \
-            --update-secrets "AWS_ACCESS_KEY_ID=aws_access_key_id:latest,AWS_SECRET_ACCESS_KEY=aws_secret_access_key:latest"
-
-  # ==========================================
-  # 📡 COMMUNICATION SERVICE JOBS (NEW)
-  # ==========================================
-  deploy-communication-azure-us:
-    needs: [test-and-lint]
-    runs-on: "ubuntu-latest"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: azure/login@v1
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-      - run: az acr login --name ${{ env.AZURE_CONTAINER_REGISTRY }}
-      - run: find . -name ".dockerignore" -delete
-      
-      - name: "🐳 Build and Push Comm US to Azure"
-        run: |
-          IMAGE_TAG=${{ env.AZURE_CONTAINER_REGISTRY }}.azurecr.io/communication-service:${{ github.sha }}
-          docker build -t $IMAGE_TAG -f backend_v2/communication-service/Dockerfile .
-          docker push $IMAGE_TAG
-
-      - name: "🔐 Push Secrets to Azure"
-        run: |
-          az containerapp secret set \
-            --name communication-service \
-            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
-            --secrets "aws-access-key-id=${{ secrets.AWS_ACCESS_KEY_ID }}" "aws-secret-access-key=${{ secrets.AWS_SECRET_ACCESS_KEY }}"
-      
-      - name: "🚀 Deploy Azure Container App"
-        uses: azure/container-apps-deploy-action@v1
-        with:
-          acrName: ${{ env.AZURE_CONTAINER_REGISTRY }}
-          containerAppName: "communication-service"
-          resourceGroup: ${{ env.AZURE_RESOURCE_GROUP }}
-          imageToDeploy: "${{ env.AZURE_CONTAINER_REGISTRY }}.azurecr.io/communication-service:${{ github.sha }}"
-          environmentVariables: "NODE_ENV=production AWS_REGION=us-east-1 AWS_ACCESS_KEY_ID=secretref:aws-access-key-id AWS_SECRET_ACCESS_KEY=secretref:aws-secret-access-key"
-
-  deploy-communication-gcp-eu:
-    needs: [test-and-lint]
-    runs-on: "ubuntu-latest"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: google-github-actions/auth@v2
-        with:
-          credentials_json: ${{ secrets.GCP_CREDENTIALS }}
-      - uses: google-github-actions/setup-gcloud@v2
-      - run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
-      - run: find . -name ".dockerignore" -delete
-        
-      - name: "🐳 Build and Push Comm EU to GCP"
-        run: |
-          IMAGE_TAG=${{ env.GCP_REPO }}/communication-service-eu:${{ github.sha }}
-          docker build -t $IMAGE_TAG -f backend_v2/communication-service/Dockerfile .
-          docker push $IMAGE_TAG
-
-      - name: "🚀 Deploy GCP Cloud Run (Comm EU)"
-        run: |
-          IMAGE_TAG=${{ env.GCP_REPO }}/communication-service-eu:${{ github.sha }}
-          gcloud run deploy communication-service-eu \
-            --image "$IMAGE_TAG" \
-            --project ${{ env.GCP_PROJECT_ID }} \
-            --region europe-west3 \
-            --port 8084 \
-            --platform managed \
-            --service-account ${{ env.GCP_SERVICE_ACCOUNT }} \
-            --set-env-vars "NODE_ENV=production,AWS_REGION=eu-central-1" \
-            --update-secrets "AWS_ACCESS_KEY_ID=aws_access_key_id:latest,AWS_SECRET_ACCESS_KEY=aws_secret_access_key:latest"
+            --allow-unauthenticated

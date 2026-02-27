@@ -28,6 +28,7 @@ const globalLimiter = rateLimit({
 app.use(globalLimiter);
 
 const PORT = process.env.PORT || 8082;
+let isAppReady = false;
 
 // --- 1. COMPLIANT CORS ---
 const allowedOrigins = [
@@ -74,8 +75,13 @@ app.use(morgan((tokens, req, res) => {
     ].join(' ');
 }, { skip: (req) => req.method === 'OPTIONS' }));
 
-app.get('/health', (req, res) => {
-    res.status(200).json({ status: 'UP', service: 'doctor-service', timestamp: new Date().toISOString() });
+app.get('/health', (req, res) => res.status(200).json({ status: 'UP', type: 'liveness' }));
+app.get('/ready', (req, res) => {
+    if (isAppReady) {
+        res.status(200).json({ status: 'READY', type: 'readiness', service: 'doctor-service' });
+    } else {
+        res.status(503).json({ status: 'BOOTING', type: 'readiness', service: 'doctor-service' });
+    }
 });
 
 app.use('/', doctorRoutes);
@@ -137,6 +143,7 @@ const startServer = async () => {
     });
 });
         app.listen(Number(PORT), '0.0.0.0', () => {
+            isAppReady = true;
             safeLog(`🚀 Doctor Service Production Ready on port ${PORT} `);
         });
     } catch (error: any) {

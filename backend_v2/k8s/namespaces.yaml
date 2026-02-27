@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mediconnect-prod
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mediconnect-staging
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mediconnect-monitoring

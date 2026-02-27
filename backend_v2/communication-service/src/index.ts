@@ -18,6 +18,7 @@ const app = express();
 app.set('trust proxy', 1);
 
 const PORT = process.env.PORT || 8084;
+let isAppReady = false;
 
 const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
@@ -74,7 +75,14 @@ app.use(morgan((tokens, req, res) => {
 }, { skip: (req) => req.url === '/health' || req.method === 'OPTIONS' }));
 
 // --- 3. ROUTES ---
-app.get('/health', (req, res) => res.status(200).json({ status: 'UP', service: 'communication-service' }));
+app.get('/health', (req, res) => res.status(200).json({ status: 'UP', type: 'liveness' }));
+app.get('/ready', (req, res) => {
+    if (isAppReady) {
+        res.status(200).json({ status: 'READY', type: 'readiness', service: 'communication-service' });
+    } else {
+        res.status(503).json({ status: 'BOOTING', type: 'readiness', service: 'communication-service' });
+    }
+});
 
 // Apply auth middleware to all clinical routes
 app.use("/chat", authMiddleware, chatController);
@@ -155,6 +163,7 @@ const startServer = async () => {
     try {
         await loadSecrets();
         app.listen(Number(PORT), '0.0.0.0', () => {
+            isAppReady = true;
             console.log(`🚀 Communication Service Production Ready on port ${PORT}`);
         });
     } catch (error: any) {
