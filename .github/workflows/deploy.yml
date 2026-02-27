@@ -142,16 +142,26 @@ jobs:
 
       - name: "🏗️ Prepare Cluster Foundation"
         run: |
-          # This creates the Namespaces and ServiceAccounts on the live cloud clusters
-          kubectl --kubeconfig=aks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
-          kubectl --kubeconfig=eks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
+          # 1. Apply to AKS (Uses Azure Bridge Role)
+          sed -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__AWS_ROLE_ARN__|arn:aws:iam::950110266426:role/Azure-to-AWS-Bridge-Role|g" \
+              backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=aks.kubeconfig apply -f -
+          
+          # 2. Apply to EKS (Uses Native AWS Role)
+          sed -e "s|__AZURE_CLIENT_ID__|none|g" \
+              -e "s|__AWS_ROLE_ARN__|arn:aws:iam::950110266426:role/GitHubActionsRole|g" \
+              backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=eks.kubeconfig apply -f -
 
       # --- DEPLOY STAGING AKS ---
       - name: "🚀 Deploy Staging (AKS)"
         run: |
           IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
           # Inject Image & Region -> Apply
-          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|us-east-1|g" backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-staging -f -
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" \
+              -e "s|__AWS_REGION__|us-east-1|g" \
+              -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__AWS_ROLE_ARN__|arn:aws:iam::950110266426:role/Azure-to-AWS-Bridge-Role|g" \
+              backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-staging -f -
           # Wait for Rollout
           kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=90s
 
@@ -159,7 +169,11 @@ jobs:
       - name: "🚀 Deploy Staging (EKS)"
         run: |
           IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
-          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|eu-central-1|g" backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-staging -f -
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" \
+              -e "s|__AWS_REGION__|eu-central-1|g" \
+              -e "s|__AZURE_CLIENT_ID__|none|g" \
+              -e "s|__AWS_ROLE_ARN__|arn:aws:iam::950110266426:role/GitHubActionsRole|g" \
+              backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-staging -f -
           kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=90s
 
       # --- SMOKE TESTS (In-Cluster Curl) ---
@@ -230,22 +244,37 @@ jobs:
 
       - name: "🏗️ Prepare Cluster Foundation"
         run: |
-          # This creates the Namespaces and ServiceAccounts on the live cloud clusters
-          kubectl --kubeconfig=aks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
-          kubectl --kubeconfig=eks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
+          # 1. Apply to AKS (Uses Azure Bridge Role)
+          sed -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__AWS_ROLE_ARN__|arn:aws:iam::950110266426:role/Azure-to-AWS-Bridge-Role|g" \
+              backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=aks.kubeconfig apply -f -
+          
+          # 2. Apply to EKS (Uses Native AWS Role)
+          sed -e "s|__AZURE_CLIENT_ID__|none|g" \
+              -e "s|__AWS_ROLE_ARN__|arn:aws:iam::950110266426:role/GitHubActionsRole|g" \
+              backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=eks.kubeconfig apply -f -
 
       # --- DEPLOY PRODUCTION AKS ---
       - name: "🚀 Deploy Prod (AKS)"
         run: |
           IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
-          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|us-east-1|g" backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-prod -f -
+          # 🟢 Corrected: Using AKS config, US region, and PROD namespace
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" \
+              -e "s|__AWS_REGION__|us-east-1|g" \
+              -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__AWS_ROLE_ARN__|arn:aws:iam::950110266426:role/Azure-to-AWS-Bridge-Role|g" \
+              backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-prod -f -
           kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=120s
 
       # --- DEPLOY PRODUCTION EKS ---
       - name: "🚀 Deploy Prod (EKS)"
         run: |
           IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
-          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|eu-central-1|g" backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-prod -f -
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" \
+              -e "s|__AWS_REGION__|eu-central-1|g" \
+              -e "s|__AZURE_CLIENT_ID__|none|g" \
+              -e "s|__AWS_ROLE_ARN__|arn:aws:iam::950110266426:role/GitHubActionsRole|g" \
+              backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-prod -f -
           kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=120s
 
       # --- AUTOMATED ROLLBACK (If Failure) ---
