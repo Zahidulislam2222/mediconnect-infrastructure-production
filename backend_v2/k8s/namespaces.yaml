@@ -12,3 +12,15 @@ apiVersion: v1
 kind: Namespace
 metadata:
   name: mediconnect-monitoring
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mediconnect-sa
+  namespace: mediconnect-staging
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mediconnect-sa
+  namespace: mediconnect-prod

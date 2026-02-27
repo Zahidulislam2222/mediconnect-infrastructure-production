@@ -140,6 +140,12 @@ jobs:
           az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
           aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
 
+      - name: "🏗️ Prepare Cluster Foundation"
+        run: |
+          # This creates the Namespaces and ServiceAccounts on the live cloud clusters
+          kubectl --kubeconfig=aks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
+          kubectl --kubeconfig=eks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
+
       # --- DEPLOY STAGING AKS ---
       - name: "🚀 Deploy Staging (AKS)"
         run: |
@@ -221,6 +227,12 @@ jobs:
         run: |
           az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
           aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
+
+      - name: "🏗️ Prepare Cluster Foundation"
+        run: |
+          # This creates the Namespaces and ServiceAccounts on the live cloud clusters
+          kubectl --kubeconfig=aks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
+          kubectl --kubeconfig=eks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
 
       # --- DEPLOY PRODUCTION AKS ---
       - name: "🚀 Deploy Prod (AKS)"
