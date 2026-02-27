@@ -13,8 +13,7 @@ permissions:
 
 env:
   AZURE_ACR: "zahidmediconnectacr.azurecr.io"
-  # 🔴 REPLACE THIS WITH YOUR REAL AWS ACCOUNT ID
-  AWS_ECR: "123456789012.dkr.ecr.eu-central-1.amazonaws.com"
+  AWS_ECR: "950110266426.dkr.ecr.eu-central-1.amazonaws.com"
   GCP_GAR: "us-central1-docker.pkg.dev/mediconnect-analytics/mediconnect-repo"
   AKS_CLUSTER: "mediconnect-aks-us"
   AKS_RESOURCE_GROUP: "mediconnect-rg"
@@ -168,6 +167,14 @@ jobs:
           kubectl --kubeconfig=aks.kubeconfig logs smoke-test-${{ matrix.service }} -n mediconnect-staging
           # Cleanup
           kubectl --kubeconfig=aks.kubeconfig delete pod smoke-test-${{ matrix.service }} -n mediconnect-staging
+
+      # --- SMOKE TESTS (EKS) ---
+      - name: "🧪 Smoke Test (EKS)"
+        run: |
+          kubectl --kubeconfig=eks.kubeconfig run smoke-test-eks-${{ matrix.service }} --image=curlimages/curl --restart=Never -n mediconnect-staging -- curl -f -v http://${{ matrix.service }}:80/ready
+          kubectl --kubeconfig=eks.kubeconfig wait --for=condition=Ready pod/smoke-test-eks-${{ matrix.service }} -n mediconnect-staging --timeout=60s
+          kubectl --kubeconfig=eks.kubeconfig logs smoke-test-eks-${{ matrix.service }} -n mediconnect-staging
+          kubectl --kubeconfig=eks.kubeconfig delete pod smoke-test-eks-${{ matrix.service }} -n mediconnect-staging
 
   # ==========================================
   # 🌍 PROMOTE TO PRODUCTION
