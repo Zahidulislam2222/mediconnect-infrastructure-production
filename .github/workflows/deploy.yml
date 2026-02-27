@@ -112,6 +112,7 @@ jobs:
         run: |
           kubectl --kubeconfig=aks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
           kubectl --kubeconfig=eks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
+          # Inject secrets (Idempotent)
           kubectl --kubeconfig=aks.kubeconfig create secret generic aws-vault-keys --from-literal=AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} --from-literal=AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} -n mediconnect-staging --dry-run=client -o yaml | kubectl --kubeconfig=aks.kubeconfig apply -f -
           kubectl --kubeconfig=eks.kubeconfig create secret generic aws-vault-keys --from-literal=AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} --from-literal=AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} -n mediconnect-staging --dry-run=client -o yaml | kubectl --kubeconfig=eks.kubeconfig apply -f -
 
@@ -125,22 +126,21 @@ jobs:
       - name: "🚀 Deploy Staging (EKS)"
         run: |
           IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
-          # 🟢 FIXED: Targeted Staging Namespace
           sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|eu-central-1|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-staging -f -
           kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=90s
 
       - name: "🧪 Smoke Test (AKS)"
         run: |
-          kubectl --kubeconfig=aks.kubeconfig run smoke-test-${{ matrix.service }} --image=curlimages/curl --restart=Never -n mediconnect-staging -- curl -f -v http://${{ matrix.service }}:80/ready
-          kubectl --kubeconfig=aks.kubeconfig wait --for=condition=Ready pod/smoke-test-${{ matrix.service }} -n mediconnect-staging --timeout=60s
-          kubectl --kubeconfig=aks.kubeconfig delete pod smoke-test-${{ matrix.service }} -n mediconnect-staging
+          # 🟢 Uses wget (native to Alpine) for 100% compatibility
+          POD_NAME=$(kubectl --kubeconfig=aks.kubeconfig get pods -n mediconnect-staging -l app=${{ matrix.service }} --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+          kubectl --kubeconfig=aks.kubeconfig exec $POD_NAME -n mediconnect-staging -- wget -qO- http://localhost:${{ matrix.port }}/ready
 
       - name: "🧪 Smoke Test (EKS)"
         run: |
-          kubectl --kubeconfig=eks.kubeconfig run smoke-test-eks-${{ matrix.service }} --image=curlimages/curl --restart=Never -n mediconnect-staging -- curl -f -v http://${{ matrix.service }}:80/ready
-          kubectl --kubeconfig=eks.kubeconfig wait --for=condition=Ready pod/smoke-test-eks-${{ matrix.service }} -n mediconnect-staging --timeout=60s
-          kubectl --kubeconfig=eks.kubeconfig delete pod smoke-test-eks-${{ matrix.service }} -n mediconnect-staging
+          # 🟢 Direct verification inside the pod
+          POD_NAME=$(kubectl --kubeconfig=eks.kubeconfig get pods -n mediconnect-staging -l app=${{ matrix.service }} --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+          kubectl --kubeconfig=eks.kubeconfig exec $POD_NAME -n mediconnect-staging -- wget -qO- http://localhost:${{ matrix.port }}/ready
 
   deploy-production:
     needs: [deploy-staging]
@@ -208,7 +208,6 @@ jobs:
 
       - name: "🚀 Deploy Backup (GCP US)"
         run: |
-          # 🟢 FIXED: Added AWS Secrets for Vault Sync
           gcloud run deploy ${{ matrix.service }}-us-backup \
             --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region us-central1 \
@@ -220,7 +219,6 @@ jobs:
 
       - name: "🚀 Deploy Backup (GCP EU)"
         run: |
-          # 🟢 FIXED: Added AWS Secrets for Vault Sync
           gcloud run deploy ${{ matrix.service }}-eu-backup \
             --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region europe-west3 \
