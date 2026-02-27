@@ -18,9 +18,17 @@ kind: ServiceAccount
 metadata:
   name: mediconnect-sa
   namespace: mediconnect-staging
+  annotations:
+    # 🟢 Azure Client ID
+    azure.workload.identity/client-id: "3a3f84aa-401a-4546-a490-691656c07525"
+    # 🟢 AWS Role for the Bridge
+    eks.amazonaws.com/role-arn: "arn:aws:iam::950110266426:role/Azure-to-AWS-Bridge-Role"
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: mediconnect-sa
   namespace: mediconnect-prod
+  annotations:
+    azure.workload.identity/client-id: "3a3f84aa-401a-4546-a490-691656c07525"
+    eks.amazonaws.com/role-arn: "arn:aws:iam::950110266426:role/Azure-to-AWS-Bridge-Role"
