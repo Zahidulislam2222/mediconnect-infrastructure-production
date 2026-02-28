@@ -19,7 +19,7 @@ metadata:
   name: mediconnect-sa
   namespace: mediconnect-staging
   annotations:
-    eks.amazonaws.com/role-arn: "arn:aws:iam::950110266426:role/mediconnect-eks-pod-role"
+    eks.amazonaws.com/role-arn: "__POD_ROLE_ARN__"
     azure.workload.identity/client-id: "__AZURE_CLIENT_ID__"
   labels:
     azure.workload.identity/use: "true"
@@ -30,7 +30,7 @@ metadata:
   name: mediconnect-sa
   namespace: mediconnect-prod
   annotations:
-    eks.amazonaws.com/role-arn: "arn:aws:iam::950110266426:role/mediconnect-eks-pod-role"
+    eks.amazonaws.com/role-arn: "__POD_ROLE_ARN__"
     azure.workload.identity/client-id: "__AZURE_CLIENT_ID__"
   labels:
     azure.workload.identity/use: "true"

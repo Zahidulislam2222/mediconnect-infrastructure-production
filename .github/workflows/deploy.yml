@@ -110,12 +110,19 @@ jobs:
 
       - name: "🏗️ Prepare Cluster Foundation & Identity"
         run: |
-          # Dynamically inject the Azure Client ID Secret without exposing it in Git
-          sed -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" backend_v2/k8s/namespaces.yaml > processed_namespaces.yaml
+          # Process for Azure (Inject US Jurisdictional Role)
+          AZ_ROLE="arn:aws:iam::950110266426:role/mediconnect-azure-role-us"
+          sed -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__POD_ROLE_ARN__|$AZ_ROLE|g" \
+              backend_v2/k8s/namespaces.yaml > aks_namespaces.yaml
+          kubectl --kubeconfig=aks.kubeconfig apply -f aks_namespaces.yaml
           
-          # Apply the processed foundation to both clusters
-          kubectl --kubeconfig=aks.kubeconfig apply -f processed_namespaces.yaml
-          kubectl --kubeconfig=eks.kubeconfig apply -f processed_namespaces.yaml
+          # Process for AWS (Inject EU Jurisdictional Role)
+          EKS_ROLE="arn:aws:iam::950110266426:role/mediconnect-eks-pod-role"
+          sed -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__POD_ROLE_ARN__|$EKS_ROLE|g" \
+              backend_v2/k8s/namespaces.yaml > eks_namespaces.yaml
+          kubectl --kubeconfig=eks.kubeconfig apply -f eks_namespaces.yaml
           
           # Apply API Gateway Rules
           kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-staging -f backend_v2/k8s/api-gateway.yaml
@@ -183,12 +190,19 @@ jobs:
 
       - name: "🏗️ Prepare Cluster Foundation & Identity"
         run: |
-          # Dynamically inject the Azure Client ID Secret without exposing it in Git
-          sed -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" backend_v2/k8s/namespaces.yaml > processed_namespaces.yaml
+          # Process for Azure (Inject US Jurisdictional Role)
+          AZ_ROLE="arn:aws:iam::950110266426:role/mediconnect-azure-role-us"
+          sed -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__POD_ROLE_ARN__|$AZ_ROLE|g" \
+              backend_v2/k8s/namespaces.yaml > aks_namespaces.yaml
+          kubectl --kubeconfig=aks.kubeconfig apply -f aks_namespaces.yaml
           
-          # Apply the processed foundation to both clusters
-          kubectl --kubeconfig=aks.kubeconfig apply -f processed_namespaces.yaml
-          kubectl --kubeconfig=eks.kubeconfig apply -f processed_namespaces.yaml
+          # Process for AWS (Inject EU Jurisdictional Role)
+          EKS_ROLE="arn:aws:iam::950110266426:role/mediconnect-eks-pod-role"
+          sed -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__POD_ROLE_ARN__|$EKS_ROLE|g" \
+              backend_v2/k8s/namespaces.yaml > eks_namespaces.yaml
+          kubectl --kubeconfig=eks.kubeconfig apply -f eks_namespaces.yaml
           
           # Apply API Gateway Rules
           kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-prod -f backend_v2/k8s/api-gateway.yaml
