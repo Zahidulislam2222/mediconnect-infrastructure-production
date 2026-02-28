@@ -108,6 +108,14 @@ jobs:
           az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
           aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
 
+      - name: "🧹 Free Up Staging Resources"
+        run: |
+          # Force scale down to 1 replica to free up CPU for the rolling update
+          kubectl --kubeconfig=aks.kubeconfig scale deployment --all --replicas=1 -n mediconnect-staging || true
+          kubectl --kubeconfig=eks.kubeconfig scale deployment --all --replicas=1 -n mediconnect-staging || true
+          # Wait 10 seconds for pods to terminate and release CPU
+          sleep 10
+
       - name: "🏗️ Prepare Cluster Foundation & Identity"
         run: |
           # Dynamically inject the Azure Client ID Secret without exposing it in Git
