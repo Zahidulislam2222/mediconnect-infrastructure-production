@@ -108,12 +108,6 @@ jobs:
           az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
           aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
 
-      - name: "🧹 Clear Hung Pods (Matrix Safe)"
-        run: |
-          # Force kill any pods stuck in 'Terminating' from the previous crashed runs, targeting ONLY this specific service
-          kubectl --kubeconfig=aks.kubeconfig get pods -n mediconnect-staging -l app=${{ matrix.service }} | grep Terminating | awk '{print $1}' | xargs -r -I {} kubectl --kubeconfig=aks.kubeconfig delete pod {} -n mediconnect-staging --force --grace-period=0 || true
-          kubectl --kubeconfig=eks.kubeconfig get pods -n mediconnect-staging -l app=${{ matrix.service }} | grep Terminating | awk '{print $1}' | xargs -r -I {} kubectl --kubeconfig=eks.kubeconfig delete pod {} -n mediconnect-staging --force --grace-period=0 || true
-
       - name: "🏗️ Prepare Cluster Foundation & Identity"
         run: |
           # Dynamically inject the Azure Client ID Secret without exposing it in Git
