@@ -124,14 +124,14 @@ jobs:
       - name: "🚀 Deploy Staging (AKS)"
         run: |
           IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
-          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|us-east-1|g" \
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|us-east-1|g" -e "s|__MIN_REPLICAS__|1|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-staging -f -
           kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=300s
 
       - name: "🚀 Deploy Staging (EKS)"
         run: |
           IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
-          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|eu-central-1|g" \
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|eu-central-1|g" -e "s|__MIN_REPLICAS__|1|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-staging -f -
           kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=300s
 
@@ -197,14 +197,14 @@ jobs:
       - name: "🚀 Deploy Prod (AKS)"
         run: |
           IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
-          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|us-east-1|g" \
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|us-east-1|g" -e "s|__MIN_REPLICAS__|2|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-prod -f -
           kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=300s
 
       - name: "🚀 Deploy Prod (EKS)"
         run: |
           IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
-          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|eu-central-1|g" \
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" -e "s|__AWS_REGION__|eu-central-1|g" -e "s|__MIN_REPLICAS__|2|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-prod -f -
           kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=300s
 

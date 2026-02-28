@@ -35,8 +35,8 @@ spec:
               value: "__AWS_REGION__"
           resources:
             requests:
-              cpu: "100m"
-              memory: "256Mi"
+              cpu: "10m"
+              memory: "128Mi"
             limits:
               cpu: "500m"
               memory: "512Mi"
@@ -75,7 +75,7 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: doctor-service
-  minReplicas: 1
+  minReplicas: __MIN_REPLICAS__
   maxReplicas: 50
   metrics:
     - type: Resource
