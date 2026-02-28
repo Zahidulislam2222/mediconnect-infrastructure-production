@@ -143,7 +143,6 @@ jobs:
   deploy-production:
     needs: [deploy-staging]
     runs-on: ubuntu-latest
-    environment: production
     strategy:
       matrix:
         include:
