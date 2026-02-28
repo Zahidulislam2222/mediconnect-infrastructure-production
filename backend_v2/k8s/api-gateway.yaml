@@ -8,26 +8,27 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    nginx.ingress.kubernetes.io/rewrite-target: /$1
 spec:
   rules:
     - http:
         paths:
-          # --- COMMUNICATION SERVICE (Port 8084 mapped to Port 80) ---
-          - path: /chat
+          # --- COMMUNICATION SERVICE ---
+          - path: /__PREFIX__(chat.*)
             pathType: Prefix
             backend:
               service:
                 name: communication-service
                 port:
                   number: 80
-          - path: /video
+          - path: /__PREFIX__(video.*)
             pathType: Prefix
             backend:
               service:
                 name: communication-service
                 port:
                   number: 80
-          - path: /ai
+          - path: /__PREFIX__(ai.*)
             pathType: Prefix
             backend:
               service:
@@ -35,22 +36,22 @@ spec:
                 port:
                   number: 80
 
-          # --- BOOKING SERVICE (Port 8083 mapped to Port 80) ---
-          - path: /appointments
+          # --- BOOKING SERVICE ---
+          - path: /__PREFIX__(appointments.*)
             pathType: Prefix
             backend:
               service:
                 name: booking-service
                 port:
                   number: 80
-          - path: /billing
+          - path: /__PREFIX__(billing.*)
             pathType: Prefix
             backend:
               service:
                 name: booking-service
                 port:
                   number: 80
-          - path: /webhook
+          - path: /__PREFIX__(webhook.*)
             pathType: Prefix
             backend:
               service:
@@ -58,22 +59,22 @@ spec:
                 port:
                   number: 80
 
-          # --- DOCTOR SERVICE (Port 8082 mapped to Port 80) ---
-          - path: /doctors
+          # --- DOCTOR SERVICE ---
+          - path: /__PREFIX__(doctors.*)
             pathType: Prefix
             backend:
               service:
                 name: doctor-service
                 port:
                   number: 80
-          - path: /prescription
+          - path: /__PREFIX__(prescription.*)
             pathType: Prefix
             backend:
               service:
                 name: doctor-service
                 port:
                   number: 80
-          - path: /ehr
+          - path: /__PREFIX__(ehr.*)
             pathType: Prefix
             backend:
               service:
@@ -81,23 +82,24 @@ spec:
                 port:
                   number: 80
 
-          # --- PATIENT & FALLBACK SERVICE (Port 8081 mapped to Port 80) ---
-          - path: /patients
+          # --- PATIENT & FALLBACK SERVICE ---
+          - path: /__PREFIX__(patients.*)
             pathType: Prefix
             backend:
               service:
                 name: patient-service
                 port:
                   number: 80
-          - path: /vitals
+          - path: /__PREFIX__(vitals.*)
             pathType: Prefix
             backend:
               service:
                 name: patient-service
                 port:
                   number: 80
+
           # Catch-all Default
-          - path: /
+          - path: /__PREFIX__(.*)
             pathType: Prefix
             backend:
               service:
