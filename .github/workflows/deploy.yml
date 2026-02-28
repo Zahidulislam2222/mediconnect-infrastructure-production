@@ -123,10 +123,6 @@ jobs:
               -e "s|__POD_ROLE_ARN__|$EKS_ROLE|g" \
               backend_v2/k8s/namespaces.yaml > eks_namespaces.yaml
           kubectl --kubeconfig=eks.kubeconfig apply -f eks_namespaces.yaml
-          
-          # Apply API Gateway Rules
-          kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-staging -f backend_v2/k8s/api-gateway.yaml
-          kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-staging -f backend_v2/k8s/api-gateway.yaml
 
       - name: "🚀 Deploy Staging (AKS)"
         run: |
