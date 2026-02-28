@@ -44,7 +44,7 @@ spec:
             httpGet:
               path: /health
               port: 8082
-            initialDelaySeconds: 5
+            initialDelaySeconds: 30
             periodSeconds: 10
           readinessProbe:
             httpGet:
@@ -75,7 +75,7 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: doctor-service
-  minReplicas: 2
+  minReplicas: 1
   maxReplicas: 50
   metrics:
     - type: Resource
