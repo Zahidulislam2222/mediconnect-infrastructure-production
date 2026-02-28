@@ -18,9 +18,19 @@ kind: ServiceAccount
 metadata:
   name: mediconnect-sa
   namespace: mediconnect-staging
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::950110266426:role/mediconnect-eks-pod-role"
+    azure.workload.identity/client-id: "__AZURE_CLIENT_ID__"
+  labels:
+    azure.workload.identity/use: "true"
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: mediconnect-sa
   namespace: mediconnect-prod
+  annotations:
+    eks.amazonaws.com/role-arn: "arn:aws:iam::950110266426:role/mediconnect-eks-pod-role"
+    azure.workload.identity/client-id: "__AZURE_CLIENT_ID__"
+  labels:
+    azure.workload.identity/use: "true"

@@ -1,0 +1,103 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mediconnect-ingress
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  rules:
+    - http:
+        paths:
+          # --- COMMUNICATION SERVICE (Port 8084 mapped to Port 80) ---
+          - path: /chat
+            pathType: Prefix
+            backend:
+              service:
+                name: communication-service
+                port:
+                  number: 80
+          - path: /video
+            pathType: Prefix
+            backend:
+              service:
+                name: communication-service
+                port:
+                  number: 80
+          - path: /ai
+            pathType: Prefix
+            backend:
+              service:
+                name: communication-service
+                port:
+                  number: 80
+
+          # --- BOOKING SERVICE (Port 8083 mapped to Port 80) ---
+          - path: /appointments
+            pathType: Prefix
+            backend:
+              service:
+                name: booking-service
+                port:
+                  number: 80
+          - path: /billing
+            pathType: Prefix
+            backend:
+              service:
+                name: booking-service
+                port:
+                  number: 80
+          - path: /webhook
+            pathType: Prefix
+            backend:
+              service:
+                name: booking-service
+                port:
+                  number: 80
+
+          # --- DOCTOR SERVICE (Port 8082 mapped to Port 80) ---
+          - path: /doctors
+            pathType: Prefix
+            backend:
+              service:
+                name: doctor-service
+                port:
+                  number: 80
+          - path: /prescription
+            pathType: Prefix
+            backend:
+              service:
+                name: doctor-service
+                port:
+                  number: 80
+          - path: /ehr
+            pathType: Prefix
+            backend:
+              service:
+                name: doctor-service
+                port:
+                  number: 80
+
+          # --- PATIENT & FALLBACK SERVICE (Port 8081 mapped to Port 80) ---
+          - path: /patients
+            pathType: Prefix
+            backend:
+              service:
+                name: patient-service
+                port:
+                  number: 80
+          - path: /vitals
+            pathType: Prefix
+            backend:
+              service:
+                name: patient-service
+                port:
+                  number: 80
+          # Catch-all Default
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: patient-service
+                port:
+                  number: 80

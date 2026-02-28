@@ -108,13 +108,18 @@ jobs:
           az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
           aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
 
-      - name: "🏗️ Prepare Cluster Foundation & Secrets"
+      - name: "🏗️ Prepare Cluster Foundation & Identity"
         run: |
-          kubectl --kubeconfig=aks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
-          kubectl --kubeconfig=eks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
-          # Inject secrets (Idempotent)
-          kubectl --kubeconfig=aks.kubeconfig create secret generic aws-vault-keys --from-literal=AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} --from-literal=AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} -n mediconnect-staging --dry-run=client -o yaml | kubectl --kubeconfig=aks.kubeconfig apply -f -
-          kubectl --kubeconfig=eks.kubeconfig create secret generic aws-vault-keys --from-literal=AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} --from-literal=AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} -n mediconnect-staging --dry-run=client -o yaml | kubectl --kubeconfig=eks.kubeconfig apply -f -
+          # Dynamically inject the Azure Client ID Secret without exposing it in Git
+          sed -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" backend_v2/k8s/namespaces.yaml > processed_namespaces.yaml
+          
+          # Apply the processed foundation to both clusters
+          kubectl --kubeconfig=aks.kubeconfig apply -f processed_namespaces.yaml
+          kubectl --kubeconfig=eks.kubeconfig apply -f processed_namespaces.yaml
+          
+          # Apply API Gateway Rules
+          kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-staging -f backend_v2/k8s/api-gateway.yaml
+          kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-staging -f backend_v2/k8s/api-gateway.yaml
 
       - name: "🚀 Deploy Staging (AKS)"
         run: |
@@ -176,12 +181,18 @@ jobs:
           az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
           aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
 
-      - name: "🏗️ Prepare Cluster Foundation & Secrets"
+      - name: "🏗️ Prepare Cluster Foundation & Identity"
         run: |
-          kubectl --kubeconfig=aks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
-          kubectl --kubeconfig=eks.kubeconfig apply -f backend_v2/k8s/namespaces.yaml
-          kubectl --kubeconfig=aks.kubeconfig create secret generic aws-vault-keys --from-literal=AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} --from-literal=AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} -n mediconnect-prod --dry-run=client -o yaml | kubectl --kubeconfig=aks.kubeconfig apply -f -
-          kubectl --kubeconfig=eks.kubeconfig create secret generic aws-vault-keys --from-literal=AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} --from-literal=AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }} -n mediconnect-prod --dry-run=client -o yaml | kubectl --kubeconfig=eks.kubeconfig apply -f -
+          # Dynamically inject the Azure Client ID Secret without exposing it in Git
+          sed -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" backend_v2/k8s/namespaces.yaml > processed_namespaces.yaml
+          
+          # Apply the processed foundation to both clusters
+          kubectl --kubeconfig=aks.kubeconfig apply -f processed_namespaces.yaml
+          kubectl --kubeconfig=eks.kubeconfig apply -f processed_namespaces.yaml
+          
+          # Apply API Gateway Rules
+          kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-prod -f backend_v2/k8s/api-gateway.yaml
+          kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-prod -f backend_v2/k8s/api-gateway.yaml
 
       - name: "🚀 Deploy Prod (AKS)"
         run: |

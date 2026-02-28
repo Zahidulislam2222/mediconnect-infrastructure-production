@@ -33,9 +33,6 @@ spec:
               value: "8082"
             - name: AWS_REGION
               value: "__AWS_REGION__"
-          envFrom:
-            - secretRef:
-                name: aws-vault-keys
           resources:
             requests:
               cpu: "100m"
@@ -61,7 +58,7 @@ kind: Service
 metadata:
   name: doctor-service
 spec:
-  type: LoadBalancer
+  type: ClusterIP
   selector:
     app: doctor-service
   ports:
