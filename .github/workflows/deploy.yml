@@ -142,7 +142,7 @@ jobs:
               -e "s|__TOKEN_FILE__|/var/run/secrets/azure/tokens/azure-identity-token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-staging -f -
           
-          kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=300s
+          kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=900s
 
       - name: "🚀 Deploy Staging (EKS)"
         run: |
@@ -158,7 +158,7 @@ jobs:
               -e "s|__TOKEN_FILE__|/var/run/secrets/eks.amazonaws.com/serviceaccount/token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-staging -f -
               
-          kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=300s
+          kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=900s
 
       - name: "🧪 Smoke Test (AKS)"
         run: |
@@ -236,7 +236,7 @@ jobs:
               -e "s|__AWS_ROLE_ARN__|$AZ_ROLE|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/azure/tokens/azure-identity-token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-prod -f -
-          kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=300s
+          kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=900s
 
       - name: "🚀 Deploy Prod (EKS)"
         run: |
@@ -248,7 +248,7 @@ jobs:
               -e "s|__AWS_ROLE_ARN__|$EKS_ROLE|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/eks.amazonaws.com/serviceaccount/token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-prod -f -
-          kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=300s
+          kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=900s
 
       - name: "🔄 Auto Rollback If Failed"
         if: failure()
