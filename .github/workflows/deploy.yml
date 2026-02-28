@@ -132,15 +132,13 @@ jobs:
 
       - name: "🧪 Smoke Test (AKS)"
         run: |
-          # 🟢 Uses wget (native to Alpine) for 100% compatibility
           POD_NAME=$(kubectl --kubeconfig=aks.kubeconfig get pods -n mediconnect-staging -l app=${{ matrix.service }} --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
-          kubectl --kubeconfig=aks.kubeconfig exec $POD_NAME -n mediconnect-staging -- wget -qO- http://localhost:${{ matrix.port }}/ready
+          kubectl --kubeconfig=aks.kubeconfig exec $POD_NAME -n mediconnect-staging -- wget -qO- http://127.0.0.1:${{ matrix.port }}/ready
 
       - name: "🧪 Smoke Test (EKS)"
         run: |
-          # 🟢 Direct verification inside the pod
           POD_NAME=$(kubectl --kubeconfig=eks.kubeconfig get pods -n mediconnect-staging -l app=${{ matrix.service }} --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
-          kubectl --kubeconfig=eks.kubeconfig exec $POD_NAME -n mediconnect-staging -- wget -qO- http://localhost:${{ matrix.port }}/ready
+          kubectl --kubeconfig=eks.kubeconfig exec $POD_NAME -n mediconnect-staging -- wget -qO- http://127.0.0.1:${{ matrix.port }}/ready
 
   deploy-production:
     needs: [deploy-staging]
