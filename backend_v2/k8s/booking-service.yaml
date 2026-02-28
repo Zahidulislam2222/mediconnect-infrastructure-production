@@ -9,7 +9,7 @@ spec:
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 1
+      maxSurge: "50%"
       maxUnavailable: 0
   selector:
     matchLabels:
@@ -82,7 +82,7 @@ spec:
     kind: Deployment
     name: booking-service
   minReplicas: __MIN_REPLICAS__
-  maxReplicas: 50
+  maxReplicas: __MAX_REPLICAS__
   metrics:
     - type: Resource
       resource:

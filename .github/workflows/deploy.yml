@@ -131,13 +131,12 @@ jobs:
       - name: "🚀 Deploy Staging (AKS)"
         run: |
           IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
-          # 🟢 HIPAA: Use US-Specific Role for US Patient Data
           AZ_ROLE="arn:aws:iam::950110266426:role/mediconnect-azure-role-us"
           
-          # 🟢 SECURITY: Inject Token Path specifically for Azure Workload Identity
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
               -e "s|__AWS_REGION__|us-east-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
+              -e "s|__MAX_REPLICAS__|5|g" \
               -e "s|__AWS_ROLE_ARN__|$AZ_ROLE|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/azure/tokens/azure-identity-token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-staging -f -
@@ -147,13 +146,12 @@ jobs:
       - name: "🚀 Deploy Staging (EKS)"
         run: |
           IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
-          # 🟢 GDPR: Use EU-Specific Role (Ensure this role exists in AWS IAM)
           EKS_ROLE="arn:aws:iam::950110266426:role/mediconnect-eks-pod-role"
           
-          # 🟢 SECURITY: Inject Token Path specifically for AWS EKS (IRSA)
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
               -e "s|__AWS_REGION__|eu-central-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
+              -e "s|__MAX_REPLICAS__|5|g" \
               -e "s|__AWS_ROLE_ARN__|$EKS_ROLE|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/eks.amazonaws.com/serviceaccount/token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-staging -f -
@@ -230,24 +228,30 @@ jobs:
         run: |
           IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
           AZ_ROLE="arn:aws:iam::950110266426:role/mediconnect-azure-role-us"
+
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
               -e "s|__AWS_REGION__|us-east-1|g" \
               -e "s|__MIN_REPLICAS__|2|g" \
+              -e "s|__MAX_REPLICAS__|50|g" \
               -e "s|__AWS_ROLE_ARN__|$AZ_ROLE|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/azure/tokens/azure-identity-token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-prod -f -
+          
           kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=900s
 
       - name: "🚀 Deploy Prod (EKS)"
         run: |
           IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
           EKS_ROLE="arn:aws:iam::950110266426:role/mediconnect-eks-pod-role"
+
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
               -e "s|__AWS_REGION__|eu-central-1|g" \
               -e "s|__MIN_REPLICAS__|2|g" \
+              -e "s|__MAX_REPLICAS__|50|g" \
               -e "s|__AWS_ROLE_ARN__|$EKS_ROLE|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/eks.amazonaws.com/serviceaccount/token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-prod -f -
+          
           kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=900s
 
       - name: "🔄 Auto Rollback If Failed"
