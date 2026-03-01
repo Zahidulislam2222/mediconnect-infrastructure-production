@@ -40,7 +40,7 @@ spec:
               value: "__TOKEN_FILE__"
           resources:
             requests:
-              cpu: "1000m"
+              cpu: "100m"
               memory: "64Mi"
             limits:
               cpu: "1000m"
