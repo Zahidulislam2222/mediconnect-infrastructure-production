@@ -21,8 +21,15 @@ spec:
         azure.workload.identity/use: "true"
     spec:
       serviceAccountName: mediconnect-sa
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 3000
+        fsGroup: 2000
       containers:
         - name: communication-service
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
           image: __IMAGE_URI__
           imagePullPolicy: Always
           ports:
