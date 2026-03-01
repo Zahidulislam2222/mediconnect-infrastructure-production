@@ -10,7 +10,7 @@ spec:
     type: RollingUpdate
     rollingUpdate:
       maxSurge: "50%"
-      maxUnavailable: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       app: doctor-service
@@ -41,7 +41,7 @@ spec:
           resources:
             requests:
               cpu: "250m"
-              memory: "128Mi"
+              memory: "64Mi"
             limits:
               cpu: "500m"
               memory: "512Mi"
