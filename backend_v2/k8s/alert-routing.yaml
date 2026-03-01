@@ -1,0 +1,24 @@
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: mediconnect-slack-config
+  namespace: mediconnect-monitoring
+  labels:
+    release: prometheus
+spec:
+  route:
+    groupBy: ['alertname', 'namespace']
+    groupWait: 30s
+    groupInterval: 5m
+    repeatInterval: 12h
+    receiver: 'slack-notifications'
+  receivers:
+  - name: 'slack-notifications'
+    slackConfigs:
+    - apiURL:
+        name: alertmanager-slack-webhook
+        key: url
+      channel: '#mediconnect-alerts'
+      sendResolved: true
+      title: '🏥 Mediconnect Medical Alert'
+      text: "Environment: {{ .ExternalURL }}\nAlert: {{ .CommonAnnotations.summary }}\nDetails: {{ .CommonAnnotations.description }}"

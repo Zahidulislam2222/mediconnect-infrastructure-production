@@ -1,0 +1,50 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: mediconnect-critical-alerts
+  namespace: mediconnect-monitoring
+  labels:
+    release: prometheus # Matches your Helm installation name
+spec:
+  groups:
+  - name: mediconnect-alerts
+    rules:
+    # 1. Alert if any Medical Service is crashing (HIPAA Availability)
+    - alert: PodCrashLooping
+      expr: rate(kube_pod_container_status_restarts_total{namespace=~"mediconnect-.*"}[5m]) > 0
+      for: 2m
+      labels:
+        severity: critical
+      annotations:
+        summary: "Pod {{ $labels.pod }} is crashing"
+        description: "Pod in namespace {{ $labels.namespace }} has restarted multiple times in the last 5 minutes."
+
+    # 2. Alert if API Latency is > 2 seconds (Triggers your Phase 5 Failover)
+    - alert: HighApiLatency
+      expr: histogram_quantile(0.95, sum by (le, service) (rate(http_request_duration_seconds_bucket[5m]))) > 2
+      for: 1m
+      labels:
+        severity: warning
+      annotations:
+        summary: "High Latency on {{ $labels.service }}"
+        description: "95th percentile latency is above 2s. Circuit breaker likely engaged."
+
+    # 3. Alert if HPA is Maxed Out (Cluster Capacity Warning)
+    - alert: HPAMaxedOut
+      expr: kube_horizontalpodautoscaler_status_current_replicas == kube_horizontalpodautoscaler_spec_max_replicas
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "HPA for {{ $labels.horizontalpodautoscaler }} is at 100% capacity"
+        description: "Scaling limit reached. Future traffic spikes will cause 503 errors."
+
+    # 4. Alert on Unauthorized AWS Access (Identity Security)
+    - alert: SecurityAuthFailures
+      expr: sum(rate(aws_vault_sync_errors_total[5m])) > 0
+      for: 1m
+      labels:
+        severity: critical
+      annotations:
+        summary: "AWS Authentication Failure"
+        description: "Pod in {{ $labels.namespace }} is unable to sync with AWS Vault."
