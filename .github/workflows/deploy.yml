@@ -149,7 +149,7 @@ jobs:
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
               -e "s|__AWS_REGION__|us-east-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
-              -e "s|__MAX_REPLICAS__|2|g" \
+              -e "s|__MAX_REPLICAS__|1|g" \
               -e "s|__AWS_ROLE_ARN__|${{ secrets.AZURE_POD_ROLE_ARN }}|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/azure/tokens/azure-identity-token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-staging -f -
@@ -163,7 +163,7 @@ jobs:
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
               -e "s|__AWS_REGION__|eu-central-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
-              -e "s|__MAX_REPLICAS__|2|g" \
+              -e "s|__MAX_REPLICAS__|1|g" \
               -e "s|__AWS_ROLE_ARN__|${{ secrets.EKS_POD_ROLE_ARN }}|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/eks.amazonaws.com/serviceaccount/token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-staging -f -
@@ -222,8 +222,8 @@ jobs:
 
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
               -e "s|__AWS_REGION__|us-east-1|g" \
-              -e "s|__MIN_REPLICAS__|2|g" \
-              -e "s|__MAX_REPLICAS__|4|g" \
+              -e "s|__MIN_REPLICAS__|1|g" \
+              -e "s|__MAX_REPLICAS__|1|g" \
               -e "s|__AWS_ROLE_ARN__|${{ secrets.AZURE_POD_ROLE_ARN }}|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/azure/tokens/azure-identity-token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-prod -f -
@@ -236,8 +236,8 @@ jobs:
 
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
               -e "s|__AWS_REGION__|eu-central-1|g" \
-              -e "s|__MIN_REPLICAS__|2|g" \
-              -e "s|__MAX_REPLICAS__|4|g" \
+              -e "s|__MIN_REPLICAS__|1|g" \
+              -e "s|__MAX_REPLICAS__|1|g" \
               -e "s|__AWS_ROLE_ARN__|${{ secrets.EKS_POD_ROLE_ARN }}|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/eks.amazonaws.com/serviceaccount/token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-prod -f -
