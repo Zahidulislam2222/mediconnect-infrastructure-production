@@ -335,6 +335,7 @@ jobs:
           gcloud run deploy ${{ matrix.service }}-us-backup \
             --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region us-central1 \
+            --service-account="${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}"
             --port ${{ matrix.port }} \
             --min-instances 0 \
             --set-env-vars "NODE_ENV=production,API_PUBLIC_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},AWS_REGION=us-east-1,AWS_ROLE_ARN=$ROLE_ARN,AWS_EC2_METADATA_DISABLED=true" \
@@ -357,6 +358,7 @@ jobs:
           gcloud run deploy ${{ matrix.service }}-eu-backup \
             --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region europe-west3 \
+            --service-account="${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}"
             --port ${{ matrix.port }} \
             --min-instances 0 \
             --set-env-vars "NODE_ENV=production,API_PUBLIC_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},AWS_REGION=eu-central-1,AWS_ROLE_ARN=$ROLE_ARN,AWS_EC2_METADATA_DISABLED=true" \
