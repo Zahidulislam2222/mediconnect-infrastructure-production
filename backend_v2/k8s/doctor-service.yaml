@@ -63,10 +63,10 @@ spec:
 
           resources:
             requests:
-              cpu: "100m"
+              cpu: "10m"
               memory: "64Mi"
             limits:
-              cpu: "1000m"
+              cpu: "500m"
               memory: "512Mi"
           livenessProbe:
             httpGet:
