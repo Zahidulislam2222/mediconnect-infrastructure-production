@@ -20,6 +20,17 @@ app.set('trust proxy', 1);
 const PORT = process.env.PORT || 8084;
 let isAppReady = false;
 
+// 🟢 1. HEALTH CHECKS FIRST (NO LIMIT)
+app.get('/health', (req, res) => res.status(200).json({ status: 'UP', type: 'liveness' }));
+app.get('/ready', (req, res) => {
+    if (isAppReady) {
+        res.status(200).json({ status: 'READY', type: 'readiness', service: 'communication-service' });
+    } else {
+        res.status(503).json({ status: 'BOOTING', type: 'readiness', service: 'communication-service' });
+    }
+});
+
+// 🟢 2. SECURITY LIMITER SECOND (Applies to all routes BELOW)
 const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
     max: 100, 
@@ -73,16 +84,6 @@ app.use(morgan((tokens, req, res) => {
         tokens['verified-user'](req, res), `IP:${req.ip}`
     ].join(' ');
 }, { skip: (req) => req.url === '/health' || req.method === 'OPTIONS' }));
-
-// --- 3. ROUTES ---
-app.get('/health', (req, res) => res.status(200).json({ status: 'UP', type: 'liveness' }));
-app.get('/ready', (req, res) => {
-    if (isAppReady) {
-        res.status(200).json({ status: 'READY', type: 'readiness', service: 'communication-service' });
-    } else {
-        res.status(503).json({ status: 'BOOTING', type: 'readiness', service: 'communication-service' });
-    }
-});
 
 // Apply auth middleware to all clinical routes
 app.use("/chat", authMiddleware, chatController);

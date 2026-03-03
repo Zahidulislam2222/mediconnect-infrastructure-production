@@ -14,12 +14,19 @@ import { getRegionalSSMClient } from './config/aws';
 dotenv.config();
 
 const app = express();
-
-// 🟢 FIX 1: Azure Proxy Trust (MUST be before the limiter)
-// This solves the 'ERR_ERL_UNEXPECTED_X_FORWARDED_FOR' error in your logs
 app.set('trust proxy', 1);
 
-// 🟢 SECURITY: DDoS Protection
+// 🟢 1. HEALTH CHECKS (NO LIMITER)
+app.get('/health', (req, res) => res.status(200).json({ status: 'UP', type: 'liveness' }));
+app.get('/ready', (req, res) => {
+    if (isAppReady) {
+        res.status(200).json({ status: 'READY', type: 'readiness', service: 'doctor-service' });
+    } else {
+        res.status(503).json({ status: 'BOOTING', type: 'readiness', service: 'doctor-service' });
+    }
+});
+
+// 🟢 2. DDoS Protection
 const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
     max: 100, 
@@ -74,15 +81,6 @@ app.use(morgan((tokens, req, res) => {
         tokens['verified-user'](req, res), `IP:${req.ip}`
     ].join(' ');
 }, { skip: (req) => req.method === 'OPTIONS' }));
-
-app.get('/health', (req, res) => res.status(200).json({ status: 'UP', type: 'liveness' }));
-app.get('/ready', (req, res) => {
-    if (isAppReady) {
-        res.status(200).json({ status: 'READY', type: 'readiness', service: 'doctor-service' });
-    } else {
-        res.status(503).json({ status: 'BOOTING', type: 'readiness', service: 'doctor-service' });
-    }
-});
 
 app.use('/', doctorRoutes);
 app.use('/', clinicalRoutes);

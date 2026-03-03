@@ -26,7 +26,17 @@ dotenv.config();
 const app = express();
 app.set('trust proxy', 1);
 
-// 🟢 SECURITY: DDoS Protection
+// 🟢 1. HEALTH CHECKS (NO LIMITER)
+app.get('/health', (req, res) => res.status(200).json({ status: 'UP', type: 'liveness' }));
+app.get('/ready', (req, res) => {
+    if (isAppReady) {
+        res.status(200).json({ status: 'READY', type: 'readiness', service: 'patient-service' });
+    } else {
+        res.status(503).json({ status: 'BOOTING', type: 'readiness', service: 'patient-service' });
+    }
+});
+
+// 🟢 2. DDoS Protection (Applied to all routes BELOW this line)
 const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
     max: 100, 
@@ -85,15 +95,6 @@ app.use(morgan((tokens, req, res) => {
         tokens['verified-user'](req, res), `IP:${req.ip}`
     ].join(' ');
 }, { skip: (req) => req.url === '/health' || req.method === 'OPTIONS' }));
-app.get('/health', (req, res) => res.status(200).json({ status: 'UP', type: 'liveness' }));
-app.get('/ready', (req, res) => {
-    if (isAppReady) {
-        res.status(200).json({ status: 'READY', type: 'readiness', service: 'patient-service' });
-    } else {
-        res.status(503).json({ status: 'BOOTING', type: 'readiness', service: 'patient-service' });
-    }
-});
-
 
 // --- 3. 100% COMPLIANT VAULT SYNC ---
 async function loadSecrets() {
