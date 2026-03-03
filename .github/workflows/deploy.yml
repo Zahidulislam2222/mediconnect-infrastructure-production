@@ -261,7 +261,6 @@ jobs:
         run: |
           IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
 
-          # 1. Logic Switch to pick the right ARN
           if [ "${{ matrix.service }}" == "patient-service" ]; then
              ROLE_ARN="${{ secrets.EKS_PATIENT_ROLE_ARN }}"
           elif [ "${{ matrix.service }}" == "doctor-service" ]; then
@@ -272,14 +271,14 @@ jobs:
              ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
           fi
 
-          # 2. Inject the data into the YAML
           PUBLIC_DOMAIN="${{ vars.AKS_DOMAIN }}"
 
+          # 🟢 FIXED: Comments removed from line ends to prevent syntax error
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
-              -e "s|__PUBLIC_DOMAIN__|$PUBLIC_DOMAIN|g" \  # 👈 Injects the Variable
+              -e "s|__PUBLIC_DOMAIN__|$PUBLIC_DOMAIN|g" \
               -e "s|__AWS_REGION__|us-east-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
-              -e "s|__MAX_REPLICAS__|1|g" \
+              -e "s|__MAX_REPLICAS__|5|g" \
               -e "s|__AWS_ROLE_ARN__|$ROLE_ARN|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/azure/tokens/azure-identity-token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-prod -f -
@@ -290,7 +289,6 @@ jobs:
         run: |
           IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
 
-          # 1. Logic Switch to pick the right ARN
           if [ "${{ matrix.service }}" == "patient-service" ]; then
              ROLE_ARN="${{ secrets.EKS_PATIENT_ROLE_ARN }}"
           elif [ "${{ matrix.service }}" == "doctor-service" ]; then
@@ -301,14 +299,14 @@ jobs:
              ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
           fi
 
-          # 2. Inject the data into the YAML
           PUBLIC_DOMAIN="${{ vars.EKS_DOMAIN }}"
 
+          # 🟢 FIXED: No comments allowed after backslash
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
-              -e "s|__PUBLIC_DOMAIN__|$PUBLIC_DOMAIN|g" \  # 👈 Injects the Variable
+              -e "s|__PUBLIC_DOMAIN__|$PUBLIC_DOMAIN|g" \
               -e "s|__AWS_REGION__|eu-central-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
-              -e "s|__MAX_REPLICAS__|1|g" \
+              -e "s|__MAX_REPLICAS__|5|g" \
               -e "s|__AWS_ROLE_ARN__|$ROLE_ARN|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/eks.amazonaws.com/serviceaccount/token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-prod -f -
@@ -323,7 +321,6 @@ jobs:
 
       - name: "🚀 Deploy Backup (GCP US)"
         run: |
-          # Logic to pick the right AWS Role for the Bridge
           if [ "${{ matrix.service }}" == "patient-service" ]; then
              ROLE_ARN="${{ secrets.EKS_PATIENT_ROLE_ARN }}"
           elif [ "${{ matrix.service }}" == "doctor-service" ]; then
@@ -334,18 +331,18 @@ jobs:
              ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
           fi
 
+          # 🟢 FIXED: Added missing \ after env-vars
           gcloud run deploy ${{ matrix.service }}-us-backup \
             --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region us-central1 \
             --port ${{ matrix.port }} \
             --min-instances 0 \
-            --set-env-vars "NODE_ENV=production,API_PUBLIC_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},AWS_REGION=us-east-1,AWS_ROLE_ARN=$ROLE_ARN,AWS_EC2_METADATA_DISABLED=true"
+            --set-env-vars "NODE_ENV=production,API_PUBLIC_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},AWS_REGION=us-east-1,AWS_ROLE_ARN=$ROLE_ARN,AWS_EC2_METADATA_DISABLED=true" \
             --platform managed \
             --allow-unauthenticated
 
       - name: "🚀 Deploy Backup (GCP EU)"
         run: |
-          # Logic to pick the right AWS Role for the Bridge
           if [ "${{ matrix.service }}" == "patient-service" ]; then
              ROLE_ARN="${{ secrets.EKS_PATIENT_ROLE_ARN }}"
           elif [ "${{ matrix.service }}" == "doctor-service" ]; then
@@ -356,11 +353,12 @@ jobs:
              ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
           fi
 
+          # 🟢 FIXED: Added missing \ after env-vars
           gcloud run deploy ${{ matrix.service }}-eu-backup \
             --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region europe-west3 \
             --port ${{ matrix.port }} \
             --min-instances 0 \
-            --set-env-vars "NODE_ENV=production,API_PUBLIC_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},AWS_REGION=eu-central-1,AWS_ROLE_ARN=$ROLE_ARN,AWS_EC2_METADATA_DISABLED=true"
+            --set-env-vars "NODE_ENV=production,API_PUBLIC_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},AWS_REGION=eu-central-1,AWS_ROLE_ARN=$ROLE_ARN,AWS_EC2_METADATA_DISABLED=true" \
             --platform managed \
             --allow-unauthenticated
