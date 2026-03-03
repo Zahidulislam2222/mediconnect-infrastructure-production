@@ -100,14 +100,17 @@ async function loadSecrets() {
             WithDecryption: true
         });
         const cmd2 = new GetParametersCommand({
-            Names: [
+            Names:[
                 '/mediconnect/prod/db/patient_table', '/mediconnect/prod/db/doctor_table',
-                '/mediconnect/stripe/keys', '/mediconnect/stripe/webhook_secret'
+                '/mediconnect/stripe/keys', '/mediconnect/stripe/webhook_secret',
+                // 🟢 ADDED MISSING GOOGLE SECRETS
+                '/mediconnect/prod/google/client_id',   
+                '/mediconnect/prod/google/client_secret'
             ],
             WithDecryption: true
         });
         const [res1, res2] = await Promise.all([ssm.send(cmd1), ssm.send(cmd2)]);
-        const allParams = [...(res1.Parameters || []), ...(res2.Parameters || [])];
+        const allParams = [...(res1.Parameters || []), ...(res2.Parameters ||[])];
 
         allParams.forEach(p => {
             // Identity US
@@ -118,12 +121,17 @@ async function loadSecrets() {
             if (p.Name === '/mediconnect/prod/cognito/user_pool_id_eu') process.env.COGNITO_USER_POOL_ID_EU = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/client_id_eu_patient') process.env.COGNITO_CLIENT_ID_EU_PATIENT = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/client_id_eu_doctor') process.env.COGNITO_CLIENT_ID_EU_DOCTOR = p.Value;
-            // 🟢 CORRECTED: Separate variables to prevent overwrite
+            
             if (p.Name === '/mediconnect/prod/db/patient_table') process.env.TABLE_PATIENTS = p.Value;
             if (p.Name === '/mediconnect/prod/db/doctor_table') process.env.TABLE_DOCTORS = p.Value;
+            
             // Stripe
             if (p.Name === '/mediconnect/stripe/keys') process.env.STRIPE_SECRET_KEY = p.Value;
             if (p.Name === '/mediconnect/stripe/webhook_secret') process.env.STRIPE_WEBHOOK_SECRET = p.Value;
+
+            // 🟢 GOOGLE MAPPINGS
+            if (p.Name === '/mediconnect/prod/google/client_id') process.env.GOOGLE_CLIENT_ID = p.Value;
+            if (p.Name === '/mediconnect/prod/google/client_secret') process.env.GOOGLE_CLIENT_SECRET = p.Value;
         });
         // Safety Fallbacks
         process.env.COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID_US;

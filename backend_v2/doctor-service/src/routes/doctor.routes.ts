@@ -49,7 +49,7 @@ router.post('/doctors/:id/schedule', authMiddleware, DoctorController.updateSche
 // 3. VERIFICATION ROUTES (AI-Driven)
 // =============================================================================
 router.post('/doctors/:id/verify-diploma', authMiddleware, DoctorController.verifyDiploma);
-
+router.post('/doctors/:id/verify-identity', authMiddleware, DoctorController.verifyDoctorIdentity);
 
 // =============================================================================
 // 4. GOOGLE CALENDAR ROUTES (CSRF Protected)

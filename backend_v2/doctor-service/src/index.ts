@@ -107,8 +107,7 @@ async function loadSecrets() {
                 '/mediconnect/prod/sns/topic_arn_us', 
                 '/mediconnect/prod/sns/topic_arn_eu',  
                 '/mediconnect/prod/google/client_id',   
-                '/mediconnect/prod/google/client_secret',  
-                '/mediconnect/prod/google/redirect_uri'     
+                '/mediconnect/prod/google/client_secret'     
             ],
             WithDecryption: true
         });
@@ -126,6 +125,11 @@ async function loadSecrets() {
             
             if (p.Name === '/mediconnect/prod/db/doctor_table') process.env.DYNAMO_TABLE = p.Value;
             if (p.Name === '/mediconnect/prod/kms/signing_key_id') process.env.KMS_KEY_ID = p.Value;
+
+            if (p.Name === '/mediconnect/prod/sns/topic_arn_us') process.env.SNS_TOPIC_ARN_US = p.Value;
+            if (p.Name === '/mediconnect/prod/sns/topic_arn_eu') process.env.SNS_TOPIC_ARN_EU = p.Value;
+            if (p.Name === '/mediconnect/prod/google/client_id') process.env.GOOGLE_CLIENT_ID = p.Value;
+            if (p.Name === '/mediconnect/prod/google/client_secret') process.env.GOOGLE_CLIENT_SECRET = p.Value;
         });
         process.env.COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID_US;
         process.env.COGNITO_CLIENT_ID = process.env.COGNITO_CLIENT_ID_US_DOCTOR;

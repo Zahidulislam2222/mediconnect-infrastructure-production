@@ -92,25 +92,20 @@ export const getVitals = async (req: Request, res: Response) => {
  */
 export const pushVitalToBigQuery = async (patientId: string, vitalData: any, region: string) => {
     try {
-        // 1. Fetch the correct Service Account Key from the Regional Vault
-        const saKey = await getSSMParameter("/mediconnect/prod/gcp/service-account", region, true);
-        if (!saKey) return;
 
-        const credentials = JSON.parse(saKey);
         const auth = new GoogleAuth({
-            credentials,
             scopes: ['https://www.googleapis.com/auth/cloud-platform']
         });
 
         const client = await auth.getClient();
         const accessToken = (await client.getAccessToken()).token;
-        const projectId = credentials.project_id;
+        const projectId = await auth.getProjectId(); // Auto-detected from WIF config
 
-        // 2. 🟢 DATA SOVEREIGNTY: Select Dataset based on Region
+        // 🟢 DATA SOVEREIGNTY: Select Dataset based on Region
         const datasetName = region.toUpperCase() === 'EU' ? 'iot_eu' : 'iot';
         const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/datasets/${datasetName}/tables/vitals_raw/insertAll`;
 
-        // 3. Push to BigQuery (Matches your exact "data" JSON column schema)
+        // 3. Push to BigQuery
         await fetch(url, {
             method: "POST",
             headers: {
@@ -121,7 +116,6 @@ export const pushVitalToBigQuery = async (patientId: string, vitalData: any, reg
                 kind: "bigquery#tableDataInsertAllRequest",
                 rows: [{
                     json: {
-                        // Your screenshot shows a single column named "data" of type JSON
                         data: JSON.stringify({
                             patientId: patientId,
                             timestamp: new Date().toISOString(),

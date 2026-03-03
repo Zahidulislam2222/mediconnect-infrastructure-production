@@ -72,6 +72,13 @@ spec:
                 name: doctor-service
                 port:
                   number: 80
+          - path: /__PREFIX__(register-doctor.*) # 🟢 ADDED THIS
+            pathType: Prefix
+            backend:
+              service:
+                name: doctor-service
+                port:
+                  number: 80
           - path: /__PREFIX__(prescription.*)
             pathType: Prefix
             backend:

@@ -8,9 +8,9 @@ import { GetParametersCommand } from "@aws-sdk/client-ssm";
 
 import { chatController } from "./controllers/chat.controller";
 import { videoController } from "./controllers/video.controller";
-import { aiRoutes } from "./routes/ai.routes"; // 🟢 From previous step
+import { aiRoutes } from "./routes/ai.routes"; 
 import { authMiddleware } from './middleware/auth.middleware';
-import { getRegionalSSMClient } from "./config/aws"; // 🟢 REGIONAL FACTORY
+import { getRegionalSSMClient } from "./config/aws"; 
 
 dotenv.config();
 
@@ -87,7 +87,7 @@ app.get('/ready', (req, res) => {
 // Apply auth middleware to all clinical routes
 app.use("/chat", authMiddleware, chatController);
 app.use("/video", authMiddleware, videoController);
-app.use("/ai", aiRoutes); // 🟢 Clean mounting
+app.use("/ai", aiRoutes); 
 
 // --- 4. 100% COMPLIANT VAULT SYNC ---
 async function loadSecrets() {
@@ -97,9 +97,9 @@ async function loadSecrets() {
     try {
         console.log(`🔐 Synchronizing Communication secrets with AWS Vault [${region}]...`);
 
-        // 🟢 BATCH 1: Identity (6 params)
+        // 🟢 BATCH 1: Identity Only (This service doesn't need Stripe or DB Tables config)
         const cmd1 = new GetParametersCommand({
-            Names: [
+            Names:[
                 '/mediconnect/prod/cognito/user_pool_id',
                 '/mediconnect/prod/cognito/client_id_patient',
                 '/mediconnect/prod/cognito/client_id_doctor',
@@ -110,24 +110,12 @@ async function loadSecrets() {
             WithDecryption: true
         });
 
-        // 🟢 BATCH 2: Infrastructure & Stripe (5 params)
-        const cmd2 = new GetParametersCommand({
-            Names: [
-                '/mediconnect/prod/db/patient_table',
-                '/mediconnect/prod/db/doctor_table',
-                '/mediconnect/prod/kms/signing_key_id',
-                '/mediconnect/stripe/keys',      
-                '/mediconnect/stripe/webhook_secret'
-            ],
-            WithDecryption: true
-        });
+        const res1 = await ssm.send(cmd1);
 
-        const [res1, res2] = await Promise.all([ssm.send(cmd1), ssm.send(cmd2)]);
-        const allParams = [...(res1.Parameters || []), ...(res2.Parameters || [])];
+        const allParams = res1.Parameters || [];
 
         if (allParams.length === 0) throw new Error("No secrets found in Parameter Store.");
-
-        allParams.forEach(p => {
+        allParams.forEach((p: any) => {
             // 1. Identity US Mapping (Strict Matching)
             if (p.Name === '/mediconnect/prod/cognito/user_pool_id') process.env.COGNITO_USER_POOL_ID_US = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/client_id_patient') process.env.COGNITO_CLIENT_ID_US_PATIENT = p.Value;
@@ -137,15 +125,6 @@ async function loadSecrets() {
             if (p.Name === '/mediconnect/prod/cognito/user_pool_id_eu') process.env.COGNITO_USER_POOL_ID_EU = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/client_id_eu_patient') process.env.COGNITO_CLIENT_ID_EU_PATIENT = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/client_id_eu_doctor') process.env.COGNITO_CLIENT_ID_EU_DOCTOR = p.Value;
-
-            // 3. Infrastructure
-            if (p.Name === '/mediconnect/prod/db/patient_table') process.env.TABLE_PATIENTS = p.Value;
-            if (p.Name === '/mediconnect/prod/db/doctor_table') process.env.TABLE_DOCTORS = p.Value;
-            if (p.Name === '/mediconnect/prod/kms/signing_key_id') process.env.KMS_KEY_ID = p.Value;
-
-            // 4. Stripe
-            if (p.Name === '/mediconnect/stripe/keys') process.env.STRIPE_SECRET_KEY = p.Value;
-            if (p.Name === '/mediconnect/stripe/webhook_secret') process.env.STRIPE_WEBHOOK_SECRET = p.Value;
         });
 
         // 🟢 CRITICAL SAFETY BRIDGE (Aligns with aws.ts getters)

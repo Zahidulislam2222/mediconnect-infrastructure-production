@@ -3,7 +3,8 @@ import admin from 'firebase-admin';
 // Initialize with a Service Account (Architecture 2: Store this in SSM later!)
 if (!admin.apps.length) {
     admin.initializeApp({
-        credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || '{}'))
+
+        credential: admin.credential.applicationDefault() 
     });
 }
 

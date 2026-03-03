@@ -210,17 +210,15 @@ export class AICircuitBreaker {
 
     private async getGCPAuth(region: string) {
         if (!this.googleAuth) {
-            // 🟢 Pass Region down to SSM
-            const saKey = await getSSMParameter("/mediconnect/prod/gcp/service-account", region, true);
-            if (!saKey) throw new Error("GCP_KEY_MISSING");
             this.googleAuth = new GoogleAuth({
-                credentials: JSON.parse(saKey),
-                scopes: ['https://www.googleapis.com/auth/cloud-platform']
+                scopes:['https://www.googleapis.com/auth/cloud-platform']
             });
         }
+        
         const client = await this.googleAuth.getClient();
         const token = (await client.getAccessToken()).token;
-        const projId = (this.googleAuth as any).projectId || JSON.parse((await getSSMParameter("/mediconnect/prod/gcp/service-account", region, true))!).project_id;
+        const projId = await this.googleAuth.getProjectId(); 
+        
         return { accessToken: token, projectId: projId };
     }
 }

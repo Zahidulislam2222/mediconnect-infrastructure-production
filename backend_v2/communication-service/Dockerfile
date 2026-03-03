@@ -34,6 +34,9 @@ RUN npm prune --omit=dev
 # ==========================================
 FROM node:20-alpine
 WORKDIR /app
+
+RUN apk add --no-cache curl
+
 RUN chown -R node:node /app
 USER node
 
@@ -46,4 +49,13 @@ ENV NODE_ENV=production
 ENV PORT=8084
 EXPOSE 8084
 
-CMD ["node", "dist/communication-service/src/index.js"]
+CMD sh -c 'if [ -n "$K_SERVICE" ]; then \
+      echo "☁️ Cloud Run Detected: Bridging OIDC Identity..."; \
+      # Start a background loop (&) to refresh the token every 50 mins \
+      (while true; do curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=sts.amazonaws.com" > /tmp/aws-token; sleep 3000; done) & \
+      export AWS_WEB_IDENTITY_TOKEN_FILE=/tmp/aws-token; \
+      # Wait 2 seconds to ensure the first token is written before Node boots \
+      sleep 2; \
+      echo "✅ Token bridged & background auto-refresh started!"; \
+    fi; \
+    node dist/communication-service/src/index.js'

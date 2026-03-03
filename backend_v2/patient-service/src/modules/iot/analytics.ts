@@ -8,17 +8,7 @@ let bigquery: BigQuery;
 
 async function getBigQueryClient() {
     if (!bigquery) {
-        const projectId = process.env.GCP_PROJECT_ID;
-        const clientEmail = process.env.GCP_CLIENT_EMAIL;
-        const privateKey = process.env.GCP_PRIVATE_KEY;
-
-        bigquery = new BigQuery({
-            projectId,
-            credentials: {
-                client_email: clientEmail,
-                private_key: privateKey?.replace(/\\n/g, '\n'),
-            }
-        });
+        bigquery = new BigQuery(); 
     }
     return bigquery;
 }

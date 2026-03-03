@@ -561,7 +561,7 @@ async function syncToGoogleCalendar(doctorId: string, timeSlot: string, patientN
         const oauth2Client = new google.auth.OAuth2(
             process.env.GOOGLE_CLIENT_ID,
             process.env.GOOGLE_CLIENT_SECRET,
-            process.env.GOOGLE_REDIRECT_URI
+            `${process.env.API_PUBLIC_URL}/doctors/auth/google/callback`
         );
         oauth2Client.setCredentials({ refresh_token: refreshToken });
         const calendar = google.calendar({ version: 'v3', auth: oauth2Client });

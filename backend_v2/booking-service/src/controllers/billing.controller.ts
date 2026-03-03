@@ -3,6 +3,7 @@ import { getRegionalClient, getSSMParameter } from '../config/aws';
 import { QueryCommand, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import Stripe from "stripe";
 import { writeAuditLog } from '../../../shared/audit';
+import { GoogleAuth } from "google-auth-library";
 
 const TABLE_TRANSACTIONS = process.env.TABLE_TRANSACTIONS || "mediconnect-transactions";
 
@@ -223,23 +224,31 @@ export const getDoctorAnalytics = async (req: Request, res: Response) => {
 // 🟢 GDPR FIX: Push revenue data to regional BigQuery
 const pushRevenueToBigQuery = async (txData: any, region: string) => {
     try {
-        const saKey = await getSSMParameter("/mediconnect/prod/gcp/service-account", region, true);
-        if (!saKey) return;
-        const credentials = JSON.parse(saKey);
+        const auth = new GoogleAuth({
+            scopes:['https://www.googleapis.com/auth/cloud-platform']
+        });
+        
+        const client = await auth.getClient();
+        const accessToken = (await client.getAccessToken()).token;
+        const projectId = await auth.getProjectId();
+
         const dataset = region.toUpperCase() === 'EU' ? "mediconnect_analytics_eu" : "mediconnect_analytics";
         
-        // Ensure you created this table with NUMERIC amount and TIMESTAMP
-        const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${credentials.project_id}/datasets/${dataset}/tables/analytics_revenue/insertAll`;
+        const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/datasets/${dataset}/tables/analytics_revenue/insertAll`;
 
         await fetch(url, {
             method: "POST",
-            headers: { "Content-Type": "application/json" }, 
+            headers: { 
+                "Authorization": `Bearer ${accessToken}`,
+                "Content-Type": "application/json" 
+            }, 
             body: JSON.stringify({
-                rows: [{
+                kind: "bigquery#tableDataInsertAllRequest",
+                rows:[{
                     json: {
                         transaction_id: txData.billId,
                         patient_id: txData.patientId,
-                        doctor_id: txData.doctorId, // Ensure this exists in your bill item
+                        doctor_id: txData.doctorId, 
                         amount: txData.amount,
                         currency: "USD",
                         status: "PAID",
@@ -248,5 +257,7 @@ const pushRevenueToBigQuery = async (txData: any, region: string) => {
                 }]
             })
         });
-    } catch (e) { console.error("BigQuery Revenue Sync Failed"); }
+    } catch (e: any) { 
+        console.error("BigQuery Revenue Sync Failed", e.message); 
+    }
 };

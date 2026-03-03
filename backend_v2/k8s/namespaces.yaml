@@ -13,24 +13,105 @@ kind: Namespace
 metadata:
   name: mediconnect-monitoring
 ---
+# ==========================================
+# 🟢 1. PATIENT SERVICE IDENTITY
+# ==========================================
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: mediconnect-sa
-  namespace: mediconnect-staging
+  name: patient-sa
+  namespace: mediconnect-prod
   annotations:
-    eks.amazonaws.com/role-arn: "__POD_ROLE_ARN__"
-    azure.workload.identity/client-id: "__AZURE_CLIENT_ID__"
+    eks.amazonaws.com/role-arn: "__EKS_PATIENT_ROLE_ARN__"
+    azure.workload.identity/client-id: "__AZURE_PATIENT_CLIENT_ID__"
   labels:
     azure.workload.identity/use: "true"
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
-  name: mediconnect-sa
+  name: patient-sa
+  namespace: mediconnect-staging
+  annotations:
+    eks.amazonaws.com/role-arn: "__EKS_PATIENT_ROLE_ARN__"
+    azure.workload.identity/client-id: "__AZURE_PATIENT_CLIENT_ID__"
+  labels:
+    azure.workload.identity/use: "true"
+
+# ==========================================
+# 🟢 2. DOCTOR SERVICE IDENTITY
+# ==========================================
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: doctor-sa
   namespace: mediconnect-prod
   annotations:
-    eks.amazonaws.com/role-arn: "__POD_ROLE_ARN__"
-    azure.workload.identity/client-id: "__AZURE_CLIENT_ID__"
+    eks.amazonaws.com/role-arn: "__EKS_DOCTOR_ROLE_ARN__"
+    azure.workload.identity/client-id: "__AZURE_DOCTOR_CLIENT_ID__"
+  labels:
+    azure.workload.identity/use: "true"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: doctor-sa
+  namespace: mediconnect-staging
+  annotations:
+    eks.amazonaws.com/role-arn: "__EKS_DOCTOR_ROLE_ARN__"
+    azure.workload.identity/client-id: "__AZURE_DOCTOR_CLIENT_ID__"
+  labels:
+    azure.workload.identity/use: "true"
+
+# ==========================================
+# 🟢 3. BOOKING SERVICE IDENTITY
+# ==========================================
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: booking-sa
+  namespace: mediconnect-prod
+  annotations:
+    eks.amazonaws.com/role-arn: "__EKS_BOOKING_ROLE_ARN__"
+    azure.workload.identity/client-id: "__AZURE_BOOKING_CLIENT_ID__"
+  labels:
+    azure.workload.identity/use: "true"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: booking-sa
+  namespace: mediconnect-staging
+  annotations:
+    eks.amazonaws.com/role-arn: "__EKS_BOOKING_ROLE_ARN__"
+    azure.workload.identity/client-id: "__AZURE_BOOKING_CLIENT_ID__"
+  labels:
+    azure.workload.identity/use: "true"
+
+# ==========================================
+# 🟢 4. COMMUNICATION SERVICE IDENTITY
+# ==========================================
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: communication-sa
+  namespace: mediconnect-prod
+  annotations:
+    eks.amazonaws.com/role-arn: "__EKS_COMM_ROLE_ARN__"
+    azure.workload.identity/client-id: "__AZURE_COMM_CLIENT_ID__"
+  labels:
+    azure.workload.identity/use: "true"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: communication-sa
+  namespace: mediconnect-staging
+  annotations:
+    eks.amazonaws.com/role-arn: "__EKS_COMM_ROLE_ARN__"
+    azure.workload.identity/client-id: "__AZURE_COMM_CLIENT_ID__"
   labels:
     azure.workload.identity/use: "true"

@@ -7,6 +7,7 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { connect } from 'mqtt';
 import { GetParametersCommand } from "@aws-sdk/client-ssm";
+import { defaultProvider } from "@aws-sdk/credential-provider-node";
 
 // Shared Utilities
 import { safeLog, safeError } from '../../shared/logger';
@@ -109,7 +110,7 @@ async function loadSecrets() {
                 '/mediconnect/prod/s3/patient_identity_bucket',
                 '/mediconnect/prod/mqtt/endpoint',
                 '/mediconnect/prod/sns/topic_arn_us',
-                '/mediconnect/prod/sns/topic_arn_eu'
+                '/mediconnect/prod/sns/topic_arn_eu',
             ],
             WithDecryption: true
         });
@@ -167,26 +168,27 @@ async function loadSecrets() {
 }
 
 // --- 4. IOT BRIDGE (AUTHENTICATED) ---
-const startIoTBridge = () => {
+const startIoTBridge = async () => { 
     if (!process.env.MQTT_BROKER_URL) {
         console.warn("⚠️ MQTT Bridge Skipped: No Broker URL Found");
         return;
     }
 
     try {
-        // 🟢 FIX 1: Extract region directly from URL to prevent Signature Mismatch
-        // Ensures signature matches the 'us-east-1' or 'eu-central-1' host in the URL
         const brokerHost = process.env.MQTT_BROKER_URL.replace('mqtts://', '').replace('wss://', '').split('/')[0];
         const brokerRegion = brokerHost.split('.')[2] || 'us-east-1';
 
-        console.log(`📡 Calculating Secure SigV4 Connection for [${brokerRegion}]...`);
-        
+        console.log(`📡 Calculating Secure SigV4 Connection for[${brokerRegion}]...`);
+
+        const credentialProvider = defaultProvider();
+        const credentials = await credentialProvider(); 
+
         const signedUrl = getSignedIoTUrl(
             process.env.MQTT_BROKER_URL,
-            brokerRegion, // 🟢 Derived Region
-            process.env.AWS_ACCESS_KEY_ID || '',
-            process.env.AWS_SECRET_ACCESS_KEY || '',
-            process.env.AWS_SESSION_TOKEN
+            brokerRegion,
+            credentials.accessKeyId,     
+            credentials.secretAccessKey,  
+            credentials.sessionToken      
         );
 
         // 🟢 FIX 2: Generate Unique Client ID to stop the ECONNRESET loop (ID Conflict)

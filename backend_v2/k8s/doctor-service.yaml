@@ -20,31 +20,47 @@ spec:
         app: doctor-service
         azure.workload.identity/use: "true"
     spec:
-      serviceAccountName: mediconnect-sa
+      serviceAccountName: doctor-sa
+      
+      # 🛡️ POD SECURITY (HIPAA Requirement)
       securityContext:
         runAsUser: 1000
         runAsGroup: 3000
         fsGroup: 2000
+
       containers:
         - name: doctor-service
+          # 🛡️ CONTAINER SECURITY (Block Root Access)
           securityContext:
             allowPrivilegeEscalation: false
             runAsNonRoot: true
+          
           image: __IMAGE_URI__
           imagePullPolicy: Always
           ports:
             - containerPort: 8082
+          
           env:
             - name: NODE_ENV
               value: "production"
             - name: PORT
               value: "8082"
+            - name: API_PUBLIC_URL
+              value: "__PUBLIC_DOMAIN__" 
             - name: AWS_REGION
               value: "__AWS_REGION__"
             - name: AWS_ROLE_ARN
               value: "__AWS_ROLE_ARN__"
             - name: AWS_WEB_IDENTITY_TOKEN_FILE
               value: "__TOKEN_FILE__"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/var/run/secrets/gcp/gcp-wif-config.json"
+
+          volumeMounts:
+            - name: gcp-wif-volume
+              mountPath: "/var/run/secrets/gcp"
+              readOnly: true
+
           resources:
             requests:
               cpu: "100m"
@@ -65,6 +81,12 @@ spec:
               port: 8082
             initialDelaySeconds: 60
             periodSeconds: 10
+
+      volumes:
+        - name: gcp-wif-volume
+          configMap:
+            name: gcp-wif-config
+            optional: true
 ---
 apiVersion: v1
 kind: Service

@@ -1,23 +1,19 @@
 // C:\Dev\mediconnect-project\mediconnect-infrastructure-develop\backend_v2\doctor-service\src\controllers\doctor.controller.ts
 
 import { NextFunction, Request, Response } from 'express';
-import { generatePresignedUrl } from '../utils/s3';
-import { GetObjectCommand } from "@aws-sdk/client-s3";
+import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { CompareFacesCommand } from "@aws-sdk/client-rekognition";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { TextractClient, AnalyzeDocumentCommand } from "@aws-sdk/client-textract";
-import { SNSClient, PublishCommand } from "@aws-sdk/client-sns";
+import { PublishCommand } from "@aws-sdk/client-sns";
 import { google } from 'googleapis';
 import { PutCommand, GetCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
-import { getRegionalClient, getRegionalS3Client, getSSMParameter } from '../config/aws';
+import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient, getRegionalSNSClient } from '../config/aws';
 import { writeAuditLog } from '../../../shared/audit';
 import jwt from 'jsonwebtoken';
+import { GoogleAuth } from "google-auth-library";
 
 const TABLE_DOCTORS = process.env.DYNAMO_TABLE || "mediconnect-doctors";
-
-const credentials = {
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
-    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || ''
-};
 
 // Helper to handle async errors
 const catchAsync = (fn: any) => (req: Request, res: Response, next: NextFunction) => {
@@ -122,6 +118,71 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
     res.status(201).json({ message: "Doctor profile created", profile: item });
 });
 
+export const verifyDoctorIdentity = catchAsync(async (req: Request, res: Response) => {
+    const region = extractRegion(req) as string;
+    const authUser = (req as any).user;
+    
+    const { selfieImage, idImage } = req.body;
+    if (!authUser?.sub || !selfieImage) return res.status(400).json({ error: "Missing identity data" });
+
+    const userId = authUser.sub;
+    const docClient = getRegionalClient(region); 
+
+    const userCheck = await docClient.send(new GetCommand({
+        TableName: TABLE_DOCTORS,
+        Key: { doctorId: userId }
+    }));
+
+    if (!userCheck.Item) {
+        return res.status(401).json({ error: "Security Alert: Doctor account no longer exists." });
+    }
+
+    const idCardKey = `doctor/${userId}/id_card.jpg`;
+    const regionalS3 = getRegionalS3Client(region);
+    const regionalRek = getRegionalRekognitionClient(region);
+    
+    const bucketName = region.toUpperCase() === 'EU' ? 'mediconnect-identity-verification-eu' : 'mediconnect-identity-verification';
+
+    if (idImage) {
+        await regionalS3.send(new PutObjectCommand({
+            Bucket: bucketName,
+            Key: idCardKey,
+            Body: Buffer.from(idImage, 'base64'),
+            ContentType: 'image/jpeg'
+        }));
+    }
+
+    const compareCmd = new CompareFacesCommand({
+        SourceImage: { S3Object: { Bucket: bucketName, Name: idCardKey } },
+        TargetImage: { Bytes: Buffer.from(selfieImage, 'base64') },
+        SimilarityThreshold: 80
+    });
+    
+    const aiResponse = await regionalRek.send(compareCmd);
+    if (!aiResponse.FaceMatches || aiResponse.FaceMatches.length === 0) {
+        return res.json({ verified: false, message: "Face does not match Medical ID card." });
+    }
+
+    const selfieKey = `doctor/${userId}/selfie_verified.jpg`;
+    await regionalS3.send(new PutObjectCommand({
+        Bucket: bucketName, Key: selfieKey,
+        Body: Buffer.from(selfieImage, 'base64'), ContentType: 'image/jpeg'
+    }));
+
+    await docClient.send(new UpdateCommand({
+        TableName: TABLE_DOCTORS,
+        Key: { doctorId: userId },
+        UpdateExpression: "set avatar = :a, isIdentityVerified = :v, identityStatus = :s",
+        ExpressionAttributeValues: { ':a': selfieKey, ':v': true, ':s': "VERIFIED" }
+    }));
+
+    await writeAuditLog(userId, userId, "IDENTITY_VERIFIED", "Doctor AI facial biometric match successful", {
+        region, ipAddress: req.ip
+    });
+
+    return res.json({ verified: true, message: "Doctor Identity Verified" });
+});
+
 export const getDoctor = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req) as string;
     const docClient = getRegionalClient(region);
@@ -172,7 +233,6 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
 
     if (parts.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 
-    // 🟢 DYNAMODB RESERVED WORD FIX (Escaping 'name' and 'text')
     if (updates.name) {
         parts.push("#res.#nm[0].#txt = :fhirName");
         names["#res"] = "resource";
@@ -224,7 +284,7 @@ export const getDoctors = catchAsync(async (req: Request, res: Response) => {
         doctorId: doc.doctorId,
         name: doc.name,
         specialization: doc.specialization,
-        avatar: await signAvatarUrl(doc.avatar, region), // Signed URL
+        avatar: await signAvatarUrl(doc.avatar, region), 
         bio: doc.bio,
         consultationFee: doc.consultationFee,
         verificationStatus: doc.verificationStatus,
@@ -242,7 +302,6 @@ export const getSchedule = catchAsync(async (req: Request, res: Response) => {
     const docClient = getRegionalClient(extractRegion(req) as string);
     const { id } = req.params;
 
-    // 🟢 DYNAMODB RESERVED WORD FIX (Escaping 'schedule')
     const result = await docClient.send(new GetCommand({
         TableName: TABLE_DOCTORS,
         Key: { doctorId: id },
@@ -263,7 +322,6 @@ export const updateSchedule = catchAsync(async (req: Request, res: Response) => 
     if (!authUser || authUser.sub !== id) return res.status(403).json({ error: "Unauthorized" });
     if (!schedule || typeof schedule !== 'object') return res.status(400).json({ error: 'Invalid schedule format.' });
 
-    // 🟢 DYNAMODB RESERVED WORD FIX (Escaping 'schedule')
     await docClient.send(new UpdateCommand({
         TableName: TABLE_DOCTORS, Key: { doctorId: id },
         UpdateExpression: "SET #sch = :s, #tz = :t",
@@ -283,9 +341,9 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req) as string;
     const docClient = getRegionalClient(region);
     
+    // 🟢 KEYLESS FIX: AWS WIF automatically provides credentials to this client
     const regionalTextract = new TextractClient({ 
-        region: region.toUpperCase() === 'EU' ? 'eu-central-1' : 'us-east-1', 
-        credentials 
+        region: region.toUpperCase() === 'EU' ? 'eu-central-1' : 'us-east-1'
     });
 
     const { id } = req.params;
@@ -306,7 +364,7 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
 
     const command = new AnalyzeDocumentCommand({
         Document: { S3Object: { Bucket: bucketName, Name: s3Key } },
-        FeatureTypes: ["QUERIES"],
+        FeatureTypes:["QUERIES"],
         QueriesConfig: {
             Queries:[
                 { Text: "What is the full name of the graduate or person on this document?", Alias: "GRADUATE_NAME" },
@@ -342,12 +400,13 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
 
         if (isLegit) {
             const maskedId = `${String(id).substring(0, 4)}****`;
-            const regionalSns = new SNSClient({ region: region.toUpperCase() === 'EU' ? 'eu-central-1' : 'us-east-1', credentials });
+            
+            // 🟢 KEYLESS FIX: Use Shared Factory for SNS
+            const regionalSns = getRegionalSNSClient(region);
+            
             logDoctorOnboarding(id, "AI_VERIFICATION", "PENDING_OFFICER_APPROVAL", region).catch(console.error);
             
-            const topicArn = region.toUpperCase() === 'EU' 
-                ? process.env.SNS_TOPIC_ARN_EU 
-                : process.env.SNS_TOPIC_ARN_US;
+            const topicArn = region.toUpperCase() === 'EU' ? process.env.SNS_TOPIC_ARN_EU : process.env.SNS_TOPIC_ARN_US;
             
             await regionalSns.send(new PublishCommand({
                 TopicArn: topicArn,
@@ -378,16 +437,31 @@ export const getCalendarStatus = catchAsync(async (req: Request, res: Response) 
 
 export const connectGoogleCalendar = catchAsync(async (req: Request, res: Response) => {
     const { id } = req.query; 
+
+    // 🟢 1. FIX: Define secureState using JWT (This was missing!)
     const secret = process.env.GOOGLE_CLIENT_SECRET || 'fallback_secret';
     const secureState = jwt.sign({ doctorId: id }, secret, { expiresIn: '15m' });
-    
+
+    // 🟢 2. Dynamic Redirect URI
+    const apiDomain = process.env.API_PUBLIC_URL || ""; 
+    if (!apiDomain) {
+        console.error("❌ CRITICAL ERROR: API_PUBLIC_URL is not defined in environment variables!");
+    }
+    const redirectUri = `${apiDomain}/doctors/auth/google/callback`;
+
     const oauth2Client = new google.auth.OAuth2(
         process.env.GOOGLE_CLIENT_ID,
         process.env.GOOGLE_CLIENT_SECRET,
-        process.env.GOOGLE_REDIRECT_URI
+        `${process.env.API_PUBLIC_URL}/doctors/auth/google/callback`
     );
     
-    const url = oauth2Client.generateAuthUrl({ access_type: 'offline', scope: ['https://www.googleapis.com/auth/calendar'], state: secureState });
+    // 🟢 3. Generate URL
+    const url = oauth2Client.generateAuthUrl({ 
+        access_type: 'offline', 
+        scope: ['https://www.googleapis.com/auth/calendar'], 
+        state: secureState // ✅ Now this variable exists
+    });
+
     res.json({ url });
 });
 
@@ -459,16 +533,26 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
 
 const logDoctorOnboarding = async (doctorId: string, eventType: string, status: string, region: string) => {
     try {
-        const saKey = await getSSMParameter("/mediconnect/prod/gcp/service-account", region, true);
-        if (!saKey) return;
-        const credentials = JSON.parse(saKey);
-        const dataset = region.toUpperCase() === 'EU' ? "mediconnect_analytics_eu" : "mediconnect_analytics";
+        // 🟢 PROFESSIONAL FIX: Keyless WIF Authentication
+        const auth = new GoogleAuth({
+            scopes:['https://www.googleapis.com/auth/cloud-platform']
+        });
+        
+        const client = await auth.getClient();
+        const accessToken = (await client.getAccessToken()).token;
+        const projectId = await auth.getProjectId();
 
-        const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${credentials.project_id}/datasets/${dataset}/tables/doctor_onboarding_logs/insertAll`;
+        const dataset = region.toUpperCase() === 'EU' ? "mediconnect_analytics_eu" : "mediconnect_analytics";
+        const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/datasets/${dataset}/tables/doctor_onboarding_logs/insertAll`;
 
         await fetch(url, {
             method: "POST",
+            headers: {
+                "Authorization": `Bearer ${accessToken}`,
+                "Content-Type": "application/json"
+            },
             body: JSON.stringify({
+                kind: "bigquery#tableDataInsertAllRequest",
                 rows:[{
                     json: {
                         doctor_id: doctorId,
@@ -479,7 +563,9 @@ const logDoctorOnboarding = async (doctorId: string, eventType: string, status: 
                 }]
             })
         });
-    } catch (e) { console.error("BigQuery Onboarding Log Failed"); }
+    } catch (e: any) { 
+        console.error("BigQuery Onboarding Log Failed", e.message); 
+    }
 };
 
 export const approveDoctorByOfficer = catchAsync(async (req: Request, res: Response) => {
@@ -528,7 +614,6 @@ export async function syncToGoogleCalendar(doctorId: string, timeSlot: string, p
             return;
         }
 
-        // 🟢 FIX: Instantiate locally
         const oauth2Client = new google.auth.OAuth2(
             process.env.GOOGLE_CLIENT_ID,
             process.env.GOOGLE_CLIENT_SECRET,

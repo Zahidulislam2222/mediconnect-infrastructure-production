@@ -97,17 +97,36 @@ jobs:
           az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
           aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
 
-      - name: "🏗️ Setup Multi-Env Routing (Universal Fix)"
+      - name: "🏗️ Setup Multi-Env Routing & Identity"
         run: |
-          # 1. Apply Identities (Using Professional Secrets)
-          sed -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" -e "s|__POD_ROLE_ARN__|${{ secrets.AZURE_POD_ROLE_ARN }}|g" backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=aks.kubeconfig apply -f -
-          sed -e "s|__AZURE_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" -e "s|__POD_ROLE_ARN__|${{ secrets.EKS_POD_ROLE_ARN }}|g" backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=eks.kubeconfig apply -f -
+          # 1. Apply Identities (Injecting 4 Separate Role ARNs)
+          # Note: We map specific AWS Roles. For Azure, we map the Client ID.
           
-          # 2. Setup Staging Gateway (Prefix: http://IP/staging/chat)
+          sed -e "s|__AZURE_PATIENT_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__AZURE_DOCTOR_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__AZURE_BOOKING_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__AZURE_COMM_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__EKS_PATIENT_ROLE_ARN__|${{ secrets.EKS_PATIENT_ROLE_ARN }}|g" \
+              -e "s|__EKS_DOCTOR_ROLE_ARN__|${{ secrets.EKS_DOCTOR_ROLE_ARN }}|g" \
+              -e "s|__EKS_BOOKING_ROLE_ARN__|${{ secrets.EKS_BOOKING_ROLE_ARN }}|g" \
+              -e "s|__EKS_COMM_ROLE_ARN__|${{ secrets.EKS_COMM_ROLE_ARN }}|g" \
+              backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=aks.kubeconfig apply -f -
+
+          sed -e "s|__AZURE_PATIENT_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__AZURE_DOCTOR_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__AZURE_BOOKING_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__AZURE_COMM_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__EKS_PATIENT_ROLE_ARN__|${{ secrets.EKS_PATIENT_ROLE_ARN }}|g" \
+              -e "s|__EKS_DOCTOR_ROLE_ARN__|${{ secrets.EKS_DOCTOR_ROLE_ARN }}|g" \
+              -e "s|__EKS_BOOKING_ROLE_ARN__|${{ secrets.EKS_BOOKING_ROLE_ARN }}|g" \
+              -e "s|__EKS_COMM_ROLE_ARN__|${{ secrets.EKS_COMM_ROLE_ARN }}|g" \
+              backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=eks.kubeconfig apply -f -
+          
+          # 2. Setup Staging Gateway
           sed "s|__PREFIX__|staging/|g" backend_v2/k8s/api-gateway.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-staging -f -
           sed "s|__PREFIX__|staging/|g" backend_v2/k8s/api-gateway.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-staging -f -
           
-          # 3. Setup Production Gateway (Root: http://IP/chat)
+          # 3. Setup Production Gateway
           sed "s|__PREFIX__||g" backend_v2/k8s/api-gateway.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-prod -f -
           sed "s|__PREFIX__||g" backend_v2/k8s/api-gateway.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-prod -f -
 
@@ -146,11 +165,22 @@ jobs:
         run: |
           IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
           
+          # 🟢 LOGIC SWITCH ADDED
+          if [ "${{ matrix.service }}" == "patient-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_PATIENT_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "doctor-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_DOCTOR_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "booking-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "communication-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
+          fi
+
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
               -e "s|__AWS_REGION__|us-east-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
               -e "s|__MAX_REPLICAS__|1|g" \
-              -e "s|__AWS_ROLE_ARN__|${{ secrets.AZURE_POD_ROLE_ARN }}|g" \
+              -e "s|__AWS_ROLE_ARN__|$ROLE_ARN|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/azure/tokens/azure-identity-token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-staging -f -
           
@@ -160,11 +190,22 @@ jobs:
         run: |
           IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
           
+          # 🟢 LOGIC SWITCH ADDED
+          if [ "${{ matrix.service }}" == "patient-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_PATIENT_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "doctor-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_DOCTOR_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "booking-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "communication-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
+          fi
+
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
               -e "s|__AWS_REGION__|eu-central-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
               -e "s|__MAX_REPLICAS__|1|g" \
-              -e "s|__AWS_ROLE_ARN__|${{ secrets.EKS_POD_ROLE_ARN }}|g" \
+              -e "s|__AWS_ROLE_ARN__|$ROLE_ARN|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/eks.amazonaws.com/serviceaccount/token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-staging -f -
               
@@ -220,11 +261,26 @@ jobs:
         run: |
           IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
 
+          # 1. Logic Switch to pick the right ARN
+          if [ "${{ matrix.service }}" == "patient-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_PATIENT_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "doctor-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_DOCTOR_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "booking-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "communication-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
+          fi
+
+          # 2. Inject the data into the YAML
+          PUBLIC_DOMAIN="${{ vars.AKS_DOMAIN }}"
+
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
+              -e "s|__PUBLIC_DOMAIN__|$PUBLIC_DOMAIN|g" \  # 👈 Injects the Variable
               -e "s|__AWS_REGION__|us-east-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
               -e "s|__MAX_REPLICAS__|1|g" \
-              -e "s|__AWS_ROLE_ARN__|${{ secrets.AZURE_POD_ROLE_ARN }}|g" \
+              -e "s|__AWS_ROLE_ARN__|$ROLE_ARN|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/azure/tokens/azure-identity-token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-prod -f -
           
@@ -234,11 +290,26 @@ jobs:
         run: |
           IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
 
+          # 1. Logic Switch to pick the right ARN
+          if [ "${{ matrix.service }}" == "patient-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_PATIENT_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "doctor-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_DOCTOR_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "booking-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "communication-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
+          fi
+
+          # 2. Inject the data into the YAML
+          PUBLIC_DOMAIN="${{ vars.EKS_DOMAIN }}"
+
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
+              -e "s|__PUBLIC_DOMAIN__|$PUBLIC_DOMAIN|g" \  # 👈 Injects the Variable
               -e "s|__AWS_REGION__|eu-central-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
               -e "s|__MAX_REPLICAS__|1|g" \
-              -e "s|__AWS_ROLE_ARN__|${{ secrets.EKS_POD_ROLE_ARN }}|g" \
+              -e "s|__AWS_ROLE_ARN__|$ROLE_ARN|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/eks.amazonaws.com/serviceaccount/token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-prod -f -
           
@@ -252,22 +323,44 @@ jobs:
 
       - name: "🚀 Deploy Backup (GCP US)"
         run: |
+          # Logic to pick the right AWS Role for the Bridge
+          if [ "${{ matrix.service }}" == "patient-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_PATIENT_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "doctor-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_DOCTOR_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "booking-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "communication-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
+          fi
+
           gcloud run deploy ${{ matrix.service }}-us-backup \
             --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region us-central1 \
             --port ${{ matrix.port }} \
             --min-instances 0 \
-            --set-env-vars "NODE_ENV=production,AWS_REGION=us-east-1,AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }},AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+            --set-env-vars "NODE_ENV=production,API_PUBLIC_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},AWS_REGION=us-east-1,AWS_ROLE_ARN=$ROLE_ARN,AWS_EC2_METADATA_DISABLED=true"
             --platform managed \
             --allow-unauthenticated
 
       - name: "🚀 Deploy Backup (GCP EU)"
         run: |
+          # Logic to pick the right AWS Role for the Bridge
+          if [ "${{ matrix.service }}" == "patient-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_PATIENT_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "doctor-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_DOCTOR_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "booking-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "communication-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
+          fi
+
           gcloud run deploy ${{ matrix.service }}-eu-backup \
             --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region europe-west3 \
             --port ${{ matrix.port }} \
             --min-instances 0 \
-            --set-env-vars "NODE_ENV=production,AWS_REGION=eu-central-1,AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }},AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+            --set-env-vars "NODE_ENV=production,API_PUBLIC_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},AWS_REGION=eu-central-1,AWS_ROLE_ARN=$ROLE_ARN,AWS_EC2_METADATA_DISABLED=true"
             --platform managed \
             --allow-unauthenticated

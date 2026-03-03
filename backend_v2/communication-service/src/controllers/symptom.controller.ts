@@ -149,22 +149,16 @@ export const checkSymptoms = async (req: Request, res: Response) => {
 
 async function pushToBigQuery(userId: string, symptoms: string[], analysis: any, provider: string, region: string) {
     try {
-        // 🟢 GDPR FIX: Use Region to fetch the correct Service Account Key from Vault
-        const saKey = await getSSMParameter("/mediconnect/prod/gcp/service-account", region, true);
-        if (!saKey) return;
-
-        const credentials = JSON.parse(saKey);
         const auth = new GoogleAuth({
-            credentials,
-            scopes: ['https://www.googleapis.com/auth/cloud-platform']
+            scopes:['https://www.googleapis.com/auth/cloud-platform']
         });
 
         const client = await auth.getClient();
         const accessToken = (await client.getAccessToken()).token;
-        const projectId = credentials.project_id;
+        const projectId = await auth.getProjectId();
 
         const datasetName = region.toUpperCase() === 'EU' ? 'mediconnect_ai_eu' : 'mediconnect_ai';
-const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/datasets/${datasetName}/tables/symptom_logs/insertAll`;
+        const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/datasets/${datasetName}/tables/symptom_logs/insertAll`;
 
         await fetch(url, {
             method: "POST",
@@ -174,14 +168,14 @@ const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/d
             },
             body: JSON.stringify({
                 kind: "bigquery#tableDataInsertAllRequest",
-                rows: [{
+                rows:[{
                     json: {
                         user_id: userId,
                         timestamp: new Date().toISOString(),
                         symptoms: symptoms.join(", "),
                         risk_level: analysis.risk,
                         provider: provider,
-                        region: region // 🟢 LOGGING REGION
+                        region: region 
                     }
                 }]
             })

@@ -263,30 +263,26 @@ export const verifyIdentity = catchAsync(async (req: Request, res: Response) => 
     if (!authUser?.id || !selfieImage) return res.status(400).json({ error: "Missing identity data" });
 
     const userId = authUser.id;
-
-    const isDoctor = authUser.isDoctor; 
     const dynamicDb = getRegionalClient(region); 
 
-    const targetTable = isDoctor ? CONFIG.DOCTOR_TABLE : CONFIG.DYNAMO_TABLE;
-    const primaryKeyName = isDoctor ? "doctorId" : "patientId";
+    // 🟢 HIPAA FIX: Hardcoded to Patient Table Only (Least Privilege)
+    const targetTable = CONFIG.DYNAMO_TABLE;
 
     const userCheck = await dynamicDb.send(new GetCommand({
         TableName: targetTable,
-        Key: { [primaryKeyName]: userId }
+        Key: { patientId: userId }
     }));
 
     if (!userCheck.Item) {
         return res.status(401).json({ error: "Security Alert: Account no longer exists." });
     }
 
-    const userRole = isDoctor ? 'doctor' : 'patient';
-    const idCardKey = `${userRole}/${userId}/id_card.jpg`;
-    
-    const fileTags = !isDoctor ? "auto-delete=true" : undefined; 
+    // 🟢 HIPAA/GDPR FIX: Strict Pathing & Auto-Delete Tags
+    const idCardKey = `patient/${userId}/id_card.jpg`;
+    const fileTags = "auto-delete=true"; // Patients trigger the 24h deletion rule
 
     const regionalS3 = getRegionalS3Client(region);
     const regionalRek = getRegionalRekognitionClient(region);
-    
     const bucketName = region.toUpperCase() === 'EU' ? `${CONFIG.BUCKET_NAME}-eu` : CONFIG.BUCKET_NAME;
 
     if (idImage) {
@@ -310,7 +306,7 @@ export const verifyIdentity = catchAsync(async (req: Request, res: Response) => 
         return res.json({ verified: false, message: "Face does not match ID card." });
     }
 
-    const selfieKey = `${userRole}/${userId}/selfie_verified.jpg`;
+    const selfieKey = `patient/${userId}/selfie_verified.jpg`;
     await regionalS3.send(new PutObjectCommand({
         Bucket: bucketName, Key: selfieKey,
         Body: Buffer.from(selfieImage, 'base64'), ContentType: 'image/jpeg'
@@ -318,12 +314,12 @@ export const verifyIdentity = catchAsync(async (req: Request, res: Response) => 
 
     await dynamicDb.send(new UpdateCommand({
         TableName: targetTable,
-        Key: { [primaryKeyName]: userId },
+        Key: { patientId: userId },
         UpdateExpression: "set avatar = :a, isIdentityVerified = :v, identityStatus = :s",
         ExpressionAttributeValues: { ':a': selfieKey, ':v': true, ':s': "VERIFIED" }
     }));
 
-    await writeAuditLog(userId, userId, "IDENTITY_VERIFIED", "AI facial biometric match successful", {
+    await writeAuditLog(userId, userId, "IDENTITY_VERIFIED", "Patient AI facial biometric match successful", {
         region, ipAddress: req.ip
     });
 
@@ -355,6 +351,19 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
             ":a": null, ":now": new Date().toISOString(), ":empty": {} 
         }
     }));
+
+    try {
+        const regionalS3 = getRegionalS3Client(region);
+        const bucketName = region.toUpperCase() === 'EU' ? `${CONFIG.BUCKET_NAME}-eu` : CONFIG.BUCKET_NAME;
+        
+        const { DeleteObjectCommand } = require("@aws-sdk/client-s3");
+        await regionalS3.send(new DeleteObjectCommand({
+            Bucket: bucketName,
+            Key: `patient/${userId}/selfie_verified.jpg`
+        }));
+    } catch (s3Error) {
+        console.error(`[GDPR Warning] Failed to delete Selfie for ${userId}`, s3Error);
+    }
 
     await writeAuditLog(userId, userId, "DELETE_PROFILE", "User invoked GDPR Right to be Forgotten", {
         region, ipAddress: req.ip
