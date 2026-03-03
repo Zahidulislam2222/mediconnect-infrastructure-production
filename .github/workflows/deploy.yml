@@ -134,6 +134,7 @@ jobs:
     needs: [prepare-infrastructure]
     runs-on: ubuntu-latest
     strategy:
+      max-parallel: 1   # 🟢 FIX 1: Prevents Cluster CPU Exhaustion during rollout
       matrix:
         include:
           - service: patient-service
@@ -176,7 +177,10 @@ jobs:
              ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
           fi
 
+          PUBLIC_DOMAIN="staging-${{ vars.AKS_DOMAIN }}" 
+
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
+              -e "s|__PUBLIC_DOMAIN__|$PUBLIC_DOMAIN|g" \
               -e "s|__AWS_REGION__|us-east-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
               -e "s|__MAX_REPLICAS__|1|g" \
@@ -201,7 +205,10 @@ jobs:
              ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
           fi
 
+          PUBLIC_DOMAIN="staging-${{ vars.EKS_DOMAIN }}" 
+
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
+              -e "s|__PUBLIC_DOMAIN__|$PUBLIC_DOMAIN|g" \
               -e "s|__AWS_REGION__|eu-central-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
               -e "s|__MAX_REPLICAS__|1|g" \
@@ -225,6 +232,7 @@ jobs:
     needs: [deploy-staging]
     runs-on: ubuntu-latest
     strategy:
+      max-parallel: 1
       matrix:
         include:
           - service: patient-service
@@ -335,7 +343,7 @@ jobs:
           gcloud run deploy ${{ matrix.service }}-us-backup \
             --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region us-central1 \
-            --service-account="${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}"
+            --service-account="${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}" \
             --port ${{ matrix.port }} \
             --min-instances 0 \
             --set-env-vars "NODE_ENV=production,API_PUBLIC_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},AWS_REGION=us-east-1,AWS_ROLE_ARN=$ROLE_ARN,AWS_EC2_METADATA_DISABLED=true" \
@@ -358,7 +366,7 @@ jobs:
           gcloud run deploy ${{ matrix.service }}-eu-backup \
             --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region europe-west3 \
-            --service-account="${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}"
+            --service-account="${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}" \
             --port ${{ matrix.port }} \
             --min-instances 0 \
             --set-env-vars "NODE_ENV=production,API_PUBLIC_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},AWS_REGION=eu-central-1,AWS_ROLE_ARN=$ROLE_ARN,AWS_EC2_METADATA_DISABLED=true" \
