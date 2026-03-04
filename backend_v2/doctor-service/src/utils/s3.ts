@@ -1,7 +1,7 @@
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 // 🟢 ARCHITECTURE FIX: Import Shared Factory (Prevents GDPR Residency leaks)
-import { getRegionalS3Client } from '../config/aws';
+import { getRegionalS3Client } from '../../../shared/aws-config';
 
 /**
  * generatePresignedUrl - Clinical Grade File Delivery

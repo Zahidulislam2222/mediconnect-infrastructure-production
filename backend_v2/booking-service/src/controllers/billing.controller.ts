@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import { getRegionalClient, getSSMParameter } from '../config/aws';
+import { getRegionalClient, getSSMParameter } from '../../../shared/aws-config';
 import { QueryCommand, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import Stripe from "stripe";
 import { writeAuditLog } from '../../../shared/audit';

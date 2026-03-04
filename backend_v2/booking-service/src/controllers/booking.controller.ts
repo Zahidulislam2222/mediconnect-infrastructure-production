@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { getRegionalClient, getSecret, getSSMParameter } from '../config/aws';
+import { getRegionalClient, getSecret, getSSMParameter } from '../../../shared/aws-config';
 import { PutCommand, QueryCommand, GetCommand, DeleteCommand, TransactWriteCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { ConditionalCheckFailedException } from "@aws-sdk/client-dynamodb";
 import Stripe from "stripe";
@@ -235,9 +235,20 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
             try {
                 await stripeInstance.paymentIntents.capture(paymentIntentId);
                 logger.info(`Payment captured for ${appointmentId}`);
-                syncToGoogleCalendar(doctorId, normalizedTime, patientName, reason, region);
+                
+                // 🟢 FIX: Get the ID and update DynamoDB
+                const googleEventId = await syncToGoogleCalendar(doctorId, normalizedTime, patientName, reason, region);
+                
+                if (googleEventId) {
+                    await docClient.send(new UpdateCommand({
+                        TableName: TABLE_APPOINTMENTS,
+                        Key: { appointmentId },
+                        UpdateExpression: "SET googleEventId = :gid",
+                        ExpressionAttributeValues: { ":gid": googleEventId }
+                    }));
+                }
             } catch (captureError) {
-                logger.error("CRITICAL: DB Write Success but Payment Capture Failed", { appointmentId, paymentIntentId });
+                logger.error("CRITICAL: DB Write Success but Payment Capture or Calendar Sync Failed", { appointmentId, paymentIntentId });
             }
         }
 
@@ -424,6 +435,10 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
         } catch (lockError) { console.error("Failed to release lock:", lockError); }
     }
 
+    if (apt.googleEventId && apt.doctorId) {
+        deleteFromGoogleCalendar(apt.doctorId, apt.googleEventId, region).catch(console.error);
+    }
+
     // 4. Audit Log
     try {
         await writeAuditLog(patientId, patientId, "CANCEL_BOOKING", `Appointment ${appointmentId} cancelled`, { 
@@ -506,6 +521,14 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
             const lockKey = `${apt.doctorId}#${normalizeTimeSlot(apt.timeSlot)}`;
             await docClient.send(new DeleteCommand({ TableName: TABLE_LOCKS, Key: { lockId: lockKey } }));
         }
+
+        // 🟢 THE FIX: Also delete from calendar if this was an auto-cleanup cancellation
+        if (apt.googleEventId && apt.doctorId) {
+            deleteFromGoogleCalendar(apt.doctorId, apt.googleEventId, region).catch(e => 
+                console.error("[Cleanup] Calendar delete failed:", e.message)
+            );
+        }
+
     } catch (e) { console.error("Cancel update failed", e); }
 }
 
@@ -540,11 +563,10 @@ export const getReceipt = catchAsync(async (req: Request, res: Response) => {
 });
 
 // 🟢 NEW HELPER: Sync to Google Calendar (DynamoDB Migrated)
-async function syncToGoogleCalendar(doctorId: string, timeSlot: string, patientName: string, reason: string, region: string) {
+async function syncToGoogleCalendar(doctorId: string, timeSlot: string, patientName: string, reason: string, region: string): Promise<string | null> {
     try {
         const docClient = getRegionalClient(region);
         
-        // 🟢 PURGED POSTGRES: Now securely fetching the OAuth token from DynamoDB
         const res = await docClient.send(new GetCommand({ 
             TableName: TABLE_DOCTORS, 
             Key: { doctorId },
@@ -552,11 +574,7 @@ async function syncToGoogleCalendar(doctorId: string, timeSlot: string, patientN
         }));
         
         const refreshToken = res.Item?.googleRefreshToken;
-
-        if (!refreshToken) {
-            console.log(`[Calendar] No Google Token found for doctor ${doctorId}`);
-            return;
-        }
+        if (!refreshToken) return null; // Return null if no token
 
         const oauth2Client = new google.auth.OAuth2(
             process.env.GOOGLE_CLIENT_ID,
@@ -569,7 +587,7 @@ async function syncToGoogleCalendar(doctorId: string, timeSlot: string, patientN
         const startTime = new Date(timeSlot);
         const endTime = new Date(startTime.getTime() + 30 * 60000); 
 
-        await calendar.events.insert({
+        const response = await calendar.events.insert({ // Capture the response
             calendarId: 'primary',
             requestBody: {
                 summary: `Consultation: ${patientName}`,
@@ -581,8 +599,44 @@ async function syncToGoogleCalendar(doctorId: string, timeSlot: string, patientN
         });
 
         console.log(`[Calendar] Event created for ${doctorId}`);
+        return response.data.id || null; // 🟢 RETURN THE ID
 
     } catch (error: any) {
         console.error("[Calendar Sync Failed]:", error.message);
+        return null;
+    }
+}
+
+async function deleteFromGoogleCalendar(doctorId: string, googleEventId: string, region: string) {
+    try {
+        const docClient = getRegionalClient(region);
+        
+        // 1. Get Doctor's Refresh Token
+        const res = await docClient.send(new GetCommand({ 
+            TableName: TABLE_DOCTORS, 
+            Key: { doctorId },
+            ProjectionExpression: "googleRefreshToken"
+        }));
+        
+        const refreshToken = res.Item?.googleRefreshToken;
+        if (!refreshToken) return;
+
+        // 2. Auth with Google
+        const oauth2Client = new google.auth.OAuth2(
+            process.env.GOOGLE_CLIENT_ID,
+            process.env.GOOGLE_CLIENT_SECRET
+        );
+        oauth2Client.setCredentials({ refresh_token: refreshToken });
+        const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
+
+        // 3. DELETE the event
+        await calendar.events.delete({
+            calendarId: 'primary',
+            eventId: googleEventId
+        });
+
+        console.log(`[Calendar] Event ${googleEventId} deleted for doctor ${doctorId}`);
+    } catch (error: any) {
+        console.error("[Calendar Delete Failed]:", error.message);
     }
 }

@@ -8,7 +8,7 @@ import { GetParametersCommand } from "@aws-sdk/client-ssm";
 
 import bookingRoutes from './routes/booking.routes';
 import { handleStripeWebhook } from './controllers/webhook.controller';
-import { getRegionalSSMClient } from './config/aws'; // 🟢 REGIONAL FACTORY
+import { getRegionalSSMClient } from '../../shared/aws-config'; // 🟢 REGIONAL FACTORY
 
 dotenv.config();
 

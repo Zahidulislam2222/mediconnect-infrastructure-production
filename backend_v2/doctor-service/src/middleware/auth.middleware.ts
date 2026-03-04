@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { JwtRsaVerifier } from "aws-jwt-verify";
 import axios from "axios";
 // 🟢 ARCHITECTURE FIX: Import the Multi-Region Config Bridge
-import { COGNITO_CONFIG } from '../config/aws';
+import { COGNITO_CONFIG } from '../../../shared/aws-config';
 import { writeAuditLog } from '../../../shared/audit';
 
 // 🟢 GDPR FIX: Regional Cache Map (Instead of a single global variable)

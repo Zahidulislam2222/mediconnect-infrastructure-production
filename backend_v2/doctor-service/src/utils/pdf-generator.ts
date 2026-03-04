@@ -8,7 +8,7 @@ import {
     getRegionalS3Client, 
     getRegionalKMSClient, 
     getSSMParameter 
-} from "../config/aws"; 
+} from '../../../shared/aws-config'; 
 
 interface PrescriptionData {
     prescriptionId: string;

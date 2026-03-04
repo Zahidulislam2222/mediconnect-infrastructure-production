@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
 // 🟢 ARCHITECTURE FIX: Use Shared Factory (Prevents Region Lock & Socket Exhaustion)
-import { getRegionalClient } from '../../config/aws';
+import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
 
 const TABLE_GRAPH = "mediconnect-graph-data";

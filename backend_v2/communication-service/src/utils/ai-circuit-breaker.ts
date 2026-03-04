@@ -1,7 +1,7 @@
 import { BedrockRuntimeClient, InvokeModelCommand } from "@aws-sdk/client-bedrock-runtime";
 import { GoogleAuth } from "google-auth-library";
 import { OpenAI } from "openai";
-import { getSSMParameter } from "../config/aws";
+import { getSSMParameter } from '../../../shared/aws-config';
 import winston from "winston";
 import { scrubPII } from "./fhir-mapper";
 

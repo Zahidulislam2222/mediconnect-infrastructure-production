@@ -2,7 +2,7 @@ import { Request, Response } from "express";
 import { ComprehendMedicalClient, DetectEntitiesV2Command } from "@aws-sdk/client-comprehendmedical";
 import { AICircuitBreaker } from "../utils/ai-circuit-breaker";
 import { getRegionalDB } from "../utils/db-adapter";
-import { getSSMParameter } from "../config/aws";
+import { getSSMParameter } from '../../../shared/aws-config';
 import { mapToFHIRDiagnosticReport, scrubPII } from "../utils/fhir-mapper";
 import { writeAuditLog } from "../../../shared/audit";
 import { jsPDF } from "jspdf";

@@ -9,7 +9,7 @@ import rateLimit from 'express-rate-limit';
 
 import { GetParametersCommand } from "@aws-sdk/client-ssm";
 import { safeLog, safeError } from '../../shared/logger';
-import { getRegionalSSMClient } from './config/aws';
+import { getRegionalSSMClient } from '../../shared/aws-config';
 
 dotenv.config();
 

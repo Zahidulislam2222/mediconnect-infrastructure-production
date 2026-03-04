@@ -4,7 +4,7 @@ import {
     PostToConnectionCommand
 } from "@aws-sdk/client-apigatewaymanagementapi";
 import { PutCommand, QueryCommand, GetCommand, DeleteCommand } from "@aws-sdk/lib-dynamodb";
-import { getRegionalClient } from "../config/aws";
+import { getRegionalClient } from '../../../shared/aws-config';
 import { mapToFHIRCommunication, scrubPII } from "../utils/fhir-mapper";
 import { writeAuditLog } from "../../../shared/audit";
 
@@ -112,12 +112,20 @@ router.post("/ws-event", async (req: Request, res: Response) => {
 });
 
 export const handleWebSocketEvent = async (event: any) => {
-    const { routeKey, connectionId, userId, userRole, domainName, stage, body, region } = event;
+    const { routeKey, connectionId, userId, userRole, body, region } = event;
     const regionalDb = getRegionalClient(region);
-    
-    // 🟢 Target correct regional AWS API Gateway Endpoint
-    const awsRegionTarget = region.toUpperCase() === 'EU' ? 'eu-central-1' : 'us-east-1';
-    const endpoint = process.env.AWS_WS_GATEWAY_ENDPOINT || `https://${domainName}/${stage}`;
+
+    const isEU = region.toUpperCase() === 'EU' || region === 'eu-central-1';
+    const awsRegionTarget = isEU ? 'eu-central-1' : 'us-east-1';
+
+    const endpoint = isEU 
+        ? process.env.AWS_WS_GATEWAY_ENDPOINT_EU 
+        : process.env.AWS_WS_GATEWAY_ENDPOINT_US;
+
+    if (!endpoint) {
+        console.error(`CRITICAL: WebSocket Gateway Endpoint missing for region: ${awsRegionTarget}`);
+    }
+
     const apigw = new ApiGatewayManagementApi({ endpoint, region: awsRegionTarget });
 
     switch (routeKey) {

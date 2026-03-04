@@ -11,7 +11,7 @@ import { safeError } from '../../../shared/logger';
 import { writeAuditLog } from '../../../shared/audit';
 
 // Shared Clients
-import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient } from '../config/aws';
+import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient } from '../../../shared/aws-config';
 
 // =============================================================================
 // ⚙️ CONFIGURATION & ENV HANDLING
@@ -43,13 +43,23 @@ export const extractRegion = (req: Request): string => {
  */
 async function signAvatarUrl(avatarKey: string | null, region: string): Promise<string | null> {
     if (!avatarKey) return null;
-    if (avatarKey.startsWith('http')) return avatarKey;
+
+    let finalKey = avatarKey;
+
+    if (avatarKey.startsWith('http')) {
+        if (avatarKey.includes('mediconnect-identity-verification')) {
+            const match = avatarKey.match(/(patient|doctor)\/[a-zA-Z0-9-]+\/[^?]+/);
+            if (match) finalKey = match[0]; 
+            else return avatarKey;
+        } else {
+            return avatarKey; 
+        }
+    }
 
     try {
         const regionalS3 = getRegionalS3Client(region);
-        // 🟢 GDPR: Dynamically target EU or US bucket based on patient region
         const bucketName = region.toUpperCase() === 'EU' ? `${CONFIG.BUCKET_NAME}-eu` : CONFIG.BUCKET_NAME;
-        const command = new GetObjectCommand({ Bucket: bucketName, Key: avatarKey });
+        const command = new GetObjectCommand({ Bucket: bucketName, Key: finalKey });
         
         return await getSignedUrl(regionalS3, command, { expiresIn: 900 });
     } catch (e) {

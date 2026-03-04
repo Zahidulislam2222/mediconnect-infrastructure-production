@@ -1,7 +1,7 @@
 import { VerifyCommand } from "@aws-sdk/client-kms";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 // 🟢 ARCHITECTURE FIX: Use Shared Factories to support US and EU audits
-import { getRegionalClient, getRegionalKMSClient } from "../config/aws";
+import { getRegionalClient, getRegionalKMSClient } from '../../../shared/aws-config';
 import { writeAuditLog } from "../../../shared/audit";
 
 /**

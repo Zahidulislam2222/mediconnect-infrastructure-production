@@ -1,6 +1,6 @@
 import { Router, Request, Response } from "express";
 import { PDFGenerator } from "../../utils/pdf-generator";
-import { getRegionalClient } from "../../config/aws";
+import { getRegionalClient } from '../../../../shared/aws-config';
 import { PutCommand, QueryCommand, GetCommand, UpdateCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { v4 as uuidv4 } from "uuid";
 import { safeLog, safeError } from '../../../../shared/logger';

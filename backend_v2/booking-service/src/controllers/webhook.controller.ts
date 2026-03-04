@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import Stripe from 'stripe';
-import { getRegionalClient, getSSMParameter } from '../config/aws';
+import { getRegionalClient, getSSMParameter } from '../../../shared/aws-config';
 import { TransactWriteCommand, GetCommand } from "@aws-sdk/lib-dynamodb";
 
 const STRIPE_SECRET_NAME = "/mediconnect/stripe/keys";

@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { CognitoJwtVerifier } from "aws-jwt-verify";
-import { COGNITO_CONFIG } from '../config/aws';
+import { COGNITO_CONFIG } from '../../../shared/aws-config';
 import { writeAuditLog } from "../../../shared/audit";
 
 const verifiers: Record<string, any> = {
@@ -36,18 +36,21 @@ const getVerifier = async (region: string) => {
 };
 
 export const authMiddleware = async (req: Request, res: Response, next: NextFunction) => {
-    // 🟢 1. WebSocket / Internal Trust Logic
-    // If request comes from AWS API Gateway (WebSocket), it is already authorized by AWS.
-    const apiEvent = (req as any).apiGateway?.event || req.body;
-    const awsAuthorizer = apiEvent?.requestContext?.authorizer;
 
-    if (awsAuthorizer && (awsAuthorizer.sub || awsAuthorizer.principalId)) {
+    const awsAuthorizer = req.body?.requestContext?.authorizer;
+
+    if (awsAuthorizer && awsAuthorizer.sub) {
         (req as any).user = {
-            sub: awsAuthorizer.sub || awsAuthorizer.principalId,
+            sub: awsAuthorizer.sub,
             role: awsAuthorizer.role || "patient",
             email: awsAuthorizer.email || "",
             region: extractRegion(req)
         };
+
+        if (req.body.body) {
+            req.body = req.body.body; 
+        }
+        
         return next(); 
     }
 

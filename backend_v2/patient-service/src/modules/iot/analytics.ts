@@ -2,7 +2,7 @@ import { BigQuery } from '@google-cloud/bigquery';
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 // 🟢 FIX: Use Shared Regional S3 Factory to prevent GDPR leaks
-import { getRegionalS3Client } from "../../config/aws";
+import { getRegionalS3Client } from '../../../../shared/aws-config';
 
 let bigquery: BigQuery;
 

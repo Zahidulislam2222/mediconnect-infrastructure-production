@@ -5,7 +5,7 @@ import { v4 as uuidv4 } from "uuid";
 import { PutCommand, QueryCommand, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 
 // 🟢 ARCHITECTURE FIX: Import Shared Factories (Prevents Socket Exhaustion)
-import { getRegionalClient, getRegionalS3Client } from '../../config/aws'; 
+import { getRegionalClient, getRegionalS3Client } from '../../../../shared/aws-config'; 
 import { writeAuditLog } from '../../../../shared/audit';
 
 const TABLE_EHR = "mediconnect-health-records";

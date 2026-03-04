@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { getRegionalClient, getRegionalSNSClient } from "../../config/aws"; 
+import { getRegionalClient, getRegionalSNSClient } from '../../../../shared/aws-config'; 
 import { PutCommand } from "@aws-sdk/lib-dynamodb";
 import { PublishCommand } from "@aws-sdk/client-sns";
 import { writeAuditLog } from "../../../../shared/audit";

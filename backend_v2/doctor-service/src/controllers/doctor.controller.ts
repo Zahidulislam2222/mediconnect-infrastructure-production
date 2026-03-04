@@ -8,7 +8,7 @@ import { TextractClient, AnalyzeDocumentCommand } from "@aws-sdk/client-textract
 import { PublishCommand } from "@aws-sdk/client-sns";
 import { google } from 'googleapis';
 import { PutCommand, GetCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
-import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient, getRegionalSNSClient } from '../config/aws';
+import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient, getRegionalSNSClient } from '../../../shared/aws-config';
 import { writeAuditLog } from '../../../shared/audit';
 import jwt from 'jsonwebtoken';
 import { GoogleAuth } from "google-auth-library";
@@ -27,15 +27,24 @@ export const extractRegion = (req: Request): string => {
 
 async function signAvatarUrl(avatarKey: string | null, region: string): Promise<string | null> {
     if (!avatarKey) return null;
-    if (avatarKey.startsWith('http')) return avatarKey;
+
+    let finalKey = avatarKey;
+
+    if (avatarKey.startsWith('http')) {
+        if (avatarKey.includes('mediconnect-identity-verification')) {
+            const match = avatarKey.match(/(patient|doctor)\/[a-zA-Z0-9-]+\/[^?]+/);
+            if (match) finalKey = match[0]; 
+            else return avatarKey;
+        } else {
+            return avatarKey;
+        }
+    }
 
     try {
         const regionalS3 = getRegionalS3Client(region);
-        const bucketName = region.toUpperCase() === 'EU' 
-            ? 'mediconnect-identity-verification-eu' 
-            : 'mediconnect-identity-verification';
+        const bucketName = region.toUpperCase() === 'EU' ? 'mediconnect-identity-verification-eu' : 'mediconnect-identity-verification';
             
-        const command = new GetObjectCommand({ Bucket: bucketName, Key: avatarKey });
+        const command = new GetObjectCommand({ Bucket: bucketName, Key: finalKey });
         return await getSignedUrl(regionalS3, command, { expiresIn: 900 });
     } catch (e) {
         console.error(`[Avatar Sign Error]`, e);

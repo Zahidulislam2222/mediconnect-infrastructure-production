@@ -1,8 +1,7 @@
 import { Request, Response } from "express";
-import { getRegionalClient } from "../../config/aws";
+import { getRegionalClient, getSSMParameter } from '../../../../shared/aws-config';
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { GoogleAuth } from "google-auth-library";
-import { getSSMParameter } from "../../config/aws";
 import { writeAuditLog } from "../../../../shared/audit";
 
 export const getVitals = async (req: Request, res: Response) => {

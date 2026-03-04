@@ -1,7 +1,7 @@
 import { Router, Request, Response } from "express";
 import { ChimeSDKMeetingsClient, CreateMeetingCommand, CreateAttendeeCommand, DeleteMeetingCommand } from "@aws-sdk/client-chime-sdk-meetings";
 import { ChimeSDKMediaPipelinesClient, CreateMediaCapturePipelineCommand, DeleteMediaCapturePipelineCommand } from "@aws-sdk/client-chime-sdk-media-pipelines";
-import { getRegionalClient } from "../config/aws";
+import { getRegionalClient } from '../../../shared/aws-config';
 import { PutCommand, GetCommand, DeleteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { v4 as uuidv4 } from "uuid";
 import { writeAuditLog } from "../../../shared/audit";
@@ -134,6 +134,14 @@ router.delete("/session", async (req: Request, res: Response) => {
             TableName: TABLE_SESSIONS, Key: { appointmentId }
         }));
         const session = dbRes.Item;
+
+        const aptRes = await regionalDb.send(new GetCommand({
+    TableName: "mediconnect-appointments",
+    Key: { appointmentId }
+}));
+if (!aptRes.Item || (aptRes.Item.patientId !== userId && aptRes.Item.doctorId !== userId)) {
+    return res.status(403).json({ error: "Unauthorized to end this session." });
+}
 
         if (session?.pipelineId) {
             try {

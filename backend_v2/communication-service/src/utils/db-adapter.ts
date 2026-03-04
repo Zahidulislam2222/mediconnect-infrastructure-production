@@ -1,6 +1,6 @@
 import { CosmosClient } from "@azure/cosmos";
 import { Firestore } from "@google-cloud/firestore";
-import { getSSMParameter } from "../config/aws";
+import { getSSMParameter } from '../../../shared/aws-config';
 
 // 🟢 Unified Interface: Controllers don't need to know which DB they are using
 export interface IDatabase {
@@ -22,7 +22,7 @@ class AzureAdapter implements IDatabase {
     async save(collection: string, data: any): Promise<void> {
         await this.connect();
         const container = this.client!.database("mediconnect-db").container(collection);
-        await container.items.create(data);
+        await container.items.upsert(data);
     }
 }
 

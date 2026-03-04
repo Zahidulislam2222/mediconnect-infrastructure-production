@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import { CognitoJwtVerifier } from "aws-jwt-verify";
-import { COGNITO_CONFIG } from '../config/aws';
+import { COGNITO_CONFIG } from '../../../shared/aws-config';
 import { writeAuditLog } from "../../../shared/audit";
 
 // 🟢 REGIONAL CACHE: We keep two verifiers alive in memory

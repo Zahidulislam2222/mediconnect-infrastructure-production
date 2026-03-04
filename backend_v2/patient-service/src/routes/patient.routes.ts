@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { getRegionalClient } from '../config/aws'; 
+import { getRegionalClient } from '../../../shared/aws-config';
 import { ScanCommand, GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
     createPatient,

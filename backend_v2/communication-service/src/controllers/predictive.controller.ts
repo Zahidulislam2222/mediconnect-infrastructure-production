@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import { AICircuitBreaker } from "../utils/ai-circuit-breaker";
 import { getRegionalDB } from "../utils/db-adapter";
-import { getSSMParameter } from "../config/aws"; 
+import { getSSMParameter } from '../../../shared/aws-config';
 import { writeAuditLog } from "../../../shared/audit";
 import { v4 as uuidv4 } from "uuid";
 import axios from 'axios';

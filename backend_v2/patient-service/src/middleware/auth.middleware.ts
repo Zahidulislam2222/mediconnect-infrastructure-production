@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { JwtRsaVerifier } from "aws-jwt-verify";
 import axios from "axios";
-import { COGNITO_CONFIG } from '../config/aws';
+import { COGNITO_CONFIG } from '../../../shared/aws-config';
 
 const verifiers: Record<string, any> = {};
 

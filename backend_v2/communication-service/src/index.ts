@@ -10,7 +10,7 @@ import { chatController } from "./controllers/chat.controller";
 import { videoController } from "./controllers/video.controller";
 import { aiRoutes } from "./routes/ai.routes"; 
 import { authMiddleware } from './middleware/auth.middleware';
-import { getRegionalSSMClient } from "./config/aws"; 
+import { getRegionalSSMClient } from '../../shared/aws-config'; 
 
 dotenv.config();
 

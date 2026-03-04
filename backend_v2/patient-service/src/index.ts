@@ -11,7 +11,7 @@ import { defaultProvider } from "@aws-sdk/credential-provider-node";
 
 // Shared Utilities
 import { safeLog, safeError } from '../../shared/logger';
-import { getRegionalSSMClient } from './config/aws';
+import { getRegionalSSMClient } from '../../shared/aws-config';
 import { getSignedIoTUrl } from './utils/iot-signer'; // 🟢 IMPORT THE SIGNER
 
 import patientRoutes from './routes/patient.routes';

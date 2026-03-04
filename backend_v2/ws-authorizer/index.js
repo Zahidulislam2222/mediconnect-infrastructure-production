@@ -1,72 +1,47 @@
-const { CognitoJwtVerifier } = require("aws-jwt-verify");
+import { CognitoJwtVerifier } from "aws-jwt-verify";
 
-// Initialize Verifier outside the handler for warm-start performance
+// 1. Initialize outside the handler to prevent cold-start delays
 const verifier = CognitoJwtVerifier.create({
   userPoolId: process.env.COGNITO_USER_POOL_ID,
   tokenUse: "id",
   clientId: process.env.COGNITO_CLIENT_ID,
 });
 
-exports.handler = async (event) => {
-  const token = event.queryStringParameters?.token;
+export const handler = async (event) => {
+    try {
+        // 2. Extract token from the WebSocket connection URL (e.g., wss://api...?token=eyJ...)
+        const token = event.queryStringParameters?.token;
+        if (!token) throw new Error("Missing token in query string");
 
-  // 🟢 SECURITY: Handle missing token or literal "null" string from frontend
-  if (!token || token === "null" || token.split('.').length !== 3) {
-    console.error("[WS-Auth] Invalid Token Format detected");
-    return generatePolicy('user', 'Deny', event.methodArn);
-  }
-
-  try {
-    // 🟢 AUTH: Strict signature and expiry verification
-    const payload = await verifier.verify(token);
-
-    // 🟢 HIPAA: Identify the actor by their unique Cognito 'sub'
-    const apiArnPrefix = event.methodArn.split('/').slice(0, 2).join('/') + '/*';
-
-return generatePolicy(payload.sub, 'Allow', apiArnPrefix, payload);
-
-  } catch (err) {
-    console.error("[WS-Auth] JWT Verification Failed:", err.message);
-    // Fail-closed for any verification error
-    return generatePolicy('user', 'Deny', event.methodArn);
-  }
+        // 3. Verify the token with AWS Cognito
+        const payload = await verifier.verify(token);
+        
+        // 4. Return the 'Allow' IAM Policy and pass user data to the API Gateway context
+        return generatePolicy(payload.sub, 'Allow', event.methodArn, payload);
+    } catch (err) {
+        console.error("WS Auth Failed:", err.message);
+        // 5. Return the 'Deny' IAM Policy if token is invalid/expired
+        return generatePolicy('unauthorized', 'Deny', event.methodArn);
+    }
 };
 
-/**
- * Generates a valid AWS IAM Policy for the WebSocket connection.
- */
-const generatePolicy = (principalId, effect, resource, payload = null) => {
-  const authResponse = {
-    principalId,
-    policyDocument: {
-      Version: '2012-10-17',
-      Statement: [{
-        Action: 'execute-api:Invoke',
-        Effect: effect,
-        Resource: resource,
-      }],
-    },
-  };
-
-  // 🟢 FIX: Only attach context metadata if the user is ALLOWED
-  // API Gateway will crash if values are undefined/null
-  if (effect === 'Allow' && payload) {
-    
-    // Determine user role (Doctor vs Patient)
-    let userRole = 'patient';
-    if (payload['cognito:groups'] && payload['cognito:groups'].includes('doctor')) {
-        userRole = 'doctor';
-    } else if (payload['custom:role']) {
-        userRole = String(payload['custom:role']);
-    }
-
-    authResponse.context = {
-      sub: String(payload.sub),
-      role: String(userRole),
-      // GDPR: Minimal data shared. Only use email if backend requires it for logic.
-      email: payload.email ? String(payload.email) : ""
+// Helper function to format the IAM Policy exactly how AWS demands it
+const generatePolicy = (principalId, effect, resource, payload = {}) => {
+    return {
+        principalId,
+        policyDocument: {
+            Version: '2012-10-17',
+            Statement:[{
+                Action: 'execute-api:Invoke',
+                Effect: effect,
+                Resource: resource
+            }]
+        },
+        context: {
+            // This context gets sent to your mapping template in API Gateway
+            sub: payload.sub || "",
+            email: payload.email || "",
+            role: payload["custom:role"] || (payload["cognito:groups"] ? payload["cognito:groups"][0] : "patient")
+        }
     };
-  }
-
-  return authResponse;
 };
