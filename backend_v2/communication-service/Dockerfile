@@ -51,11 +51,11 @@ EXPOSE 8084
 
 CMD sh -c 'if [ -n "$K_SERVICE" ]; then \
       echo "☁️ Cloud Run Detected: Bridging OIDC Identity..."; \
-      # Start a background loop (&) to refresh the token every 50 mins \
-      (while true; do curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=sts.amazonaws.com" > /tmp/aws-token; sleep 3000; done) & \
+      # 1. SYNCHRONOUS FETCH: Wait until token is 100% downloaded \
+      curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=sts.amazonaws.com" > /tmp/aws-token; \
       export AWS_WEB_IDENTITY_TOKEN_FILE=/tmp/aws-token; \
-      # Wait 2 seconds to ensure the first token is written before Node boots \
-      sleep 2; \
+      # 2. BACKGROUND REFRESH: Start the auto-renewal loop \
+      (while true; do sleep 3000; curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=sts.amazonaws.com" > /tmp/aws-token; done) & \
       echo "✅ Token bridged & background auto-refresh started!"; \
     fi; \
     node dist/communication-service/src/index.js'
