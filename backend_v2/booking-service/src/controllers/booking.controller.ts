@@ -98,6 +98,8 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
     }
 
     // Safely extract data
+    const actualPatientName = patientRes.Item.name || patientName || "Unknown Patient";
+    const actualDoctorName = doctorRes.Item.name || doctorName || "Medical Provider";
     patientAvatar = patientRes.Item.avatar || null;
     if (patientRes.Item.dob) {
         const dob = new Date(patientRes.Item.dob);
@@ -159,8 +161,8 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         end: appointmentEnd,
         created: timestamp,
         participant: [
-            { actor: { reference: `Patient/${patientId}`, display: patientName }, status: "accepted" },
-            { actor: { reference: `Practitioner/${doctorId}`, display: doctorName }, status: "accepted" }
+            { actor: { reference: `Patient/${patientId}`, display: actualPatientName }, status: "accepted" },
+            { actor: { reference: `Practitioner/${doctorId}`, display: actualDoctorName }, status: "accepted" }
         ],
         serviceType: [{ coding: [{ code: "general", display: "General Practice" }] }]
     };
@@ -173,7 +175,7 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
                 Put: {
                     TableName: TABLE_APPOINTMENTS,
                     Item: {
-                        appointmentId, patientId, patientName, doctorId, doctorName,
+                        appointmentId, patientId, patientName: actualPatientName, doctorId, doctorName: actualDoctorName,
                         timeSlot: normalizedTime, status: "CONFIRMED",
                         paymentStatus: "paid", paymentId: paymentIntentId,
                         createdAt: timestamp, amountPaid: amountToCharge / 100, 
