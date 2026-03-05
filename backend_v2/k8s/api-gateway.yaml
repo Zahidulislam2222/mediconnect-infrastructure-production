@@ -8,11 +8,9 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-body-size: "10m"
-
     nginx.ingress.kubernetes.io/use-regex: "true"
-    nginx.ingress.kubernetes.io/rewrite-target: /$1
     
-    # 🟢 HIPAA WAF & DDoS Protection (Rate Limiting)
+    # HIPAA Rate Limiting
     nginx.ingress.kubernetes.io/limit-rps: "10"         
     nginx.ingress.kubernetes.io/limit-burst: "20"       
     nginx.ingress.kubernetes.io/limit-connections: "10" 
@@ -20,188 +18,178 @@ spec:
   rules:
     - http:
         paths:
-          # ==========================================
-          # 💬 COMMUNICATION & AI SERVICE (Port 8084)
-          # ==========================================
+          # COMMUNICATION
           - path: /__PREFIX__chat/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific 
             backend:
               service:
                 name: communication-service
                 port:
                   number: 80
           - path: /__PREFIX__video/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: communication-service
                 port:
                   number: 80
           - path: /__PREFIX__ai/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: communication-service
                 port:
                   number: 80
 
-          # ==========================================
-          # 📅 BOOKING & BILLING SERVICE (Port 8083)
-          # ==========================================
+          # BOOKING
           - path: /__PREFIX__appointments/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: booking-service
                 port:
                   number: 80
           - path: /__PREFIX__billing/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: booking-service
                 port:
                   number: 80
           - path: /__PREFIX__analytics/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: booking-service
                 port:
                   number: 80
           - path: /__PREFIX__webhook/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: booking-service
                 port:
                   number: 80
           - path: /__PREFIX__system/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: booking-service
                 port:
                   number: 80
 
-          # ==========================================
-          # 🩺 DOCTOR & CLINICAL SERVICE (Port 8082)
-          # ==========================================
+          # DOCTOR
           - path: /__PREFIX__doctors/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: doctor-service
                 port:
                   number: 80
           - path: /__PREFIX__register-doctor/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: doctor-service
                 port:
                   number: 80
           - path: /__PREFIX__prescription/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: doctor-service
                 port:
                   number: 80
           - path: /__PREFIX__prescriptions/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: doctor-service
                 port:
                   number: 80
           - path: /__PREFIX__ehr/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: doctor-service
                 port:
                   number: 80
           - path: /__PREFIX__pharmacy/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: doctor-service
                 port:
                   number: 80
           - path: /__PREFIX__relationships/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: doctor-service
                 port:
                   number: 80
 
-          # ==========================================
-          # 🧑‍⚕️ PATIENT & IOT SERVICE (Port 8081)
-          # ==========================================
+          # PATIENT
           - path: /__PREFIX__patients/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: patient-service
                 port:
                   number: 80
           - path: /__PREFIX__register-patient/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: patient-service
                 port:
                   number: 80
           - path: /__PREFIX__verify-identity/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: patient-service
                 port:
                   number: 80
           - path: /__PREFIX__public/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: patient-service
                 port:
                   number: 80
           - path: /__PREFIX__stats/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: patient-service
                 port:
                   number: 80
           - path: /__PREFIX__vitals/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: patient-service
                 port:
                   number: 80
           - path: /__PREFIX__emergency/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: patient-service
                 port:
                   number: 80
           - path: /__PREFIX__search/?(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: patient-service
                 port:
                   number: 80
 
-          # ==========================================
-          # 🛡️ CATCH-ALL FALLBACK (Root / Liveness)
-          # ==========================================
+          # CATCH-ALL
           - path: /__PREFIX__(.*)
-            pathType: Prefix
+            pathType: ImplementationSpecific
             backend:
               service:
                 name: patient-service
