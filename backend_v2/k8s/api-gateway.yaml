@@ -4,37 +4,40 @@ metadata:
   name: mediconnect-ingress
   annotations:
     kubernetes.io/ingress.class: nginx
-    nginx.ingress.kubernetes.io/use-regex: "true"
     nginx.ingress.kubernetes.io/ssl-redirect: "false"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+
+    nginx.ingress.kubernetes.io/use-regex: "true"
     nginx.ingress.kubernetes.io/rewrite-target: /$1
     
     # 🟢 HIPAA WAF & DDoS Protection (Rate Limiting)
-    nginx.ingress.kubernetes.io/limit-rps: "10"         # Strict Limit: 10 requests per second per IP address
-    nginx.ingress.kubernetes.io/limit-burst: "20"       # Forgiveness: Allows a sudden burst of 20 reqs during page load
-    nginx.ingress.kubernetes.io/limit-connections: "10" # Concurrency: Max 10 active connections per IP
+    nginx.ingress.kubernetes.io/limit-rps: "10"         
+    nginx.ingress.kubernetes.io/limit-burst: "20"       
+    nginx.ingress.kubernetes.io/limit-connections: "10" 
 spec:
   rules:
     - http:
         paths:
-          # --- COMMUNICATION SERVICE ---
-          - path: /__PREFIX__(chat.*)
+          # ==========================================
+          # 💬 COMMUNICATION & AI SERVICE (Port 8084)
+          # ==========================================
+          - path: /__PREFIX__chat/?(.*)
             pathType: Prefix
             backend:
               service:
                 name: communication-service
                 port:
                   number: 80
-          - path: /__PREFIX__(video.*)
+          - path: /__PREFIX__video/?(.*)
             pathType: Prefix
             backend:
               service:
                 name: communication-service
                 port:
                   number: 80
-          - path: /__PREFIX__(ai.*)
+          - path: /__PREFIX__ai/?(.*)
             pathType: Prefix
             backend:
               service:
@@ -42,22 +45,38 @@ spec:
                 port:
                   number: 80
 
-          # --- BOOKING SERVICE ---
-          - path: /__PREFIX__(appointments.*)
+          # ==========================================
+          # 📅 BOOKING & BILLING SERVICE (Port 8083)
+          # ==========================================
+          - path: /__PREFIX__appointments/?(.*)
             pathType: Prefix
             backend:
               service:
                 name: booking-service
                 port:
                   number: 80
-          - path: /__PREFIX__(billing.*)
+          - path: /__PREFIX__billing/?(.*)
             pathType: Prefix
             backend:
               service:
                 name: booking-service
                 port:
                   number: 80
-          - path: /__PREFIX__(webhook.*)
+          - path: /__PREFIX__analytics/?(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: booking-service
+                port:
+                  number: 80
+          - path: /__PREFIX__webhook/?(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: booking-service
+                port:
+                  number: 80
+          - path: /__PREFIX__system/?(.*)
             pathType: Prefix
             backend:
               service:
@@ -65,29 +84,52 @@ spec:
                 port:
                   number: 80
 
-          # --- DOCTOR SERVICE ---
-          - path: /__PREFIX__(doctors.*)
+          # ==========================================
+          # 🩺 DOCTOR & CLINICAL SERVICE (Port 8082)
+          # ==========================================
+          - path: /__PREFIX__doctors/?(.*)
             pathType: Prefix
             backend:
               service:
                 name: doctor-service
                 port:
                   number: 80
-          - path: /__PREFIX__(register-doctor.*) # 🟢 ADDED THIS
+          - path: /__PREFIX__register-doctor/?(.*)
             pathType: Prefix
             backend:
               service:
                 name: doctor-service
                 port:
                   number: 80
-          - path: /__PREFIX__(prescription.*)
+          - path: /__PREFIX__prescription/?(.*)
             pathType: Prefix
             backend:
               service:
                 name: doctor-service
                 port:
                   number: 80
-          - path: /__PREFIX__(ehr.*)
+          - path: /__PREFIX__prescriptions/?(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: doctor-service
+                port:
+                  number: 80
+          - path: /__PREFIX__ehr/?(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: doctor-service
+                port:
+                  number: 80
+          - path: /__PREFIX__pharmacy/?(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: doctor-service
+                port:
+                  number: 80
+          - path: /__PREFIX__relationships/?(.*)
             pathType: Prefix
             backend:
               service:
@@ -95,15 +137,59 @@ spec:
                 port:
                   number: 80
 
-          # --- PATIENT & FALLBACK SERVICE ---
-          - path: /__PREFIX__(patients.*)
+          # ==========================================
+          # 🧑‍⚕️ PATIENT & IOT SERVICE (Port 8081)
+          # ==========================================
+          - path: /__PREFIX__patients/?(.*)
             pathType: Prefix
             backend:
               service:
                 name: patient-service
                 port:
                   number: 80
-          - path: /__PREFIX__(vitals.*)
+          - path: /__PREFIX__register-patient/?(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: patient-service
+                port:
+                  number: 80
+          - path: /__PREFIX__verify-identity/?(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: patient-service
+                port:
+                  number: 80
+          - path: /__PREFIX__public/?(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: patient-service
+                port:
+                  number: 80
+          - path: /__PREFIX__stats/?(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: patient-service
+                port:
+                  number: 80
+          - path: /__PREFIX__vitals/?(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: patient-service
+                port:
+                  number: 80
+          - path: /__PREFIX__emergency/?(.*)
+            pathType: Prefix
+            backend:
+              service:
+                name: patient-service
+                port:
+                  number: 80
+          - path: /__PREFIX__search/?(.*)
             pathType: Prefix
             backend:
               service:
@@ -111,7 +197,9 @@ spec:
                 port:
                   number: 80
 
-          # Catch-all Default
+          # ==========================================
+          # 🛡️ CATCH-ALL FALLBACK (Root / Liveness)
+          # ==========================================
           - path: /__PREFIX__(.*)
             pathType: Prefix
             backend:
