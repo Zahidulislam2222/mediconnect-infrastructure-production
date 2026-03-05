@@ -17,6 +17,22 @@ dotenv.config();
 const app = express();
 app.set('trust proxy', 1);
 
+app.get('/health', (req, res) => res.status(200).json({ status: 'UP', type: 'liveness' }));
+app.get('/ready', (req, res) => {
+    if (isAppReady) {
+        res.status(200).json({ status: 'READY', type: 'readiness', service: 'booking-service' });
+    } else {
+        res.status(503).json({ status: 'BOOTING', type: 'readiness', service: 'booking-service' });
+    }
+});
+
+const globalLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, 
+    max: 100, 
+    message: { error: "Too many requests. Please try again later." }
+});
+app.use(globalLimiter);
+
 const PORT = process.env.PORT || 8084;
 let isAppReady = false;
 
