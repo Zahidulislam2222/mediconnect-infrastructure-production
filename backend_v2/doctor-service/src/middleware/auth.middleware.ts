@@ -1,55 +1,37 @@
 import { Request, Response, NextFunction } from 'express';
-import { JwtRsaVerifier } from "aws-jwt-verify";
-import axios from "axios";
-// 🟢 ARCHITECTURE FIX: Import the Multi-Region Config Bridge
+import { CognitoJwtVerifier } from "aws-jwt-verify"; 
 import { COGNITO_CONFIG } from '../../../shared/aws-config';
 import { writeAuditLog } from '../../../shared/audit';
 
-// 🟢 GDPR FIX: Regional Cache Map (Instead of a single global variable)
-// This ensures US tokens verify against US keys, and EU tokens against EU keys.
+
 const verifiers: Record<string, any> = {};
 
 const getVerifier = async (userRegion: string) => {
     // 1. Normalize Region
-    const regionKey = userRegion?.toUpperCase().includes('EU') ? 'EU' : 'US';
+    const isEU = userRegion?.toUpperCase().includes('EU');
+    const regionKey = isEU ? 'EU' : 'US';
     
-    // 2. Check Cache for this SPECIFIC region
-    if (verifiers[regionKey]) {
-        return verifiers[regionKey];
-    }
+    // 2. Return cached verifier if exists
+    if (verifiers[regionKey]) return verifiers[regionKey];
 
-    console.log(`🔒 Initializing Auth Gatekeeper for Region: ${regionKey}`);
-
-    // 3. Select Correct Infrastructure (GDPR Data Sovereignty)
+    // 3. Select Infrastructure Config (Uses getters from shared config)
     const config = COGNITO_CONFIG[regionKey];
     
-    // Safety Check: Ensure secrets exist
     if (!config.USER_POOL_ID || !config.CLIENT_DOCTOR) {
         throw new Error(`AUTH_CONFIG_MISSING: No Cognito configuration found for ${regionKey}`);
     }
 
-    const issuerUrl = `https://cognito-idp.${config.REGION}.amazonaws.com/${config.USER_POOL_ID}`;
-    const jwksUrl = `${issuerUrl}/.well-known/jwks.json`;
-
     try {
-        console.log(`🔑 Fetching JWKS from ${issuerUrl} (30s timeout)...`);
-        
-        // 4. Resilience: Manual fetch to bypass library timeouts in Cloud Run/Azure
-        const response = await axios.get(jwksUrl, { timeout: 30000 });
-        const jwks = response.data;
+        console.log(`🔐 Initializing Doctor Auth Gatekeeper for ${regionKey}...`);
 
-        // 5. Create Verifier
-        const verifier = JwtRsaVerifier.create({
-            issuer: issuerUrl,
-            audience: [config.CLIENT_DOCTOR, config.CLIENT_PATIENT].filter(Boolean),
+        // 4. 🟢 Use Official Verifier (Auto-manages JWKS rotation and caching)
+        const verifier = CognitoJwtVerifier.create({
+            userPoolId: config.USER_POOL_ID,
             tokenUse: "id",
-            jwks: jwks // Inject keys directly
+            clientId: [config.CLIENT_DOCTOR, config.CLIENT_PATIENT].filter(Boolean) as string[],
         });
 
-        // 6. Save to Regional Cache
         verifiers[regionKey] = verifier;
-        console.log(`✅ Auth Gatekeeper READY for ${regionKey}`);
-        
         return verifier;
 
     } catch (error: any) {
@@ -62,42 +44,46 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
     try {
         const authHeader = req.headers.authorization;
         if (!authHeader?.startsWith('Bearer ')) {
-            return res.status(401).json({ error: "Unauthorized: Missing token" });
+            res.status(401).json({ error: "Unauthorized: Missing token" });
+            return;
         }
 
         const token = authHeader.split(' ')[1];
         
-        // 🟢 COMPILER FIX: Safely parse header array to string
+        // Safely parse regional header
         const rawRegion = req.headers['x-user-region'];
-        const userRegion = Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
+        const userRegion = Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion as string || "us-east-1");
 
-        // 🟢 GDPR LOGIC: Get the correct verifier for this user's region
+        // Get the strict regional verifier
         const v = await getVerifier(userRegion);
         
-        // Verify Token (Crypto Check)
+        // Verify Token (Crypto & Expiry check)
         const payload = await v.verify(token);
 
-        // 🟢 2026 SECURITY ENFORCEMENT: Explicit Group Check
-        const groups = payload['cognito:groups'] || [];
-        const isDoctor = groups.includes('doctor') || groups.includes('doctors');
-        const isPatient = !isDoctor; // Default to patient if not in doctor group
+        // --- 2026 PERMISSION ENFORCEMENT (RBAC) ---
+        const groups = (payload['cognito:groups'] as string[]) || [];
+        const isDoctor = groups.some(g => g.toLowerCase() === 'doctor' || g.toLowerCase() === 'doctors');
+        const isPatient = !isDoctor;
 
-        // 🟢 2. Permission Logic: Allow Patients to READ, but only Doctors to WRITE
         const isReadRequest = req.method === 'GET';
 
         if (!isDoctor && !isReadRequest) {
-            await writeAuditLog(payload.sub, "SYSTEM", "UNAUTHORIZED_WRITE_ATTEMPT", "Blocked patient attempt to modify doctor-service", {
+            await writeAuditLog(payload.sub, "SYSTEM", "UNAUTHORIZED_WRITE_ATTEMPT", 
+                "Blocked patient attempt to modify clinical data", {
                 region: userRegion,
                 ipAddress: req.ip,
-                role: "REJECTED_PATIENT"
+                endpoint: req.originalUrl
             });
-            return res.status(403).json({ error: "Access Denied: Only verified practitioners can modify clinical data." });
+            res.status(403).json({ error: "Access Denied: Only verified practitioners can modify clinical data." });
+            return;
         }
 
-        // 🟢 3. Context Injection
+        // --- CONTEXT INJECTION ---
         (req as any).user = { 
-            ...payload, 
+            id: payload.sub,
             sub: payload.sub,
+            email: payload.email,
+            fhirId: payload["custom:fhir_id"] || payload.sub,
             region: userRegion,
             isDoctor,
             isPatient
@@ -106,13 +92,14 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
         next();
 
     } catch (err: any) {
-        console.error("Auth Middleware Blocked Request:", err.message);
+        console.warn(`🔒 Auth Middleware Blocked Request: ${err.message}`);
         
-        // Distinguish between Server Error (503) and User Error (401)
-        if (err.message.includes('AUTH_CONFIG_MISSING') || err.message.includes('timeout')) {
-            return res.status(503).json({ error: "Service unavailable during auth initialization" });
+        if (err.message.includes('AUTH_CONFIG_MISSING')) {
+            res.status(503).json({ error: "Service unavailable during auth initialization" });
+            return;
         }
         
-        return res.status(401).json({ error: "Unauthorized: Invalid or expired token" });
+        res.status(401).json({ error: "Unauthorized: Invalid or expired token" });
+        return;
     }
 };

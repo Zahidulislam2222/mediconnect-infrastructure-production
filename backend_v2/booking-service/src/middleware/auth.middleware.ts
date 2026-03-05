@@ -3,34 +3,34 @@ import { CognitoJwtVerifier } from "aws-jwt-verify";
 import { COGNITO_CONFIG } from '../../../shared/aws-config';
 import { writeAuditLog } from "../../../shared/audit";
 
-// 🟢 REGIONAL CACHE: We keep two verifiers alive in memory
+// Regional Cache
 const verifiers: Record<string, any> = {
     'us-east-1': null,
     'eu-central-1': null
 };
 
-// 🟢 GDPR HELPER: Determine which pool to check
+// Standardized Region Extractor
 const extractRegion = (req: Request): string => {
     const rawRegion = req.headers['x-user-region'];
     const r = Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-    return r.toUpperCase() === 'EU' ? 'eu-central-1' : 'us-east-1';
+    return r.toUpperCase().includes('EU') ? 'eu-central-1' : 'us-east-1';
 };
 
 const getVerifier = async (region: string) => {
     if (verifiers[region]) return verifiers[region];
 
-    const config = region === 'eu-central-1' ? COGNITO_CONFIG.EU : COGNITO_CONFIG.US;
+    const regionKey = region === 'eu-central-1' ? 'EU' : 'US';
+    const config = COGNITO_CONFIG[regionKey];
 
     if (!config.USER_POOL_ID || !config.CLIENT_PATIENT) {
-        throw new Error(`AUTH_CRASH: Missing Cognito Config for ${region}`);
+        throw new Error(`AUTH_CRASH: Missing Cognito Config for ${regionKey}`);
     }
 
-    // 🟢 SECURE: Strict verification against specific Regional Pool
+    // 🟢 SECURE: Official Verifier with Interoperability for both apps
     verifiers[region] = CognitoJwtVerifier.create({
         userPoolId: config.USER_POOL_ID,
         tokenUse: "id",
-        clientId: [config.CLIENT_PATIENT, config.CLIENT_DOCTOR], // Allow both apps
-        groups: null, // We check groups manually logic
+        clientId: [config.CLIENT_PATIENT, config.CLIENT_DOCTOR].filter(Boolean) as string[],
     });
 
     return verifiers[region];
@@ -40,43 +40,51 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
     try {
         const authHeader = req.headers.authorization;
         if (!authHeader?.startsWith('Bearer ')) {
-            return res.status(401).json({ error: "Unauthorized: Missing token" });
+            res.status(401).json({ error: "Unauthorized: Missing token" });
+            return;
         }
 
         const token = authHeader.split(' ')[1];
-        
-        // 1. Identify Jurisdiction (GDPR)
         const region = extractRegion(req);
-        
-        // 2. Get the Correct Verifier (US or EU)
         const v = await getVerifier(region);
 
-        // 3. Verify Token (Crypto Check)
+        // 🔐 Cryptographic Verification
         const payload = await v.verify(token);
 
-        // 4. Attach Verified User
+        // 🟢 UNIFORMITY FIX: Align roles and IDs with all other microservices
+        const groups = (payload['cognito:groups'] as string[]) || [];
+        const isDoctor = groups.some(g => g.toLowerCase() === 'doctor' || g.toLowerCase() === 'doctors');
+
         (req as any).user = {
+            id: payload.sub,
             sub: payload.sub,
             email: payload.email,
-            // 🟢 NORMALIZE GROUPS: Handle Cognito array vs Single string
-            role: payload["custom:role"] || (payload["cognito:groups"] ? payload["cognito:groups"][0] : "patient"),
-            region: region // Pass this down so controllers know where to route data
+            fhirId: payload["custom:fhir_id"] || payload.sub,
+            region: region,
+            isDoctor,
+            isPatient: !isDoctor
         };
 
         next();
     } catch (err: any) {
-        // 🟢 HIPAA AUDIT: Log the intrusion attempt
+        // 🟢 HIPAA AUDIT: Log the specific service failure
         const ip = req.ip || req.headers['x-forwarded-for'] || 'UNKNOWN';
         const region = extractRegion(req);
         
-        console.error(`❌ Auth Failed [${region}]:`, err.message);
+        console.warn(`🔒 Booking Auth Failed [${region}]: ${err.message}`);
         
-        // Don't log "Token Expired" spam, only actual attacks/failures
         if (!err.message.includes('expired')) {
-            await writeAuditLog("SYSTEM", "UNKNOWN", "AUTH_FAILURE", `Token rejection: ${err.message}`, { region, ipAddress: String(ip) });
+            await writeAuditLog(
+                "SYSTEM", 
+                "BOOKING", 
+                "AUTH_FAILURE", 
+                `Token rejection: ${err.message}`, 
+                { region, ipAddress: String(ip) }
+            );
         }
 
         const status = err.message.includes('AUTH_CRASH') ? 503 : 401;
-        return res.status(status).json({ error: "Unauthorized" });
+        res.status(status).json({ error: "Unauthorized" });
+        return;
     }
 };

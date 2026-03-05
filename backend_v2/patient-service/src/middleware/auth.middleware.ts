@@ -1,40 +1,40 @@
 import { Request, Response, NextFunction } from 'express';
-import { JwtRsaVerifier } from "aws-jwt-verify";
-import axios from "axios";
-import { COGNITO_CONFIG } from '../../../shared/aws-config';
+import { CognitoJwtVerifier } from "aws-jwt-verify";
+import { COGNITO_CONFIG } from '../../../shared/aws-config'; 
 
+// Cache verifiers in memory
 const verifiers: Record<string, any> = {};
 
 const getVerifier = async (userRegion: string) => {
-    const regionKey = userRegion?.toUpperCase().includes('EU') ? 'EU' : 'US';
-    
+    // 1. Normalize Region
+    const isEU = userRegion?.toUpperCase().includes('EU');
+    const regionKey = isEU ? 'EU' : 'US';
+
     if (verifiers[regionKey]) return verifiers[regionKey];
 
+    // 2. Load Config (Safe because getters read process.env NOW, not at startup)
     const config = COGNITO_CONFIG[regionKey];
-    
-    // 🛡️ SECURITY FIX: Explicit check to prevent empty string bypass
+
     if (!config.USER_POOL_ID || !config.CLIENT_PATIENT) {
-        throw new Error(`AUTH_CONFIG_MISSING: Missing Cognito config for ${regionKey}`);
+        throw new Error(`AUTH_CRITICAL: Missing Cognito Config for ${regionKey}`);
     }
 
-    const issuerUrl = `https://cognito-idp.${config.REGION}.amazonaws.com/${config.USER_POOL_ID}`;
-    const jwksUrl = `${issuerUrl}/.well-known/jwks.json`;
-
     try {
-        // Axios manual fetch prevents Cloud Run / Azure Container Apps timeout bugs
-        const response = await axios.get(jwksUrl, { timeout: 30000 });
-        const verifier = JwtRsaVerifier.create({
-            issuer: issuerUrl,
-            // 🟢 INTEROPERABILITY FIX: Allow BOTH Patient Tokens AND Doctor Tokens
-            audience: [config.CLIENT_PATIENT, config.CLIENT_DOCTOR].filter(Boolean),
+        console.log(`🔐 Initializing Cognito Verifier for ${regionKey}...`);
+
+        // 3. 🟢 USE THE OFFICIAL CLASS (No Axios needed)
+        const verifier = CognitoJwtVerifier.create({
+            userPoolId: config.USER_POOL_ID,
             tokenUse: "id",
-            jwks: response.data
+            // Allow both Patient and Doctor apps to use this API
+            clientId: [config.CLIENT_PATIENT, config.CLIENT_DOCTOR].filter(Boolean),
         });
 
         verifiers[regionKey] = verifier;
         return verifier;
     } catch (error: any) {
-        throw new Error(`Failed to initialize JWKS for ${regionKey}`);
+        console.error(`❌ Auth Init Error: ${error.message}`);
+        throw new Error(`Failed to initialize Auth for ${regionKey}`);
     }
 };
 
@@ -42,40 +42,41 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
     try {
         const authHeader = req.headers.authorization;
         if (!authHeader?.startsWith('Bearer ')) {
-            return res.status(401).json({ error: "Unauthorized: Missing token" });
+            res.status(401).json({ error: "Unauthorized: Missing token" });
+            return;
         }
 
         const token = authHeader.split(' ')[1];
         
-        // Safely parse header array to string
+        // Handle array headers safely
         const rawRegion = req.headers['x-user-region'];
-        const userRegion = Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
+        const userRegion = Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion as string || "us-east-1");
 
-        // Get strict regional verifier
         const v = await getVerifier(userRegion);
+        
+        // 4. Verify (Signature + Expiry + Audience)
         const payload = await v.verify(token);
 
-        // 🟢 CONTEXT INJECTION & FHIR MAPPING
+        // 5. Context Injection
         const groups = (payload['cognito:groups'] as string[]) || [];
-        const isDoctor = groups.some((g: string) => g.toLowerCase() === 'doctor' || g.toLowerCase() === 'doctors');
-        
-        const isPatient = !isDoctor; 
+        const isDoctor = groups.some((g: string) => g.toLowerCase() === 'doctor');
 
-        // 🟢 2. Context Injection
         (req as any).user = { 
             id: payload.sub,
+            sub: payload.sub,
             email: payload.email,
-            // Fallback for custom attributes
             fhirId: payload["custom:fhir_id"] || payload.sub, 
             region: userRegion,
             isDoctor,
-            isPatient
+            isPatient: !isDoctor
         };
         
         next();
 
     } catch (err: any) {
-        console.error("Auth Middleware Blocked Request:", err.message);
-        return res.status(401).json({ error: "Unauthorized: Invalid or expired token" });
+
+        console.warn(`🔒 Auth Failed [IP: ${req.ip}]: ${err.message}`);
+        res.status(401).json({ error: "Unauthorized: Invalid or expired token" });
+        return;
     }
 };

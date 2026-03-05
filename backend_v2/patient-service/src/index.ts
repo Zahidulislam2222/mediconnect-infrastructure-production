@@ -49,17 +49,43 @@ const PORT = process.env.PORT || 8081;
 let isAppReady = false;
 
 // --- 1. COMPLIANT CORS ---
-const allowedOrigins = [
-    'http://localhost:8080',
-    'http://localhost:5173',
-    /\.web\.app$/,
-    /\.azurecontainerapps\.io$/,
-    /\.run\.app$/
+const allowedOrigins: string[] = process.env.ALLOWED_ORIGINS 
+    ? process.env.ALLOWED_ORIGINS.split(',').map(url => url.trim()) 
+    : [];
+
+// Valid Native/Hybrid App Origins (These ARE valid in Production for Capacitor)
+const mobileOrigins = [
+    'capacitor://localhost',    // iOS
+    'http://localhost',         // Android (Capacitor default)
+    'https://localhost'         // Android (Some configs)
 ];
-if (process.env.FRONTEND_URL) allowedOrigins.push(process.env.FRONTEND_URL);
+
+// Development-only Origins
+if (process.env.NODE_ENV !== 'production') {
+    allowedOrigins.push('http://localhost:5173', 'http://localhost:8080');
+}
+
+const corsOptions = {
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+        // 1. Allow requests with NO origin (Mobile apps often send no origin, curl, postman)
+        if (!origin) return callback(null, true);
+        
+        // 2. Allow Whitelisted Web Domains
+        if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
+
+        // 3. Allow Mobile App Origins (Even in Production)
+        if (mobileOrigins.indexOf(origin) !== -1) return callback(null, true);
+
+        safeError(`⛔ CORS Blocked: ${origin}`);
+        callback(new Error('Strict CORS Policy: Origin not allowed'));
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Internal-Secret', 'X-User-ID', 'Prefer', 'If-Match', 'x-user-region']
+};
 
 const io = new Server(httpServer, {
-    cors: { origin: allowedOrigins, methods: ["GET", "POST"], credentials: true }
+    cors: corsOptions
 });
 
 // --- 2. SECURITY MIDDLEWARE ---
@@ -74,12 +100,7 @@ app.use(helmet({
     }
 }));
 
-app.use(cors({
-    origin: allowedOrigins,
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Internal-Secret', 'X-User-ID', 'Prefer', 'If-Match', 'x-user-region']
-}));
+app.use(cors(corsOptions));
 
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));

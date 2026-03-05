@@ -10,26 +10,26 @@ const verifiers: Record<string, any> = {
 
 const extractRegion = (req: Request): string => {
     const rawRegion = req.headers['x-user-region'];
-    // Fallback: Check body for WebSocket events which sometimes carry region payload
     const bodyRegion = (req.body && req.body.region); 
     const r = Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || bodyRegion || "us-east-1");
-    return r.toUpperCase() === 'EU' ? 'eu-central-1' : 'us-east-1';
+    // Standardize to your physical AWS regions
+    return r.toUpperCase().includes('EU') ? 'eu-central-1' : 'us-east-1';
 };
 
 const getVerifier = async (region: string) => {
     if (verifiers[region]) return verifiers[region];
 
-    const config = region === 'eu-central-1' ? COGNITO_CONFIG.EU : COGNITO_CONFIG.US;
+    const regionKey = region === 'eu-central-1' ? 'EU' : 'US';
+    const config = COGNITO_CONFIG[regionKey];
 
-    if (!config.USER_POOL_ID || !config.CLIENT_DOCTOR) {
-         // Return null instead of throwing to allow WebSocket bypass if configured
-         return null; 
+    if (!config.USER_POOL_ID || !config.CLIENT_PATIENT) {
+         throw new Error(`AUTH_NOT_READY: Config missing for ${regionKey}`);
     }
 
     verifiers[region] = CognitoJwtVerifier.create({
         userPoolId: config.USER_POOL_ID,
         tokenUse: "id",
-        clientId: [config.CLIENT_PATIENT, config.CLIENT_DOCTOR],
+        clientId: [config.CLIENT_PATIENT, config.CLIENT_DOCTOR].filter(Boolean) as string[],
     });
 
     return verifiers[region];
@@ -37,59 +37,62 @@ const getVerifier = async (region: string) => {
 
 export const authMiddleware = async (req: Request, res: Response, next: NextFunction) => {
 
+    // 1. Support for AWS Lambda/AppSync Authorizer context (Internal Proxy)
     const awsAuthorizer = req.body?.requestContext?.authorizer;
 
     if (awsAuthorizer && awsAuthorizer.sub) {
+        const isDoctor = awsAuthorizer.role?.toLowerCase() === 'doctor';
         (req as any).user = {
-            sub: awsAuthorizer.sub,
-            role: awsAuthorizer.role || "patient",
+            id: awsAuthorizer.sub,
             email: awsAuthorizer.email || "",
-            region: extractRegion(req)
+            region: extractRegion(req),
+            isDoctor,
+            isPatient: !isDoctor
         };
 
-        if (req.body.body) {
-            req.body = req.body.body; 
-        }
-        
+        if (req.body.body) req.body = req.body.body; 
         return next(); 
     }
 
-    // 🟢 2. Standard HTTP Bearer Token Logic
+    // 2. Standard HTTP Bearer Token Logic
     try {
         const authHeader = req.headers.authorization;
         if (!authHeader?.startsWith('Bearer ')) {
-            return res.status(401).json({ error: "Missing token" });
+            return res.status(401).json({ error: "Unauthorized: Missing token" });
         }
 
         const token = authHeader.split(' ')[1];
         const region = extractRegion(req);
         const v = await getVerifier(region);
 
-        if (!v) throw new Error(`AUTH_NOT_READY: Config missing for ${region}`);
-
         // 🔐 CRYPTOGRAPHIC VERIFICATION
         const payload = await v.verify(token);
 
+        // 🟢 ALIGNMENT FIX: Use the same structure as Patient and Doctor services
+        const groups = (payload['cognito:groups'] as string[]) || [];
+        const isDoctor = groups.some(g => g.toLowerCase() === 'doctor' || g.toLowerCase() === 'doctors');
+
         (req as any).user = {
+            id: payload.sub,
             sub: payload.sub,
             email: payload.email,
-            role: payload["custom:role"] || (payload["cognito:groups"] ? payload["cognito:groups"][0] : "patient"),
-            region: region
+            region: region,
+            isDoctor,
+            isPatient: !isDoctor
         };
 
         next();
     } catch (err: any) {
         const region = extractRegion(req);
         
-        // 🛡️ SECURITY: I removed the "Dev Mode" bypass. 
-        // If the token is invalid, we REJECT it. No exceptions.
-        console.error(`❌ Auth Failure [${region}]:`, err.message);
+        console.warn(`🔒 Auth Failure [${region}]:`, err.message);
 
+        // Only log to Audit Log if it's a real attack (not just an expired token)
         if (!err.message.includes('expired')) {
-             await writeAuditLog("SYSTEM", "UNKNOWN", "UNAUTHORIZED_ACCESS", err.message, { region });
+             await writeAuditLog("SYSTEM", "COMMUNICATION", "UNAUTHORIZED_ACCESS_ATTEMPT", err.message, { region, ip: req.ip });
         }
 
         const status = err.message.includes('AUTH_NOT_READY') ? 503 : 401;
-        return res.status(status).json({ error: "Unauthorized" });
+        return res.status(status).json({ error: "Unauthorized: Access denied" });
     }
 };

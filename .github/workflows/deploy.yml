@@ -284,6 +284,7 @@ jobs:
           # 🟢 FIXED: Comments removed from line ends to prevent syntax error
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
               -e "s|__PUBLIC_DOMAIN__|$PUBLIC_DOMAIN|g" \
+              -e "s|__ALLOWED_ORIGINS__|${{ vars.ALLOWED_ORIGINS }}|g" \
               -e "s|__AWS_REGION__|us-east-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
               -e "s|__MAX_REPLICAS__|5|g" \
@@ -312,6 +313,7 @@ jobs:
           # 🟢 FIXED: No comments allowed after backslash
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
               -e "s|__PUBLIC_DOMAIN__|$PUBLIC_DOMAIN|g" \
+              -e "s|__ALLOWED_ORIGINS__|${{ vars.ALLOWED_ORIGINS }}|g" \
               -e "s|__AWS_REGION__|eu-central-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
               -e "s|__MAX_REPLICAS__|5|g" \
@@ -346,7 +348,7 @@ jobs:
             --service-account="${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}" \
             --port ${{ matrix.port }} \
             --min-instances 0 \
-            --set-env-vars "NODE_ENV=production,API_PUBLIC_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},AWS_REGION=us-east-1,AWS_ROLE_ARN=$ROLE_ARN,AWS_EC2_METADATA_DISABLED=true" \
+            --set-env-vars "NODE_ENV=production,API_PUBLIC_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},AWS_REGION=us-east-1,AWS_ROLE_ARN=$ROLE_ARN,AWS_EC2_METADATA_DISABLED=true,ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }}" \
             --platform managed \
             --allow-unauthenticated
 
@@ -369,6 +371,6 @@ jobs:
             --service-account="${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}" \
             --port ${{ matrix.port }} \
             --min-instances 0 \
-            --set-env-vars "NODE_ENV=production,API_PUBLIC_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},AWS_REGION=eu-central-1,AWS_ROLE_ARN=$ROLE_ARN,AWS_EC2_METADATA_DISABLED=true" \
+            --set-env-vars "NODE_ENV=production,API_PUBLIC_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},AWS_REGION=eu-central-1,AWS_ROLE_ARN=$ROLE_ARN,AWS_EC2_METADATA_DISABLED=true,ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }}" \
             --platform managed \
             --allow-unauthenticated

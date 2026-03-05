@@ -20,33 +20,34 @@ app.set('trust proxy', 1);
 const PORT = process.env.PORT || 8084;
 let isAppReady = false;
 
-// 🟢 1. HEALTH CHECKS FIRST (NO LIMIT)
-app.get('/health', (req, res) => res.status(200).json({ status: 'UP', type: 'liveness' }));
-app.get('/ready', (req, res) => {
-    if (isAppReady) {
-        res.status(200).json({ status: 'READY', type: 'readiness', service: 'communication-service' });
-    } else {
-        res.status(503).json({ status: 'BOOTING', type: 'readiness', service: 'communication-service' });
-    }
-});
+// --- 1. ENTERPRISE CORS CONFIGURATION ---
+const allowedOrigins: string[] = process.env.ALLOWED_ORIGINS 
+    ? process.env.ALLOWED_ORIGINS.split(',').map(url => url.trim()) 
+    : [];
 
-// 🟢 2. SECURITY LIMITER SECOND (Applies to all routes BELOW)
-const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, 
-    max: 100, 
-    message: { error: "Too many requests. Please try again later." }
-});
-app.use(globalLimiter);
-
-// --- 1. COMPLIANT CORS ---
-const allowedOrigins = [
-    'http://localhost:8080',
-    'http://localhost:5173',
-    /\.web\.app$/,
-    /\.azurecontainerapps\.io$/,
-    /\.run\.app$/
+const mobileOrigins = [
+    'capacitor://localhost',
+    'http://localhost',
+    'https://localhost'
 ];
-if (process.env.FRONTEND_URL) allowedOrigins.push(process.env.FRONTEND_URL);
+
+if (process.env.NODE_ENV !== 'production') {
+    allowedOrigins.push('http://localhost:5173', 'http://localhost:8080');
+}
+
+const corsOptions = {
+    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
+        if (mobileOrigins.indexOf(origin) !== -1) return callback(null, true);
+
+        console.error(`⛔ CORS Blocked: ${origin}`);
+        callback(new Error('Strict CORS Policy: Origin not allowed'));
+    },
+    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Internal-Secret', 'X-User-ID', 'Prefer', 'If-Match', 'x-user-region']
+};
 
 // --- 2. SECURITY MIDDLEWARE ---
 app.use(helmet({
@@ -61,15 +62,10 @@ app.use(helmet({
     }
 }));
 
-app.use(cors({
-    origin: allowedOrigins,
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Internal-Secret', 'X-User-ID', 'Prefer', 'If-Match', 'x-user-region']
-}));
-app.options('*', cors());
+app.use(cors(corsOptions)); // 🟢 Apply strict options
+app.options('*', cors(corsOptions));
 
-// 🟢 High limit required for Base64 Clinical Images
+// High limit for clinical images/Base64
 app.use(express.json({ limit: '50mb' })); 
 
 // 🟢 HIPAA AUDIT FIX: Secure Identity Logging
