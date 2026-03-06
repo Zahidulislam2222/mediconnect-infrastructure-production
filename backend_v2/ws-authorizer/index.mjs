@@ -1,15 +1,20 @@
 import https from 'https';
 import http from 'http';
 
+// 🟢 PROFESSIONAL FIX: Pulling URLs from Lambda Environment Variables
+const PRIMARY_URL = process.env.PRIMARY_BACKEND_URL; 
+const BACKUP_URL = process.env.BACKUP_BACKEND_URL;
+
 function makeRequest(url, method, body, headers) {
     return new Promise((resolve, reject) => {
-        if (!url || url === 'undefined') return reject(new Error("URL is undefined"));
+        if (!url) return reject(new Error("URL is undefined"));
         
         const lib = url.startsWith('https') ? https : http;
         const req = lib.request(url, { method, headers, timeout: 5000 }, (res) => {
             let data = '';
             res.on('data', (chunk) => data += chunk);
             res.on('end', () => {
+                // If backend returns 5xx error, we trigger failover
                 if (res.statusCode >= 500) reject(new Error(`Server Error ${res.statusCode}`));
                 else resolve({ statusCode: res.statusCode, body: data });
             });
@@ -23,10 +28,7 @@ function makeRequest(url, method, body, headers) {
     });
 }
 
-// 🟢 export const handler is required for .mjs files!
 export const handler = async (event) => {
-    const PRIMARY_URL = process.env.PRIMARY_BACKEND_URL; 
-    const BACKUP_URL = process.env.BACKUP_BACKEND_URL;
 
     const payload = JSON.stringify(event);
     const headers = { 'Content-Type': 'application/json' };

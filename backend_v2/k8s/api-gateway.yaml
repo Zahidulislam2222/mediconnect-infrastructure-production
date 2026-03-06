@@ -12,7 +12,7 @@ metadata:
     
     # HIPAA Rate Limiting
     nginx.ingress.kubernetes.io/limit-rps: "50"         
-    nginx.ingress.kubernetes.io/limit-burst: "100"       
+    nginx.ingress.kubernetes.io/limit-burst: "200"       
     nginx.ingress.kubernetes.io/limit-connections: "50" 
 spec:
   rules:
