@@ -11,9 +11,9 @@ metadata:
     nginx.ingress.kubernetes.io/use-regex: "true"
     
     # HIPAA Rate Limiting
-    nginx.ingress.kubernetes.io/limit-rps: "10"         
-    nginx.ingress.kubernetes.io/limit-burst: "20"       
-    nginx.ingress.kubernetes.io/limit-connections: "10" 
+    nginx.ingress.kubernetes.io/limit-rps: "50"         
+    nginx.ingress.kubernetes.io/limit-burst: "100"       
+    nginx.ingress.kubernetes.io/limit-connections: "50" 
 spec:
   rules:
     - http:
