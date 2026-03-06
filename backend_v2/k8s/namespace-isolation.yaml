@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: isolate-prod-namespace
+  namespace: mediconnect-prod
+spec:
+  podSelector: {} # This applies to ALL pods in the mediconnect-prod namespace
+  policyTypes:
+  - Ingress
+  ingress:
+  # 1. Allow all pods INSIDE mediconnect-prod to talk to each other (App will NOT break)
+  - from:
+    - podSelector: {}
+  
+  # 2. Allow NGINX Ingress to send web traffic from outside
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx
+
+  # 3. Allow Prometheus Monitoring to scrape health metrics
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: mediconnect-monitoring

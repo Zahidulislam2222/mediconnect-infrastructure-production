@@ -1,3 +1,4 @@
+// C:\Dev\mediconnect-project\mediconnect-infrastructure-develop\backend_v2\patient-service\src\index.ts
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -12,10 +13,8 @@ import { defaultProvider } from "@aws-sdk/credential-provider-node";
 // Shared Utilities
 import { safeLog, safeError } from '../../shared/logger';
 import { getRegionalSSMClient } from '../../shared/aws-config';
-import { getSignedIoTUrl } from './utils/iot-signer'; // 🟢 IMPORT THE SIGNER
+import { getSignedIoTUrl } from './utils/iot-signer'; 
 
-import patientRoutes from './routes/patient.routes';
-import iotRoutes from "./modules/iot/iot.routes";
 import { handleEmergencyDetection } from './modules/iot/emergency';
 import rateLimit from 'express-rate-limit';
 
@@ -36,7 +35,7 @@ app.get('/ready', (req, res) => {
     }
 });
 
-// 🟢 2. DDoS Protection (Applied to all routes BELOW this line)
+// 🟢 2. DDoS Protection
 const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
     max: 100, 
@@ -53,27 +52,20 @@ const allowedOrigins: string[] = process.env.ALLOWED_ORIGINS
     ? process.env.ALLOWED_ORIGINS.split(',').map(url => url.trim()) 
     : [];
 
-// Valid Native/Hybrid App Origins (These ARE valid in Production for Capacitor)
 const mobileOrigins = [
-    'capacitor://localhost',    // iOS
-    'http://localhost',         // Android (Capacitor default)
-    'https://localhost'         // Android (Some configs)
+    'capacitor://localhost',    
+    'http://localhost',         
+    'https://localhost'         
 ];
 
-// Development-only Origins
 if (process.env.NODE_ENV !== 'production') {
     allowedOrigins.push('http://localhost:5173', 'http://localhost:8080');
 }
 
 const corsOptions = {
     origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-        // 1. Allow requests with NO origin (Mobile apps often send no origin, curl, postman)
         if (!origin) return callback(null, true);
-        
-        // 2. Allow Whitelisted Web Domains
         if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
-
-        // 3. Allow Mobile App Origins (Even in Production)
         if (mobileOrigins.indexOf(origin) !== -1) return callback(null, true);
 
         safeError(`⛔ CORS Blocked: ${origin}`);
@@ -101,7 +93,6 @@ app.use(helmet({
 }));
 
 app.use(cors(corsOptions));
-
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
@@ -125,7 +116,6 @@ async function loadSecrets() {
     try {
         console.log(`🔐 Synchronizing Patient secrets with AWS Vault [${region}]...`);
 
-        // 🟢 BATCH 1: Infrastructure & IoT (5 params)
         const cmdInfra = new GetParametersCommand({
             Names: [
                 '/mediconnect/prod/db/patient_table',
@@ -137,7 +127,6 @@ async function loadSecrets() {
             WithDecryption: true
         });
 
-        // 🟢 BATCH 2: Identity (6 params)
         const cmdIdentity = new GetParametersCommand({
             Names: [
                 '/mediconnect/prod/cognito/user_pool_id',
@@ -160,29 +149,25 @@ async function loadSecrets() {
         if (allParams.length === 0) throw new Error("Vault empty.");
 
         allParams.forEach((p: any) => {
-            // Infrastructure & IoT
             if (p.Name === '/mediconnect/prod/db/patient_table') process.env.DYNAMO_TABLE = p.Value;
             if (p.Name === '/mediconnect/prod/s3/patient_identity_bucket') process.env.BUCKET_NAME = p.Value;
             if (p.Name === '/mediconnect/prod/mqtt/endpoint') process.env.MQTT_BROKER_URL = p.Value;
             if (p.Name === '/mediconnect/prod/sns/topic_arn_us') process.env.SNS_TOPIC_ARN_US = p.Value;
             if (p.Name === '/mediconnect/prod/sns/topic_arn_eu') process.env.SNS_TOPIC_ARN_EU = p.Value;
             
-            // US Identity (STRICT MAPPING)
             if (p.Name === '/mediconnect/prod/cognito/user_pool_id') process.env.COGNITO_USER_POOL_ID_US = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/client_id_patient') process.env.COGNITO_CLIENT_ID_US_PATIENT = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/client_id_doctor') process.env.COGNITO_CLIENT_ID_US_DOCTOR = p.Value;
 
-            // EU Identity (STRICT MAPPING)
             if (p.Name === '/mediconnect/prod/cognito/user_pool_id_eu') process.env.COGNITO_USER_POOL_ID_EU = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/client_id_eu_patient') process.env.COGNITO_CLIENT_ID_EU_PATIENT = p.Value;
             if (p.Name === '/mediconnect/prod/cognito/client_id_eu_doctor') process.env.COGNITO_CLIENT_ID_EU_DOCTOR = p.Value;
         });
 
-        // 🟢 REQUIRED FALLBACKS for auth.middleware and legacy logic
         if (!process.env.COGNITO_USER_POOL_ID) process.env.COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID_US;
         if (!process.env.COGNITO_CLIENT_ID) process.env.COGNITO_CLIENT_ID = process.env.COGNITO_CLIENT_ID_US_PATIENT;
 
-        console.log("✅ AWS Vault Sync Complete. All IoT and Identity keys mapped.");
+        console.log("✅ AWS Vault Sync Complete.");
     } catch (e: any) {
         safeError(`❌ FATAL: Vault Sync Failed.`, e.message);
         process.exit(1);
@@ -213,7 +198,6 @@ const startIoTBridge = async () => {
             credentials.sessionToken      
         );
 
-        // 🟢 FIX 2: Generate Unique Client ID to stop the ECONNRESET loop (ID Conflict)
         const mqttClient = connect(signedUrl, {
             connectTimeout: 10000,
             reconnectPeriod: 5000,
@@ -245,9 +229,7 @@ const startIoTBridge = async () => {
                     });
                 }
                 io.to(`patient_${patientId}`).emit('vital_update', { ...payload, timestamp: new Date().toISOString() });
-
-                // 🟢 NEW: Push this vital reading to the correct BigQuery Region
-                // We don't use 'await' here because we don't want analytics to slow down real-time alerts
+                
                 pushVitalToBigQuery(patientId, payload, region).catch((err: any) => console.error(err));
 
             } catch (e) { console.error("MQTT Message Error"); }
@@ -267,17 +249,23 @@ const startIoTBridge = async () => {
 // --- 5. START SERVER ---
 const startServer = async () => {
     try {
+        // 🟢 1. Wait for Vault Secrets FIRST
         await loadSecrets();
         
+        // 🟢 2. Dynamically import controllers SECOND
+        const { default: patientRoutes } = await import('./routes/patient.routes');
+        const { default: iotRoutes } = await import('./modules/iot/iot.routes');
+        
+        // 🟢 3. Attach routes
         app.use('/', patientRoutes);
         app.use('/', iotRoutes);
 
         app.use('*', (req, res) => {
-    res.status(404).json({ 
-        error: "Route Not Found", 
-        message: `Cannot ${req.method} ${req.originalUrl}` 
-    });
-});
+            res.status(404).json({ 
+                error: "Route Not Found", 
+                message: `Cannot ${req.method} ${req.originalUrl}` 
+            });
+        });
         
         startIoTBridge();
 

@@ -1,53 +1,45 @@
-import https from 'https';
-import http from 'http';
+import { CognitoJwtVerifier } from "aws-jwt-verify";
 
-// 🟢 PROFESSIONAL FIX: Pulling URLs from Lambda Environment Variables
-const PRIMARY_URL = process.env.PRIMARY_BACKEND_URL; 
-const BACKUP_URL = process.env.BACKUP_BACKEND_URL;
+// 1. Initialize verifier
+const verifier = CognitoJwtVerifier.create({
+  userPoolId: process.env.COGNITO_USER_POOL_ID,
+  tokenUse: "id",
+  clientId:[
+      process.env.COGNITO_CLIENT_ID_PATIENT, 
+      process.env.COGNITO_CLIENT_ID_DOCTOR
+  ].filter(Boolean),
+});
 
-function makeRequest(url, method, body, headers) {
-    return new Promise((resolve, reject) => {
-        if (!url) return reject(new Error("URL is undefined"));
-        
-        const lib = url.startsWith('https') ? https : http;
-        const req = lib.request(url, { method, headers, timeout: 5000 }, (res) => {
-            let data = '';
-            res.on('data', (chunk) => data += chunk);
-            res.on('end', () => {
-                // If backend returns 5xx error, we trigger failover
-                if (res.statusCode >= 500) reject(new Error(`Server Error ${res.statusCode}`));
-                else resolve({ statusCode: res.statusCode, body: data });
-            });
-        });
-
-        req.on('timeout', () => { req.destroy(); reject(new Error("Timeout")); });
-        req.on('error', (e) => reject(e));
-        
-        if (body) req.write(body);
-        req.end();
-    });
-}
-
-export const handler = async (event) => {
-
-    const payload = JSON.stringify(event);
-    const headers = { 'Content-Type': 'application/json' };
-
-    try {
-        console.log(`[Failover] Attempting Primary: ${PRIMARY_URL}`);
-        
-        const response = await makeRequest(PRIMARY_URL, 'POST', payload, headers);
-        return { statusCode: 200, body: response.body };
-
-    } catch (err) {
-        console.warn(`⚠️ Primary Failed: ${err.message}. Switching to Backup: ${BACKUP_URL}`);
-        
-        try {
-            const response = await makeRequest(BACKUP_URL, 'POST', payload, headers);
-            return { statusCode: 200, body: response.body };
-        } catch (backupErr) {
-            console.error("❌ CRITICAL: All Backends Unavailable");
-            return { statusCode: 503, body: JSON.stringify({ error: "Service temporarily unavailable" }) };
+// 2. Helper function for Policy Generation
+const generatePolicy = (principalId, effect, resource, payload = {}) => {
+    return {
+        principalId,
+        policyDocument: {
+            Version: '2012-10-17',
+            Statement:[{
+                Action: 'execute-api:Invoke',
+                Effect: effect,
+                Resource: resource
+            }]
+        },
+        context: {
+            sub: payload.sub || "",
+            email: payload.email || "",
+            role: payload["custom:role"] || (payload["cognito:groups"] ? payload["cognito:groups"][0] : "patient")
         }
+    };
+};
+
+// 3. Export the handler using ES Module syntax
+export const handler = async (event) => {
+    try {
+        const token = event.queryStringParameters?.token;
+        if (!token) throw new Error("Missing token");
+
+        const payload = await verifier.verify(token);
+        return generatePolicy(payload.sub, 'Allow', event.methodArn, payload);
+    } catch (err) {
+        console.error("WS Auth Failed:", err.message);
+        return generatePolicy('unauthorized', 'Deny', event.methodArn);
     }
 };

@@ -13,7 +13,10 @@ import { writeAuditLog } from '../../../shared/audit';
 import jwt from 'jsonwebtoken';
 import { GoogleAuth } from "google-auth-library";
 
-const TABLE_DOCTORS = process.env.DYNAMO_TABLE || "mediconnect-doctors";
+// 🟢 FIX 1: Use Getter to prevent loading race condition
+const CONFIG = {
+    get DYNAMO_TABLE() { return process.env.DYNAMO_TABLE || 'mediconnect-doctors'; },
+};
 
 // Helper to handle async errors
 const catchAsync = (fn: any) => (req: Request, res: Response, next: NextFunction) => {
@@ -108,7 +111,7 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
 
     try {
         await docClient.send(new PutCommand({
-            TableName: TABLE_DOCTORS,
+            TableName: CONFIG.DYNAMO_TABLE, 
             Item: item,
             ConditionExpression: "attribute_not_exists(doctorId)"
         }));
@@ -138,7 +141,7 @@ export const verifyDoctorIdentity = catchAsync(async (req: Request, res: Respons
     const docClient = getRegionalClient(region); 
 
     const userCheck = await docClient.send(new GetCommand({
-        TableName: TABLE_DOCTORS,
+        TableName: CONFIG.DYNAMO_TABLE, 
         Key: { doctorId: userId }
     }));
 
@@ -179,7 +182,7 @@ export const verifyDoctorIdentity = catchAsync(async (req: Request, res: Respons
     }));
 
     await docClient.send(new UpdateCommand({
-        TableName: TABLE_DOCTORS,
+        TableName: CONFIG.DYNAMO_TABLE, 
         Key: { doctorId: userId },
         UpdateExpression: "set avatar = :a, isIdentityVerified = :v, identityStatus = :s",
         ExpressionAttributeValues: { ':a': selfieKey, ':v': true, ':s': "VERIFIED" }
@@ -200,7 +203,7 @@ export const getDoctor = catchAsync(async (req: Request, res: Response) => {
     if (!id) return res.status(400).json({ error: 'Missing Doctor ID' });
 
     const result = await docClient.send(new GetCommand({
-        TableName: TABLE_DOCTORS,
+        TableName: CONFIG.DYNAMO_TABLE, 
         Key: { doctorId: String(id) }
     }));
 
@@ -264,7 +267,7 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
     values[":now"] = new Date().toISOString();
 
     const response = await docClient.send(new UpdateCommand({
-        TableName: TABLE_DOCTORS,
+        TableName: CONFIG.DYNAMO_TABLE, 
         Key: { doctorId: id },
         UpdateExpression: "SET " + parts.join(", "),
         ExpressionAttributeNames: names,
@@ -281,7 +284,7 @@ export const getDoctors = catchAsync(async (req: Request, res: Response) => {
     const docClient = getRegionalClient(region);
     
     const response = await docClient.send(new ScanCommand({ 
-        TableName: TABLE_DOCTORS,
+        TableName: CONFIG.DYNAMO_TABLE, 
         FilterExpression: "verificationStatus <> :unverified AND verificationStatus <> :rejected",
         ExpressionAttributeValues: {
             ":unverified": "UNVERIFIED",
@@ -312,7 +315,7 @@ export const getSchedule = catchAsync(async (req: Request, res: Response) => {
     const { id } = req.params;
 
     const result = await docClient.send(new GetCommand({
-        TableName: TABLE_DOCTORS,
+        TableName: CONFIG.DYNAMO_TABLE, 
         Key: { doctorId: id },
         ProjectionExpression: "#sch, #tz",
         ExpressionAttributeNames: { "#sch": "schedule", "#tz": "timezone" }
@@ -332,7 +335,8 @@ export const updateSchedule = catchAsync(async (req: Request, res: Response) => 
     if (!schedule || typeof schedule !== 'object') return res.status(400).json({ error: 'Invalid schedule format.' });
 
     await docClient.send(new UpdateCommand({
-        TableName: TABLE_DOCTORS, Key: { doctorId: id },
+        TableName: CONFIG.DYNAMO_TABLE, 
+        Key: { doctorId: id },
         UpdateExpression: "SET #sch = :s, #tz = :t",
         ExpressionAttributeNames: { "#sch": "schedule", "#tz": "timezone" },
         ExpressionAttributeValues: { ":s": schedule, ":t": timezone || 'UTC' },
@@ -362,7 +366,7 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
     if (!authUser || authUser.sub !== id) return res.status(403).json({ error: "Unauthorized" });
 
     const userCheck = await docClient.send(new GetCommand({
-        TableName: TABLE_DOCTORS,
+        TableName: CONFIG.DYNAMO_TABLE, 
         Key: { doctorId: id }
     }));
 
@@ -396,7 +400,8 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
         const status = isLegit ? "PENDING_OFFICER_APPROVAL" : "REJECTED_AUTO";
 
         await docClient.send(new UpdateCommand({
-            TableName: TABLE_DOCTORS, Key: { doctorId: id },
+            TableName: CONFIG.DYNAMO_TABLE, 
+            Key: { doctorId: id },
             UpdateExpression: "SET isDiplomaAutoVerified = :v, isOfficerApproved = :o, verificationStatus = :s, diplomaUrl = :u, aiExtractedText = :txt",
             ExpressionAttributeValues: { 
                 ":v": isLegit, 
@@ -439,7 +444,7 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
 export const getCalendarStatus = catchAsync(async (req: Request, res: Response) => {
     const docClient = getRegionalClient(extractRegion(req) as string);
     const { id } = req.params;
-    const result = await docClient.send(new GetCommand({ TableName: TABLE_DOCTORS, Key: { doctorId: id }, ProjectionExpression: "googleRefreshToken" }));
+    const result = await docClient.send(new GetCommand({ TableName: CONFIG.DYNAMO_TABLE, Key: { doctorId: id }, ProjectionExpression: "googleRefreshToken" })); // ✅ FIXED
     if (!result.Item) return res.status(404).json({ error: 'Doctor not found' });
     res.json({ connected: !!result.Item.googleRefreshToken });
 });
@@ -447,28 +452,25 @@ export const getCalendarStatus = catchAsync(async (req: Request, res: Response) 
 export const connectGoogleCalendar = catchAsync(async (req: Request, res: Response) => {
     const { id } = req.query; 
 
-    // 🟢 1. FIX: Define secureState using JWT (This was missing!)
+    const protocol = (req.headers['x-forwarded-proto'] as string) || 'https';
+    const host = req.get('host'); 
+    
+    // 🟢 2. Construct the Redirect URI dynamically
+    const redirectUri = `${protocol}://${host}/doctors/auth/google/callback`;
+
     const secret = process.env.GOOGLE_CLIENT_SECRET || 'fallback_secret';
     const secureState = jwt.sign({ doctorId: id }, secret, { expiresIn: '15m' });
-
-    // 🟢 2. Dynamic Redirect URI
-    const apiDomain = process.env.API_PUBLIC_URL || ""; 
-    if (!apiDomain) {
-        console.error("❌ CRITICAL ERROR: API_PUBLIC_URL is not defined in environment variables!");
-    }
-    const redirectUri = `${apiDomain}/doctors/auth/google/callback`;
 
     const oauth2Client = new google.auth.OAuth2(
         process.env.GOOGLE_CLIENT_ID,
         process.env.GOOGLE_CLIENT_SECRET,
-        `${process.env.API_PUBLIC_URL}/doctors/auth/google/callback`
+        redirectUri // ✅ Uses the dynamic URL
     );
     
-    // 🟢 3. Generate URL
     const url = oauth2Client.generateAuthUrl({ 
         access_type: 'offline', 
         scope: ['https://www.googleapis.com/auth/calendar'], 
-        state: secureState // ✅ Now this variable exists
+        state: secureState
     });
 
     res.json({ url });
@@ -480,6 +482,11 @@ export const googleCallback = catchAsync(async (req: Request, res: Response) => 
 
     if (!code || !state) return res.status(400).json({ error: "Invalid callback data" });
 
+    // 🟢 1. Re-construct the EXACT same dynamic URI (Google requires a perfect match)
+    const protocol = (req.headers['x-forwarded-proto'] as string) || 'https';
+    const host = req.get('host');
+    const redirectUri = `${protocol}://${host}/doctors/auth/google/callback`;
+
     let targetDoctorId = "";
     try {
         const secret = process.env.GOOGLE_CLIENT_SECRET || 'fallback_secret';
@@ -490,18 +497,19 @@ export const googleCallback = catchAsync(async (req: Request, res: Response) => 
     const oauth2Client = new google.auth.OAuth2(
         process.env.GOOGLE_CLIENT_ID,
         process.env.GOOGLE_CLIENT_SECRET,
-        process.env.GOOGLE_REDIRECT_URI
+        redirectUri // ✅ Uses the dynamic URL
     );
     
     const { tokens } = await oauth2Client.getToken(code as string);
 
     if (tokens.refresh_token) {
         await docClient.send(new UpdateCommand({
-            TableName: TABLE_DOCTORS, Key: { doctorId: targetDoctorId },
+            TableName: CONFIG.DYNAMO_TABLE,
+            Key: { doctorId: targetDoctorId },
             UpdateExpression: "SET googleRefreshToken = :token", ExpressionAttributeValues: { ":token": tokens.refresh_token }
         }));
     }
-    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:5173'}/settings?calendar=connected`);
+    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:8080'}/settings?calendar=connected`);
 });
 
 export const disconnectGoogleCalendar = catchAsync(async (req: Request, res: Response) => {
@@ -511,7 +519,7 @@ export const disconnectGoogleCalendar = catchAsync(async (req: Request, res: Res
 
     if (!authUser || authUser.sub !== id) return res.status(403).json({ error: "Unauthorized" });
 
-    await docClient.send(new UpdateCommand({ TableName: TABLE_DOCTORS, Key: { doctorId: id }, UpdateExpression: "REMOVE googleRefreshToken" }));
+    await docClient.send(new UpdateCommand({ TableName: CONFIG.DYNAMO_TABLE, Key: { doctorId: id }, UpdateExpression: "REMOVE googleRefreshToken" })); // ✅ FIXED
     res.json({ connected: false, message: "Calendar disconnected" });
 });
 
@@ -527,7 +535,8 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
     if (!authUser || authUser.sub !== id) return res.status(403).json({ error: "Unauthorized" });
 
     await docClient.send(new UpdateCommand({
-        TableName: TABLE_DOCTORS, Key: { doctorId: id },
+        TableName: CONFIG.DYNAMO_TABLE, 
+        Key: { doctorId: id },
         UpdateExpression: "SET #name = :deleted, email = :deleted, verificationStatus = :status, #res = :empty",
         ExpressionAttributeNames: { "#name": "name", "#res": "resource" },
         ExpressionAttributeValues: { ":deleted": "ANONYMIZED_GDPR", ":status": "DELETED", ":empty": {} }
@@ -588,7 +597,7 @@ export const approveDoctorByOfficer = catchAsync(async (req: Request, res: Respo
     }
 
     await docClient.send(new UpdateCommand({
-        TableName: TABLE_DOCTORS,
+        TableName: CONFIG.DYNAMO_TABLE, 
         Key: { doctorId: id },
         UpdateExpression: "SET isOfficerApproved = :t, verificationStatus = :s, #res.active = :t",
         ExpressionAttributeNames: { "#res": "resource" },
@@ -611,7 +620,7 @@ export async function syncToGoogleCalendar(doctorId: string, timeSlot: string, p
         const docClient = getRegionalClient(region);
         
         const res = await docClient.send(new GetCommand({ 
-            TableName: TABLE_DOCTORS, 
+            TableName: CONFIG.DYNAMO_TABLE, 
             Key: { doctorId },
             ProjectionExpression: "googleRefreshToken"
         }));
@@ -626,7 +635,7 @@ export async function syncToGoogleCalendar(doctorId: string, timeSlot: string, p
         const oauth2Client = new google.auth.OAuth2(
             process.env.GOOGLE_CLIENT_ID,
             process.env.GOOGLE_CLIENT_SECRET,
-            process.env.GOOGLE_REDIRECT_URI
+            `${process.env.API_PUBLIC_URL}/doctors/auth/google/callback` 
         );
         oauth2Client.setCredentials({ refresh_token: refreshToken });
         const calendar = google.calendar({ version: 'v3', auth: oauth2Client });

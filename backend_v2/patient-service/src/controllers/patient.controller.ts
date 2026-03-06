@@ -17,9 +17,9 @@ import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient } 
 // ⚙️ CONFIGURATION & ENV HANDLING
 // =============================================================================
 const CONFIG = {
-    DYNAMO_TABLE: process.env.DYNAMO_TABLE || 'mediconnect-patients',
-    DOCTOR_TABLE: process.env.DYNAMO_TABLE_DOCTORS || 'mediconnect-doctors',
-    BUCKET_NAME: process.env.BUCKET_NAME || 'mediconnect-identity-verification',
+    get DYNAMO_TABLE() { return process.env.DYNAMO_TABLE || 'mediconnect-patients'; },
+    get DOCTOR_TABLE() { return process.env.DYNAMO_TABLE_DOCTORS || 'mediconnect-doctors'; },
+    get BUCKET_NAME() { return process.env.BUCKET_NAME || 'mediconnect-identity-verification'; },
 };
 
 // =============================================================================

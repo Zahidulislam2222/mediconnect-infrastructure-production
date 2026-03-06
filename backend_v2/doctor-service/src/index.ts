@@ -3,8 +3,6 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
-import doctorRoutes from './routes/doctor.routes';
-import clinicalRoutes from "./modules/clinical/clinical.routes";
 import rateLimit from 'express-rate-limit';
 
 import { GetParametersCommand } from "@aws-sdk/client-ssm";
@@ -97,9 +95,6 @@ app.use(morgan((tokens, req, res) => {
     ].join(' ');
 }, { skip: (req) => req.method === 'OPTIONS' }));
 
-app.use('/', doctorRoutes);
-app.use('/', clinicalRoutes);
-
 // --- 4. SECRETS LOADER ---
 async function loadSecrets() {
     const region = process.env.AWS_REGION || 'us-east-1';
@@ -120,7 +115,7 @@ async function loadSecrets() {
                 '/mediconnect/prod/sns/topic_arn_us', 
                 '/mediconnect/prod/sns/topic_arn_eu',  
                 '/mediconnect/prod/google/client_id',   
-                '/mediconnect/prod/google/client_secret'     
+                '/mediconnect/prod/google/client_secret'   
             ],
             WithDecryption: true
         });
@@ -152,13 +147,25 @@ async function loadSecrets() {
 
 const startServer = async () => {
     try {
-        await loadSecrets();
+        // 🟢 1. WAIT for AWS to inject the real database names into process.env
+        await loadSecrets(); 
+
+        const { default: doctorRoutes } = await import('./routes/doctor.routes');
+        const { default: clinicalRoutes } = await import('./modules/clinical/clinical.routes');
+
+        // 🟢 3. Attach the routes to Express
+        app.use('/', doctorRoutes);
+        app.use('/', clinicalRoutes);
+
+        // 4. Handle 404s
         app.use('*', (req, res) => {
-    res.status(404).json({ 
-        error: "Route Not Found", 
-        message: `Cannot ${req.method} ${req.originalUrl}` 
-    });
-});
+            res.status(404).json({ 
+                error: "Route Not Found", 
+                message: `Cannot ${req.method} ${req.originalUrl}` 
+            });
+        });
+
+        // 5. Start listening
         app.listen(Number(PORT), '0.0.0.0', () => {
             isAppReady = true;
             safeLog(`🚀 Doctor Service Production Ready on port ${PORT} `);
