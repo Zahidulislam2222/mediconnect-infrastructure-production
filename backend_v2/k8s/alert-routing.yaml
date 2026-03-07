@@ -18,7 +18,7 @@ spec:
     - apiURL:
         name: alertmanager-slack-webhook
         key: url
-      channel: '#mediconnect-alerts'
+      channel: '#alerts'
       sendResolved: true
       title: '🏥 Mediconnect Medical Alert'
       text: "Environment: {{ .ExternalURL }}\nAlert: {{ .CommonAnnotations.summary }}\nDetails: {{ .CommonAnnotations.description }}"

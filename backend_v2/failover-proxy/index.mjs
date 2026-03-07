@@ -1,11 +1,18 @@
 import https from 'https';
 import http from 'http';
 
-function makeRequest(url, method, body, headers) {
+function makeRequest(url, method, body, originalHeaders) {
     return new Promise((resolve, reject) => {
         if (!url) return reject(new Error("URL is undefined"));
         
         const lib = url.startsWith('https') ? https : http;
+        const payloadBuffer = Buffer.from(body || ''); // 🟢 Calculate payload size
+        
+        const headers = {
+            ...originalHeaders,
+            'Content-Length': payloadBuffer.length // 🟢 REQUIRED for Cloud Run
+        };
+
         const req = lib.request(url, { method, headers, timeout: 5000 }, (res) => {
             let data = '';
             res.on('data', (chunk) => data += chunk);
@@ -18,7 +25,7 @@ function makeRequest(url, method, body, headers) {
         req.on('timeout', () => { req.destroy(); reject(new Error("Timeout")); });
         req.on('error', (e) => reject(e));
         
-        if (body) req.write(body);
+        req.write(payloadBuffer);
         req.end();
     });
 }
