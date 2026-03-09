@@ -93,11 +93,13 @@ jobs:
           aws-region: eu-central-1
       
       - name: "🔐 Fetch Kubeconfigs"
+        if: false
         run: |
           az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
           aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
 
       - name: "🏗️ Setup Multi-Env Routing & Identity"
+        if: false
         run: |
           # 1. Apply Identities (Injecting 4 Separate Role ARNs)
           # Note: We map specific AWS Roles. For Azure, we map the Client ID.
@@ -158,11 +160,13 @@ jobs:
           aws-region: eu-central-1
       
       - name: "🔐 Fetch Kubeconfigs"
+        if: false
         run: |
           az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
           aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
 
       - name: "🚀 Deploy Staging (AKS)"
+        if: false
         run: |
           IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
           
@@ -191,6 +195,7 @@ jobs:
           kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=900s
 
       - name: "🚀 Deploy Staging (EKS)"
+        if: false
         run: |
           IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
           
@@ -219,11 +224,13 @@ jobs:
           kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=900s
 
       - name: "🧪 Smoke Test (AKS)"
+        if: false
         run: |
           POD_NAME=$(kubectl --kubeconfig=aks.kubeconfig get pods -n mediconnect-staging -l app=${{ matrix.service }} --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
           kubectl --kubeconfig=aks.kubeconfig exec $POD_NAME -n mediconnect-staging -- wget -qO- http://127.0.0.1:${{ matrix.port }}/ready
 
       - name: "🧪 Smoke Test (EKS)"
+        if: false
         run: |
           POD_NAME=$(kubectl --kubeconfig=eks.kubeconfig get pods -n mediconnect-staging -l app=${{ matrix.service }} --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
           kubectl --kubeconfig=eks.kubeconfig exec $POD_NAME -n mediconnect-staging -- wget -qO- http://127.0.0.1:${{ matrix.port }}/ready
@@ -261,11 +268,13 @@ jobs:
       - uses: google-github-actions/setup-gcloud@v2
 
       - name: "🔐 Fetch Kubeconfigs"
+        if: false
         run: |
           az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
           aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
 
       - name: "🚀 Deploy Prod (AKS)"
+        if: false
         run: |
           IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
 
@@ -295,6 +304,7 @@ jobs:
           kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=900s
 
       - name: "🚀 Deploy Prod (EKS)"
+        if: false
         run: |
           IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
 
@@ -324,7 +334,8 @@ jobs:
           kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=900s
 
       - name: "🔄 Auto Rollback If Failed"
-        if: failure()
+        if: false
+        # if: failure()
         run: |
           kubectl --kubeconfig=aks.kubeconfig rollout undo deployment/${{ matrix.service }} -n mediconnect-prod || true
           kubectl --kubeconfig=eks.kubeconfig rollout undo deployment/${{ matrix.service }} -n mediconnect-prod || true
