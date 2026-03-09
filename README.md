@@ -1,4 +1,4 @@
-I have updated the Infrastructure section and the Tech Stack to explicitly highlight your use of Terraform. This is a critical addition because it shows you can manage "Infrastructure as Code" (IaC) across multiple clouds simultaneously.
+#I have updated the Infrastructure section and the Tech Stack to explicitly highlight your use of Terraform. This is a critical addition because it shows you can manage "Infrastructure as Code" (IaC) across multiple clouds simultaneously.
 
 🏥 MediConnect: Enterprise-Grade Multi-Cloud Healthcare Ecosystem
 
