@@ -1,7 +1,7 @@
 // C:\Dev\mediconnect-project\mediconnect-infrastructure-develop\backend_v2\doctor-service\src\controllers\doctor.controller.ts
 
 import { NextFunction, Request, Response } from 'express';
-import { GetObjectCommand, PutObjectCommand } from "@aws-sdk/client-s3";
+import { GetObjectCommand, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { CompareFacesCommand } from "@aws-sdk/client-rekognition";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { TextractClient, AnalyzeDocumentCommand } from "@aws-sdk/client-textract";
@@ -532,25 +532,42 @@ export const disconnectGoogleCalendar = catchAsync(async (req: Request, res: Res
 // =============================================================================
 
 export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
-    const docClient = getRegionalClient(extractRegion(req) as string);
     const { id } = req.params;
-    const authUser = (req as any).user;
+    const region = extractRegion(req);
 
-    if (!authUser || authUser.sub !== id) return res.status(403).json({ error: "Unauthorized" });
+    const docClient = getRegionalClient(region);
 
     await docClient.send(new UpdateCommand({
         TableName: CONFIG.DYNAMO_TABLE, 
         Key: { doctorId: id },
-        UpdateExpression: "SET #name = :deleted, email = :deleted, verificationStatus = :status, #res = :empty",
-        ExpressionAttributeNames: { "#name": "name", "#res": "resource" },
-        ExpressionAttributeValues: { ":deleted": "ANONYMIZED_GDPR", ":status": "DELETED", ":empty": {} }
+        UpdateExpression: "SET #name = :del, email = :del, avatar = :null, verificationStatus = :status",
+        ExpressionAttributeNames: { "#name": "name" },
+        ExpressionAttributeValues: { ":del": "ANONYMIZED_GDPR", ":status": "DELETED", ":null": null }
     }));
 
-    await writeAuditLog(authUser.sub, id, "DELETE_PROFILE", "Account anonymized per GDPR Right to be Forgotten", { 
-        region: extractRegion(req), 
-        ipAddress: req.ip 
-    });
-    res.status(200).json({ message: "Profile successfully anonymized/deleted." });
+    // 2. DELETE BIOMETRIC DATA (Photos) from S3
+    try {
+        const regionalS3 = getRegionalS3Client(region);
+        const baseBucket = process.env.BUCKET_NAME || 'mediconnect-identity-verification';
+        const isEU = region.toUpperCase() === 'EU';
+        const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
+
+        const photos = [
+            `doctor/${id}/profile_picture.jpg`,
+            `doctor/${id}/selfie_verified.jpg`
+        ];
+
+        for (const key of photos) {
+            await regionalS3.send(new DeleteObjectCommand({
+                Bucket: bucketName,
+                Key: key
+            }));
+        }
+    } catch (e) {
+        console.warn(`[Cleanup Warning] Could not delete S3 files for doctor ${id}`);
+    }
+
+    res.status(200).json({ message: "Identity erased. Credentials retained for legal audit." });
 });
 
 const logDoctorOnboarding = async (doctorId: string, eventType: string, status: string, region: string) => {
