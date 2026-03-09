@@ -94,10 +94,10 @@ router.get('/search', searchPatients);
 
 // 2. Registration & Identity
 router.post(['/register-patient', '/'], createPatient); 
-router.post('/verify-identity', verifyIdentity); // ✅ Matches Frontend API exactly
+router.post('/patients/:id/verify-identity', verifyIdentity);
 
 // 3. Current User Profile (No ID param required)
-router.get(['/register-patient', '/me'], getProfile); // ✅ Frontend checks this path to confirm session
+router.get(['/register-patient', '/me'], getProfile); 
 router.delete('/me', deleteProfile);
 
 // 4. Dynamic ID Routes (Wildcards come LAST)
