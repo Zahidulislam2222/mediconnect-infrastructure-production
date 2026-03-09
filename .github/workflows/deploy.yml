@@ -72,10 +72,10 @@ jobs:
         run: |
           IMAGE_TAG=${{ github.sha }}
           docker build -t local-img -f backend_v2/${{ matrix.service }}/Dockerfile .
-         #docker tag local-img ${{ env.AZURE_ACR }}/${{ matrix.service }}:$IMAGE_TAG
-         #docker push ${{ env.AZURE_ACR }}/${{ matrix.service }}:$IMAGE_TAG
-         #docker tag local-img ${{ env.AWS_ECR }}/${{ matrix.service }}:$IMAGE_TAG
-         #docker push ${{ env.AWS_ECR }}/${{ matrix.service }}:$IMAGE_TAG
+          # docker tag local-img ${{ env.AZURE_ACR }}/${{ matrix.service }}:$IMAGE_TAG
+          # docker push ${{ env.AZURE_ACR }}/${{ matrix.service }}:$IMAGE_TAG
+          # docker tag local-img ${{ env.AWS_ECR }}/${{ matrix.service }}:$IMAGE_TAG
+          # docker push ${{ env.AWS_ECR }}/${{ matrix.service }}:$IMAGE_TAG
           docker tag local-img ${{ env.GCP_GAR }}/${{ matrix.service }}:$IMAGE_TAG
           docker push ${{ env.GCP_GAR }}/${{ matrix.service }}:$IMAGE_TAG
 
