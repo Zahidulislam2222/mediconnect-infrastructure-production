@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 
 // AWS SDK v3
 import { GetCommand, PutCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
-import { PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { CompareFacesCommand } from "@aws-sdk/client-rekognition";
 
@@ -376,11 +376,14 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
 const isEU = region.toUpperCase() === 'EU';
 const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
         
-        const { DeleteObjectCommand } = require("@aws-sdk/client-s3");
-        await regionalS3.send(new DeleteObjectCommand({
-            Bucket: bucketName,
-            Key: `patient/${userId}/selfie_verified.jpg`
-        }));
+        const filesToDelete = [
+            `patient/${userId}/selfie_verified.jpg`,
+            `patient/${userId}/profile_picture.jpg`
+        ];
+
+        for (const key of filesToDelete) {
+            await regionalS3.send(new DeleteObjectCommand({ Bucket: bucketName, Key: key }));
+        }
     } catch (s3Error) {
         console.error(`[GDPR Warning] Failed to delete Selfie for ${userId}`, s3Error);
     }
