@@ -62,18 +62,20 @@ jobs:
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
       - uses: google-github-actions/setup-gcloud@v2
 
-      - run: az acr login --name zahidmediconnectacr
-      - run: aws ecr get-login-password --region eu-central-1 | docker login --username AWS --password-stdin ${{ env.AWS_ECR }}
+      - if: false
+        run: az acr login --name zahidmediconnectacr
+      - if: false
+        run: aws ecr get-login-password --region eu-central-1 | docker login --username AWS --password-stdin ${{ env.AWS_ECR }}
       - run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
       - name: "🐳 Build and Push Immutable Artifact"
         run: |
           IMAGE_TAG=${{ github.sha }}
           docker build -t local-img -f backend_v2/${{ matrix.service }}/Dockerfile .
-          docker tag local-img ${{ env.AZURE_ACR }}/${{ matrix.service }}:$IMAGE_TAG
-          docker push ${{ env.AZURE_ACR }}/${{ matrix.service }}:$IMAGE_TAG
-          docker tag local-img ${{ env.AWS_ECR }}/${{ matrix.service }}:$IMAGE_TAG
-          docker push ${{ env.AWS_ECR }}/${{ matrix.service }}:$IMAGE_TAG
+         #docker tag local-img ${{ env.AZURE_ACR }}/${{ matrix.service }}:$IMAGE_TAG
+         #docker push ${{ env.AZURE_ACR }}/${{ matrix.service }}:$IMAGE_TAG
+         #docker tag local-img ${{ env.AWS_ECR }}/${{ matrix.service }}:$IMAGE_TAG
+         #docker push ${{ env.AWS_ECR }}/${{ matrix.service }}:$IMAGE_TAG
           docker tag local-img ${{ env.GCP_GAR }}/${{ matrix.service }}:$IMAGE_TAG
           docker push ${{ env.GCP_GAR }}/${{ matrix.service }}:$IMAGE_TAG
 
