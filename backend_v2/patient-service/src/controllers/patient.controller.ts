@@ -58,7 +58,11 @@ async function signAvatarUrl(avatarKey: string | null, region: string): Promise<
 
     try {
         const regionalS3 = getRegionalS3Client(region);
-        const bucketName = region.toUpperCase() === 'EU' ? `${CONFIG.BUCKET_NAME}-eu` : CONFIG.BUCKET_NAME;
+        const baseBucket = CONFIG.BUCKET_NAME;
+        const isEU = region.toUpperCase() === 'EU';
+        const bucketName = (isEU && !baseBucket.endsWith('-eu')) 
+    ? `${baseBucket}-eu` 
+    : baseBucket;
         const command = new GetObjectCommand({ Bucket: bucketName, Key: finalKey });
         
         return await getSignedUrl(regionalS3, command, { expiresIn: 900 });
@@ -293,7 +297,11 @@ export const verifyIdentity = catchAsync(async (req: Request, res: Response) => 
 
     const regionalS3 = getRegionalS3Client(region);
     const regionalRek = getRegionalRekognitionClient(region);
-    const bucketName = region.toUpperCase() === 'EU' ? `${CONFIG.BUCKET_NAME}-eu` : CONFIG.BUCKET_NAME;
+    const baseBucket = CONFIG.BUCKET_NAME;
+const isEU = region.toUpperCase() === 'EU';
+const bucketName = (isEU && !baseBucket.endsWith('-eu')) 
+    ? `${baseBucket}-eu` 
+    : baseBucket;
 
     if (idImage) {
         await regionalS3.send(new PutObjectCommand({
@@ -364,7 +372,9 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
 
     try {
         const regionalS3 = getRegionalS3Client(region);
-        const bucketName = region.toUpperCase() === 'EU' ? `${CONFIG.BUCKET_NAME}-eu` : CONFIG.BUCKET_NAME;
+        const baseBucket = CONFIG.BUCKET_NAME;
+const isEU = region.toUpperCase() === 'EU';
+const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
         
         const { DeleteObjectCommand } = require("@aws-sdk/client-s3");
         await regionalS3.send(new DeleteObjectCommand({

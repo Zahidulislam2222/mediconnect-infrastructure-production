@@ -45,7 +45,9 @@ async function signAvatarUrl(avatarKey: string | null, region: string): Promise<
 
     try {
         const regionalS3 = getRegionalS3Client(region);
-        const bucketName = region.toUpperCase() === 'EU' ? 'mediconnect-identity-verification-eu' : 'mediconnect-identity-verification';
+        const baseBucket = process.env.BUCKET_NAME || 'mediconnect-identity-verification';
+const isEU = region.toUpperCase() === 'EU';
+const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
             
         const command = new GetObjectCommand({ Bucket: bucketName, Key: finalKey });
         return await getSignedUrl(regionalS3, command, { expiresIn: 900 });
@@ -153,7 +155,9 @@ export const verifyDoctorIdentity = catchAsync(async (req: Request, res: Respons
     const regionalS3 = getRegionalS3Client(region);
     const regionalRek = getRegionalRekognitionClient(region);
     
-    const bucketName = region.toUpperCase() === 'EU' ? 'mediconnect-identity-verification-eu' : 'mediconnect-identity-verification';
+    const baseBucket = process.env.BUCKET_NAME || 'mediconnect-identity-verification';
+const isEU = region.toUpperCase() === 'EU';
+const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
 
     if (idImage) {
         await regionalS3.send(new PutObjectCommand({
