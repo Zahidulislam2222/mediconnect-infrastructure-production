@@ -42,7 +42,7 @@ router.delete('/doctors/:id', authMiddleware, DoctorController.deleteDoctor);
 // 2. SCHEDULE ROUTES
 // =============================================================================
 router.get('/doctors/:id/schedule', authMiddleware, DoctorController.getSchedule);
-router.post('/doctors/:id/schedule', authMiddleware, DoctorController.updateSchedule);
+router.put('/doctors/:id/schedule', authMiddleware, DoctorController.updateSchedule);
 
 
 // =============================================================================
