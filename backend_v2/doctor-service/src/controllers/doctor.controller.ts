@@ -251,24 +251,26 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
 
     if (parts.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 
+    names["#res"] = "resource"; 
+    
     if (updates.name) {
         parts.push("#res.#nm = :fhirNameArr");
-        names["#res"] = "resource";
         names["#nm"] = "name";
         values[":fhirNameArr"] = [{ use: "official", text: updates.name }];
     }
     
     if (updates.specialization) {
         parts.push("#res.#qual = :fhirQualArr");
-        names["#res"] = "resource";
         names["#qual"] = "qualification";
-        values[":fhirQualArr"] = [{ code: { text: updates.specialization } }];
+        values[":fhirQualArr"] =[{ code: { text: updates.specialization } }];
     }
 
-    parts.push("#res.#meta.#lu = :now");
-    parts.push("updatedAt = :now");
+    parts.push("#res.#meta = :metaObj");
     names["#meta"] = "meta";
-    names["#lu"] = "lastUpdated";
+    values[":metaObj"] = { lastUpdated: new Date().toISOString() };
+
+    parts.push("#updatedAt = :now");
+    names["#updatedAt"] = "updatedAt";
     values[":now"] = new Date().toISOString();
 
     try {
@@ -584,8 +586,15 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
     };
 
     try {
-        // 🟢 PROFESSIONAL FIX: Tag all legal records in the folder
-        const legalRecords = [`doctor/${id}/id_card.jpg`, `doctor/${id}/diploma.pdf` ];
+
+        const legalRecords =[`doctor/${id}/id_card.jpg`];
+        
+        if (userCheck.Item.diplomaUrl) {
+
+            const exactDiplomaKey = userCheck.Item.diplomaUrl.split('/').slice(3).join('/');
+            if (exactDiplomaKey) legalRecords.push(exactDiplomaKey);
+        }
+
         for (const key of legalRecords) {
             await regionalS3.send(new PutObjectTaggingCommand({
                 Bucket: bucketName,
