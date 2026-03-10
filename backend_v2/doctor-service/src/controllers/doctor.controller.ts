@@ -237,10 +237,12 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
     const parts: string[] =[];
     const names: any = {};
     const values: any = {};
-    const allowed = ['name', 'specialization', 'bio', 'avatar', 'isEmailVerified'];
+    
+    // Explicitly allow all fields the frontend sends
+    const allowed =['name', 'specialization', 'bio', 'avatar', 'isEmailVerified', 'phone', 'address', 'preferences'];
 
     Object.keys(updates).forEach(key => {
-        if (allowed.includes(key) || key === 'schedule') {
+        if (allowed.includes(key)) {
             parts.push(`#${key} = :${key}`);
             names[`#${key}`] = key;
             values[`:${key}`] = updates[key];
@@ -250,37 +252,45 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
     if (parts.length === 0) return res.status(400).json({ error: "No valid fields to update" });
 
     if (updates.name) {
-        parts.push("#res.#nm[0].#txt = :fhirName");
+        parts.push("#res.#nm = :fhirNameArr");
         names["#res"] = "resource";
         names["#nm"] = "name";
-        names["#txt"] = "text";
-        values[":fhirName"] = updates.name;
+        values[":fhirNameArr"] = [{ use: "official", text: updates.name }];
     }
+    
     if (updates.specialization) {
-        parts.push("#res.#qual[0].#cd.#txt = :fhirSpec");
+        parts.push("#res.#qual = :fhirQualArr");
         names["#res"] = "resource";
         names["#qual"] = "qualification";
-        names["#cd"] = "code";
-        names["#txt"] = "text";
-        values[":fhirSpec"] = updates.specialization;
+        values[":fhirQualArr"] = [{ code: { text: updates.specialization } }];
     }
 
     parts.push("#res.#meta.#lu = :now");
+    parts.push("updatedAt = :now");
     names["#meta"] = "meta";
     names["#lu"] = "lastUpdated";
     values[":now"] = new Date().toISOString();
 
-    const response = await docClient.send(new UpdateCommand({
-        TableName: CONFIG.DYNAMO_TABLE, 
-        Key: { doctorId: id },
-        UpdateExpression: "SET " + parts.join(", "),
-        ExpressionAttributeNames: names,
-        ExpressionAttributeValues: values,
-        ReturnValues: "ALL_NEW"
-    }));
+    try {
+        const response = await docClient.send(new UpdateCommand({
+            TableName: CONFIG.DYNAMO_TABLE, 
+            Key: { doctorId: id },
+            UpdateExpression: "SET " + parts.join(", "),
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values,
+            ReturnValues: "ALL_NEW"
+        }));
 
-    await writeAuditLog(authUser.sub, id, "UPDATE_DOCTOR", "Profile updated", { region: extractRegion(req), ipAddress: req.ip });
-    res.status(200).json({ message: "Doctor profile updated", attributes: response.Attributes });
+        await writeAuditLog(authUser.sub, id, "UPDATE_DOCTOR", "Profile and FHIR resource updated", { 
+            region: extractRegion(req), 
+            ipAddress: req.ip 
+        });
+        
+        res.status(200).json({ message: "Doctor profile updated", profile: response.Attributes });
+    } catch (dbError: any) {
+        console.error("DynamoDB Update Error:", dbError.message);
+        res.status(500).json({ error: "Database update failed", details: dbError.message });
+    }
 });
 
 export const getDoctors = catchAsync(async (req: Request, res: Response) => {
@@ -338,16 +348,21 @@ export const updateSchedule = catchAsync(async (req: Request, res: Response) => 
     if (!authUser || authUser.sub !== id) return res.status(403).json({ error: "Unauthorized" });
     if (!schedule || typeof schedule !== 'object') return res.status(400).json({ error: 'Invalid schedule format.' });
 
-    await docClient.send(new UpdateCommand({
-        TableName: CONFIG.DYNAMO_TABLE, 
-        Key: { doctorId: id },
-        UpdateExpression: "SET #sch = :s, #tz = :t",
-        ExpressionAttributeNames: { "#sch": "schedule", "#tz": "timezone" },
-        ExpressionAttributeValues: { ":s": schedule, ":t": timezone || 'UTC' },
-        ReturnValues: "UPDATED_NEW"
-    }));
+    try {
+        await docClient.send(new UpdateCommand({
+            TableName: CONFIG.DYNAMO_TABLE, 
+            Key: { doctorId: id },
+            UpdateExpression: "SET #sch = :s, #tz = :t",
+            ExpressionAttributeNames: { "#sch": "schedule", "#tz": "timezone" },
+            ExpressionAttributeValues: { ":s": schedule, ":t": timezone || 'UTC' },
+            ReturnValues: "UPDATED_NEW"
+        }));
 
-    res.status(200).json({ message: 'Schedule updated successfully', schedule });
+        res.status(200).json({ message: 'Schedule updated successfully', schedule });
+    } catch (dbError: any) {
+        console.error("Schedule Update Error:", dbError.message);
+        res.status(500).json({ error: "Schedule update failed", details: dbError.message });
+    }
 });
 
 // =============================================================================
