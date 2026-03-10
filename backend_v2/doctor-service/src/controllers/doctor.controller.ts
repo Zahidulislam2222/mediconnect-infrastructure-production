@@ -133,7 +133,7 @@ export const verifyDoctorIdentity = catchAsync(async (req: Request, res: Respons
     const region = extractRegion(req) as string;
     const authUser = (req as any).user;
     
-    const { selfieImage, idImage } = req.body;
+    const { selfieImage, idImage, gender } = req.body;
     if (!authUser?.sub || !selfieImage) return res.status(400).json({ error: "Missing identity data" });
 
     const userId = authUser.sub;
@@ -185,8 +185,14 @@ const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : 
     await docClient.send(new UpdateCommand({
         TableName: CONFIG.DYNAMO_TABLE, 
         Key: { doctorId: userId },
-        UpdateExpression: "set avatar = :a, isIdentityVerified = :v, identityStatus = :s",
-        ExpressionAttributeValues: { ':a': selfieKey, ':v': true, ':s': "VERIFIED" }
+        UpdateExpression: "set avatar = :a, isIdentityVerified = :v, identityStatus = :s, #g = :g, #res.#gen = :g",
+    ExpressionAttributeNames: { 
+        "#g": "gender",
+        "#res": "resource",
+        "#gen": "gender"
+    },
+    ExpressionAttributeValues: { 
+        ':a': selfieKey, ':v': true, ':s': "VERIFIED", ':g': gender }
     }));
 
     await writeAuditLog(userId, userId, "IDENTITY_VERIFIED", "Doctor AI facial biometric match successful", {
@@ -561,19 +567,32 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
 
     if (!userCheck.Item) return res.status(404).json({ error: "Doctor not found" });
 
-    // 🟢 1. Initialize S3 variables at the TOP
     const regionalS3 = getRegionalS3Client(region);
     const baseBucket = process.env.BUCKET_NAME || 'mediconnect-doctor-data';
     const isEU = region.toUpperCase() === 'EU';
     const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
 
-    // 2. ANONYMIZE DynamoDB
+    const fhirResource = userCheck.Item.resource || {};
+    fhirResource.active = false; // Legally mark doctor as no longer practicing here
+    fhirResource.name =[{ use: "official", text: "ANONYMIZED_GDPR" }]; // Wipe PII
+  
     await docClient.send(new UpdateCommand({
         TableName: CONFIG.DYNAMO_TABLE, 
         Key: { doctorId: id },
-        UpdateExpression: "SET #name = :del, email = :del, avatar = :null, verificationStatus = :status",
-        ExpressionAttributeNames: { "#name": "name" },
-        ExpressionAttributeValues: { ":del": "ANONYMIZED_GDPR", ":status": "DELETED", ":null": null }
+        UpdateExpression: "SET #n = :del, #e = :del, #a = :null, #v = :status, #res = :safeFhir",
+        ExpressionAttributeNames: { 
+            "#n": "name",
+            "#e": "email",
+            "#a": "avatar",
+            "#v": "verificationStatus",
+            "#res": "resource" // Safely mapped
+        },
+        ExpressionAttributeValues: { 
+            ":del": "ANONYMIZED_GDPR", 
+            ":status": "DELETED", 
+            ":null": null,
+            ":safeFhir": fhirResource // Saves the preserved qualifications!
+        }
     }));
 
     // 3. TAG S3 FILES FOR 7-YEAR PURGE (Law 2026)

@@ -276,7 +276,7 @@ export const verifyIdentity = catchAsync(async (req: Request, res: Response) => 
     const region = extractRegion(req);
     const authUser = (req as any).user;
     
-    const { selfieImage, idImage } = req.body;
+    const { selfieImage, idImage, gender } = req.body;
     if (!authUser?.id || !selfieImage) return res.status(400).json({ error: "Missing identity data" });
 
     const userId = authUser.id;
@@ -336,8 +336,14 @@ export const verifyIdentity = catchAsync(async (req: Request, res: Response) => 
     await dynamicDb.send(new UpdateCommand({
         TableName: targetTable,
         Key: { patientId: userId },
-        UpdateExpression: "set avatar = :a, isIdentityVerified = :v, identityStatus = :s",
-        ExpressionAttributeValues: { ':a': selfieKey, ':v': true, ':s': "VERIFIED" }
+        UpdateExpression: "set avatar = :a, isIdentityVerified = :v, identityStatus = :s, #g = :g, #res.#gen = :g",
+    ExpressionAttributeNames: { 
+        "#g": "gender",
+        "#res": "resource",
+        "#gen": "gender"
+    },
+    ExpressionAttributeValues: { 
+        ':a': selfieKey, ':v': true, ':s': "VERIFIED", ':g': gender }
     }));
 
     await writeAuditLog(userId, userId, "IDENTITY_VERIFIED", "Patient AI facial biometric match successful", {
@@ -371,8 +377,8 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
     await dynamicDb.send(new UpdateCommand({
         TableName: CONFIG.DYNAMO_TABLE,
         Key: { patientId: userId },
-        UpdateExpression: "SET #s = :s, #ttl = :ttl, #n = :n, email = :e, avatar = :a, deletedAt = :now, resource = :empty",
-        ExpressionAttributeNames: { "#s": "status", "#ttl": "ttl", "#n": "name" },
+        UpdateExpression: "SET #s = :s, #ttl = :ttl, #n = :n, email = :e, avatar = :a, deletedAt = :now, #res = :empty",
+        ExpressionAttributeNames: { "#s": "status", "#ttl": "ttl", "#n": "name", "#res": "resource" },
         ExpressionAttributeValues: { 
             ":s": "DELETED", ":ttl": ttl, 
             ":n": `ANONYMIZED_USER`, ":e": `gdpr_deleted_${userId}@mediconnect.local`, 
