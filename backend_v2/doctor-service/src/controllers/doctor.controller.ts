@@ -536,6 +536,13 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req);
     const docClient = getRegionalClient(region);
 
+    const userCheck = await docClient.send(new GetCommand({
+        TableName: CONFIG.DYNAMO_TABLE,
+        Key: { doctorId: id }
+    }));
+
+    if (!userCheck.Item) return res.status(404).json({ error: "Doctor not found" });
+
     // 🟢 1. Initialize S3 variables at the TOP
     const regionalS3 = getRegionalS3Client(region);
     const baseBucket = process.env.BUCKET_NAME || 'mediconnect-identity-verification';
@@ -585,6 +592,28 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
             await regionalS3.send(new DeleteObjectCommand({ Bucket: bucketName, Key: key }));
         }
     } catch (e) { console.warn("Biometric deletion failed"); }
+
+    try {
+        const regionalSns = getRegionalSNSClient(region);
+        const topicArn = region.toUpperCase() === 'EU' ? process.env.SNS_TOPIC_ARN_EU : process.env.SNS_TOPIC_ARN_US;
+
+        await regionalSns.send(new PublishCommand({
+            TopicArn: topicArn,
+            Subject: "⚠️ SECURITY ALERT: Doctor Account Closure",
+            Message: `CRITICAL: Doctor ${id} has closed their account. Biometrics deleted. Credentials (ID/Diploma) tagged for 7-year legal retention. Region: ${region}. Request IP: ${req.ip}`
+        }));
+    } catch (snsErr) {
+        console.error("Failed to send deletion alert to SNS", snsErr);
+    }
+
+    await writeAuditLog(id, id, "DELETE_PROFILE", "User invoked GDPR Right to be Forgotten", {
+        region,
+        ipAddress: req.ip,
+        lastKnownContact: { 
+            email: userCheck.Item.email, 
+            phone: userCheck.Item.phone || "N/A" 
+        }
+    });
 
     res.status(200).json({ message: "Identity erased. Credentials tagged for legal audit." });
 });

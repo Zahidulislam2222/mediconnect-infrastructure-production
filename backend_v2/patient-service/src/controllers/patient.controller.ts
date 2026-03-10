@@ -5,13 +5,14 @@ import { GetCommand, PutCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib
 import { PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { CompareFacesCommand } from "@aws-sdk/client-rekognition";
+import { PublishCommand } from "@aws-sdk/client-sns";
 
 // Shared Utilities
 import { safeError } from '../../../shared/logger';
 import { writeAuditLog } from '../../../shared/audit';
 
 // Shared Clients
-import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient } from '../../../shared/aws-config';
+import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient, getRegionalSNSClient } from '../../../shared/aws-config';
 
 // =============================================================================
 // ⚙️ CONFIGURATION & ENV HANDLING
@@ -354,6 +355,13 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
 
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
 
+    const userCheck = await dynamicDb.send(new GetCommand({
+        TableName: CONFIG.DYNAMO_TABLE,
+        Key: { patientId: userId }
+    }));
+
+    if (!userCheck.Item) return res.status(404).json({ error: "Patient not found" });
+
     // 🟢 HIPAA Data Retention vs GDPR Erasure: 
     // We soft-delete and anonymize PII immediately, but keep a hashed record for 30 days.
     const ttl = Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60);
@@ -389,8 +397,26 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
     }
 
     await writeAuditLog(userId, userId, "DELETE_PROFILE", "User invoked GDPR Right to be Forgotten", {
-        region, ipAddress: req.ip
+        region, 
+        ipAddress: req.ip,
+        lastKnownContact: { 
+            email: userCheck.Item.email, 
+            phone: userCheck.Item.phone || "N/A" 
+        }
     });
+
+    try {
+        const regionalSns = getRegionalSNSClient(region);
+        const topicArn = region.toUpperCase() === 'EU' ? process.env.SNS_TOPIC_ARN_EU : process.env.SNS_TOPIC_ARN_US;
+
+        await regionalSns.send(new PublishCommand({
+            TopicArn: topicArn,
+            Subject: "⚠️ SECURITY ALERT: Patient Identity Purged",
+            Message: `CRITICAL: Patient account ${userId} has been anonymized. Biometric photos have been physically deleted from S3. Region: ${region}. Request IP: ${req.ip}`
+        }));
+    } catch (snsErr) {
+        console.error("Failed to send deletion alert to SNS", snsErr);
+    }
 
     res.json({ message: "Account fully anonymized and scheduled for hard deletion.", status: "DELETED" });
 });

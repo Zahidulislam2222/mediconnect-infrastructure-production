@@ -31,6 +31,8 @@ export const writeAuditLog = async (
     try {
         const timestamp = new Date().toISOString();
         const logId = uuidv4();
+        const sevenYearsInSeconds = 7 * 365 * 24 * 60 * 60;
+        const ttl = Math.floor(Date.now() / 1000) + sevenYearsInSeconds;
         
         // 2. 🟢 DYNAMIC ROUTING: Connects to Frankfurt or Virginia based on user home
         const dynamicDb = getRegionalClient(targetRegion);
@@ -61,8 +63,9 @@ export const writeAuditLog = async (
             details,
             ipAddress: metadata?.ipAddress || "0.0.0.0",
             metadata: metadata || {},
-            resource: fhirAuditEvent, // FHIR Interoperability
-            region: targetRegion      // Data Residency Proof
+            resource: fhirAuditEvent, 
+            region: targetRegion,
+            ttl: ttl    
         };
 
         await dynamicDb.send(new PutCommand({
