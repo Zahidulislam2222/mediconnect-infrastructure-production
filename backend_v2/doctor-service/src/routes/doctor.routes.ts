@@ -63,6 +63,8 @@ router.get('/doctors/auth/google', authMiddleware, DoctorController.connectGoogl
  */
 router.get('/doctors/auth/google/callback', DoctorController.googleCallback);
 
+router.post('/doctors/:id/request-closure', authMiddleware, DoctorController.requestDoctorClosure);
+
 router.delete('/doctors/:id/calendar', authMiddleware, DoctorController.disconnectGoogleCalendar);
 
 export default router;

@@ -420,10 +420,18 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
         await regionalSns.send(new PublishCommand({
             TopicArn: topicArn,
             Subject: "⚠️ SECURITY ALERT: Patient Identity Purged",
-            Message: `CRITICAL: Patient account ${userId} has been anonymized. Biometric photos have been physically deleted from S3. Region: ${region}. Request IP: ${req.ip}`
+            Message: `CRITICAL: Patient account ${userId} has been anonymized. Biometric photos deleted. \nRegion: ${region}\nIP: ${req.ip}`
         }));
+
+        if (userCheck.Item?.email) {
+            await regionalSns.send(new PublishCommand({
+                TopicArn: topicArn,
+                Subject: "MediConnect - Account Deleted Successfully",
+                Message: `Hello, \n\nThis is a formal confirmation that your MediConnect account and all biometric data have been erased as per your request. \n\nIn accordance with medical record laws, your clinical data has been anonymized and will be retained for the legal minimum period. \n\nThank you.`
+            }));
+        }
     } catch (snsErr) {
-        console.error("Failed to send deletion alert to SNS", snsErr);
+        console.error("Failed to send deletion alerts", snsErr);
     }
 
     res.json({ message: "Account fully anonymized and scheduled for hard deletion.", status: "DELETED" });

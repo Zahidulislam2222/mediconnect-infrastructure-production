@@ -555,6 +555,41 @@ export const disconnectGoogleCalendar = catchAsync(async (req: Request, res: Res
 // 5. GDPR RIGHT TO ERASURE & UTILS
 // =============================================================================
 
+export const requestDoctorClosure = catchAsync(async (req: Request, res: Response) => {
+    const { id } = req.params;
+    const region = extractRegion(req);
+    const docClient = getRegionalClient(region);
+
+    const userCheck = await docClient.send(new GetCommand({
+        TableName: CONFIG.DYNAMO_TABLE,
+        Key: { doctorId: id }
+    }));
+
+    if (!userCheck.Item) return res.status(404).json({ error: "Doctor not found" });
+
+    await docClient.send(new UpdateCommand({
+        TableName: CONFIG.DYNAMO_TABLE,
+        Key: { doctorId: id },
+        UpdateExpression: "SET closureStatus = :p, verificationStatus = :s",
+        ExpressionAttributeValues: { ":p": "PENDING_CLOSURE", ":s": "SUSPENDED" }
+    }));
+
+    try {
+        const regionalSns = getRegionalSNSClient(region);
+        const topicArn = region.toUpperCase() === 'EU' ? process.env.SNS_TOPIC_ARN_EU : process.env.SNS_TOPIC_ARN_US;
+
+        await regionalSns.send(new PublishCommand({
+            TopicArn: topicArn,
+            Subject: "💼 ACTION REQUIRED: Doctor Requesting Closure",
+            Message: `HIGH PRIORITY: Doctor ${id} (${userCheck.Item.email}) has requested to close their account. \n\nPlease review pending clinical appointments and legal obligations before finalizing the deletion via the Admin Panel. \n\nRegion: ${region}\nIP Address: ${req.ip}`
+        }));
+    } catch (e) {
+        console.error("SNS Admin alert failed", e);
+    }
+
+    res.json({ message: "Closure request sent to administration for review." });
+});
+
 export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
     const { id } = req.params;
     const region = extractRegion(req);
@@ -643,11 +678,19 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
 
         await regionalSns.send(new PublishCommand({
             TopicArn: topicArn,
-            Subject: "⚠️ SECURITY ALERT: Doctor Account Closure",
-            Message: `CRITICAL: Doctor ${id} has closed their account. Biometrics deleted. Credentials (ID/Diploma) tagged for 7-year legal retention. Region: ${region}. Request IP: ${req.ip}`
+            Subject: "⚠️ SECURITY ALERT: Doctor Account Closure Finalized",
+            Message: `CRITICAL: Doctor account ${id} has been fully anonymized. Biometric photos purged. Credentials (ID/Diploma) tagged for 7-year legal retention. \nRegion: ${region}\nRequest IP: ${req.ip}`
         }));
+
+        if (userCheck.Item?.email) {
+            await regionalSns.send(new PublishCommand({
+                TopicArn: topicArn,
+                Subject: "MediConnect - Account Closed Successfully",
+                Message: `Hello Dr. ${userCheck.Item.name || id}, \n\nYour professional account with MediConnect has been closed. Your medical identity has been anonymized and biometric data has been destroyed. \n\nIn accordance with medical record laws, your board credentials will be retained for the legal 7-year period to satisfy audit requirements. \n\nThank you for your service.`
+            }));
+        }
     } catch (snsErr) {
-        console.error("Failed to send deletion alert to SNS", snsErr);
+        console.error("Failed to send deletion alerts to SNS", snsErr);
     }
 
     await writeAuditLog(id, id, "DELETE_PROFILE", "User invoked GDPR Right to be Forgotten", {
