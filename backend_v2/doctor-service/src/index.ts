@@ -111,6 +111,7 @@ async function loadSecrets() {
         const cmd2 = new GetParametersCommand({
             Names:[
                 '/mediconnect/prod/db/doctor_table',
+                '/mediconnect/prod/s3/doctor_identity_bucket',
                 '/mediconnect/prod/kms/signing_key_id',
                 '/mediconnect/prod/sns/topic_arn_us', 
                 '/mediconnect/prod/sns/topic_arn_eu',  
@@ -132,6 +133,7 @@ async function loadSecrets() {
             if (p.Name === '/mediconnect/prod/cognito/client_id_eu_patient') process.env.COGNITO_CLIENT_ID_EU_PATIENT = p.Value;
             
             if (p.Name === '/mediconnect/prod/db/doctor_table') process.env.DYNAMO_TABLE = p.Value;
+            if (p.Name === '/mediconnect/prod/s3/doctor_identity_bucket') process.env.BUCKET_NAME = p.Value;
             if (p.Name === '/mediconnect/prod/kms/signing_key_id') process.env.KMS_KEY_ID = p.Value;
 
             if (p.Name === '/mediconnect/prod/sns/topic_arn_us') process.env.SNS_TOPIC_ARN_US = p.Value;

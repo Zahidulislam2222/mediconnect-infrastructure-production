@@ -1,7 +1,7 @@
 // C:\Dev\mediconnect-project\mediconnect-infrastructure-develop\backend_v2\doctor-service\src\controllers\doctor.controller.ts
 
 import { NextFunction, Request, Response } from 'express';
-import { GetObjectCommand, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { GetObjectCommand, PutObjectCommand, PutObjectTaggingCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { CompareFacesCommand } from "@aws-sdk/client-rekognition";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { TextractClient, AnalyzeDocumentCommand } from "@aws-sdk/client-textract";
@@ -534,9 +534,15 @@ export const disconnectGoogleCalendar = catchAsync(async (req: Request, res: Res
 export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
     const { id } = req.params;
     const region = extractRegion(req);
-
     const docClient = getRegionalClient(region);
 
+    // 🟢 1. Initialize S3 variables at the TOP
+    const regionalS3 = getRegionalS3Client(region);
+    const baseBucket = process.env.BUCKET_NAME || 'mediconnect-identity-verification';
+    const isEU = region.toUpperCase() === 'EU';
+    const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
+
+    // 2. ANONYMIZE DynamoDB
     await docClient.send(new UpdateCommand({
         TableName: CONFIG.DYNAMO_TABLE, 
         Key: { doctorId: id },
@@ -545,29 +551,42 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
         ExpressionAttributeValues: { ":del": "ANONYMIZED_GDPR", ":status": "DELETED", ":null": null }
     }));
 
-    // 2. DELETE BIOMETRIC DATA (Photos) from S3
+    // 3. TAG S3 FILES FOR 7-YEAR PURGE (Law 2026)
+    const retentionTags = {
+        Tagging: {
+            TagSet: [
+                { Key: "Status", Value: "Deleted" },
+                { Key: "RetentionPeriod", Value: "7Years" }
+            ]
+        }
+    };
+
     try {
-        const regionalS3 = getRegionalS3Client(region);
-        const baseBucket = process.env.BUCKET_NAME || 'mediconnect-identity-verification';
-        const isEU = region.toUpperCase() === 'EU';
-        const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
-
-        const photos = [
-            `doctor/${id}/profile_picture.jpg`,
-            `doctor/${id}/selfie_verified.jpg`
-        ];
-
-        for (const key of photos) {
-            await regionalS3.send(new DeleteObjectCommand({
+        // 🟢 PROFESSIONAL FIX: Tag all legal records in the folder
+        const legalRecords = [`doctor/${id}/id_card.jpg`, `doctor/${id}/diploma.pdf` ];
+        for (const key of legalRecords) {
+            await regionalS3.send(new PutObjectTaggingCommand({
                 Bucket: bucketName,
-                Key: key
+                Key: key,
+                ...retentionTags
             }));
         }
-    } catch (e) {
-        console.warn(`[Cleanup Warning] Could not delete S3 files for doctor ${id}`);
-    }
+    } catch (e) { console.warn("Credential tagging failed"); }
 
-    res.status(200).json({ message: "Identity erased. Credentials retained for legal audit." });
+    // 4. DELETE BIOMETRIC DATA (Face Photos) IMMEDIATELY
+    try {
+        // 🟢 PROFESSIONAL FIX: Tag as Biometric so your 1-day rule also catches them
+        const biometricTags = { Tagging: { TagSet: [{ Key: "DataType", Value: "Biometric" }] } };
+        
+        const photos = [`doctor/${id}/profile_picture.jpg`, `doctor/${id}/selfie_verified.jpg` ];
+        for (const key of photos) {
+            // First tag it as biometric (extra safety) then delete
+            await regionalS3.send(new PutObjectTaggingCommand({ Bucket: bucketName, Key: key, ...biometricTags }));
+            await regionalS3.send(new DeleteObjectCommand({ Bucket: bucketName, Key: key }));
+        }
+    } catch (e) { console.warn("Biometric deletion failed"); }
+
+    res.status(200).json({ message: "Identity erased. Credentials tagged for legal audit." });
 });
 
 const logDoctorOnboarding = async (doctorId: string, eventType: string, status: string, region: string) => {

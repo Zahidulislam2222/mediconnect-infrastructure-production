@@ -298,8 +298,8 @@ export const verifyIdentity = catchAsync(async (req: Request, res: Response) => 
     const regionalS3 = getRegionalS3Client(region);
     const regionalRek = getRegionalRekognitionClient(region);
     const baseBucket = CONFIG.BUCKET_NAME;
-const isEU = region.toUpperCase() === 'EU';
-const bucketName = (isEU && !baseBucket.endsWith('-eu')) 
+    const isEU = region.toUpperCase() === 'EU';
+    const bucketName = (isEU && !baseBucket.endsWith('-eu')) 
     ? `${baseBucket}-eu` 
     : baseBucket;
 
@@ -372,9 +372,9 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
 
     try {
         const regionalS3 = getRegionalS3Client(region);
-        const baseBucket = CONFIG.BUCKET_NAME;
-const isEU = region.toUpperCase() === 'EU';
-const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
+        const baseBucket = CONFIG.BUCKET_NAME; // Loads from SSM
+        const isEU = region.toUpperCase() === 'EU';
+        const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
         
         const filesToDelete = [
             `patient/${userId}/selfie_verified.jpg`,
