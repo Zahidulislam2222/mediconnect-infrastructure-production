@@ -34,18 +34,15 @@ async function signAvatarUrl(avatarKey: string | null, region: string): Promise<
     let finalKey = avatarKey;
 
     if (avatarKey.startsWith('http')) {
-        if (avatarKey.includes('mediconnect-identity-verification')) {
-            const match = avatarKey.match(/(patient|doctor)\/[a-zA-Z0-9-]+\/[^?]+/);
-            if (match) finalKey = match[0]; 
-            else return avatarKey;
-        } else {
-            return avatarKey;
-        }
+
+        const match = avatarKey.match(/(patient|doctor)\/[a-zA-Z0-9-]+\/[^?]+/);
+        if (match) finalKey = match[0]; 
+        else return avatarKey;
     }
 
     try {
         const regionalS3 = getRegionalS3Client(region);
-        const baseBucket = process.env.BUCKET_NAME || 'mediconnect-identity-verification';
+        const baseBucket = process.env.BUCKET_NAME || 'mediconnect-doctor-data';
 const isEU = region.toUpperCase() === 'EU';
 const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
             
@@ -155,7 +152,7 @@ export const verifyDoctorIdentity = catchAsync(async (req: Request, res: Respons
     const regionalS3 = getRegionalS3Client(region);
     const regionalRek = getRegionalRekognitionClient(region);
     
-    const baseBucket = process.env.BUCKET_NAME || 'mediconnect-identity-verification';
+    const baseBucket = process.env.BUCKET_NAME || 'mediconnect-doctor-data';
 const isEU = region.toUpperCase() === 'EU';
 const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
 
@@ -239,6 +236,10 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
     const values: any = {};
     
     // Explicitly allow all fields the frontend sends
+    if (updates.avatar && updates.avatar.startsWith('http')) {
+        const match = updates.avatar.match(/(patient|doctor)\/[a-zA-Z0-9-]+\/[^?]+/);
+        if (match) updates.avatar = match[0];
+    }
     const allowed =['name', 'specialization', 'bio', 'avatar', 'isEmailVerified', 'phone', 'address', 'preferences'];
 
     Object.keys(updates).forEach(key => {
@@ -562,7 +563,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
 
     // 🟢 1. Initialize S3 variables at the TOP
     const regionalS3 = getRegionalS3Client(region);
-    const baseBucket = process.env.BUCKET_NAME || 'mediconnect-identity-verification';
+    const baseBucket = process.env.BUCKET_NAME || 'mediconnect-doctor-data';
     const isEU = region.toUpperCase() === 'EU';
     const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
 

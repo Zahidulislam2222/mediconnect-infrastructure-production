@@ -20,7 +20,7 @@ import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient, g
 const CONFIG = {
     get DYNAMO_TABLE() { return process.env.DYNAMO_TABLE || 'mediconnect-patients'; },
     get DOCTOR_TABLE() { return process.env.DYNAMO_TABLE_DOCTORS || 'mediconnect-doctors'; },
-    get BUCKET_NAME() { return process.env.BUCKET_NAME || 'mediconnect-identity-verification'; },
+    get BUCKET_NAME() { return process.env.BUCKET_NAME || 'mediconnect-patient-data'; },
 };
 
 // =============================================================================
@@ -48,13 +48,9 @@ async function signAvatarUrl(avatarKey: string | null, region: string): Promise<
     let finalKey = avatarKey;
 
     if (avatarKey.startsWith('http')) {
-        if (avatarKey.includes('mediconnect-identity-verification')) {
-            const match = avatarKey.match(/(patient|doctor)\/[a-zA-Z0-9-]+\/[^?]+/);
-            if (match) finalKey = match[0]; 
-            else return avatarKey;
-        } else {
-            return avatarKey; 
-        }
+        const match = avatarKey.match(/(patient|doctor)\/[a-zA-Z0-9-]+\/[^?]+/);
+        if (match) finalKey = match[0]; 
+        else return avatarKey;
     }
 
     try {
@@ -209,9 +205,15 @@ export const updateProfile = catchAsync(async (req: Request, res: Response) => {
         return res.status(403).json({ error: "Unauthorized to edit this profile." });
     }
 
-    const allowedUpdates =['name', 'avatar', 'phone', 'address', 'preferences', 'dob', 'fcmToken', 'isEmailVerified']; 
     const body = req.body;
-    const parts: string[] =[];
+
+    if (body.avatar && typeof body.avatar === 'string' && body.avatar.startsWith('http')) {
+        const match = body.avatar.match(/(patient|doctor)\/[a-zA-Z0-9-]+\/[^?]+/);
+        if (match) body.avatar = match[0];
+    }
+
+    const allowedUpdates = ['name', 'avatar', 'phone', 'address', 'preferences', 'dob', 'fcmToken', 'isEmailVerified']; 
+    const parts: string[] = [];
     const names: any = {};
     const values: any = {};
 
