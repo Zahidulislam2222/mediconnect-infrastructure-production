@@ -640,6 +640,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
     const { id } = req.params;
     const region = extractRegion(req);
     const docClient = getRegionalClient(region);
+    const authUser = (req as any).user;
 
     const userCheck = await docClient.send(new GetCommand({
         TableName: CONFIG.DYNAMO_TABLE,
@@ -647,6 +648,13 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
     }));
 
     if (!userCheck.Item) return res.status(404).json({ error: "Doctor not found" });
+
+    if (userCheck.Item.closureStatus !== "PENDING_CLOSURE") {
+        await writeAuditLog(authUser.id, id, "ILLEGAL_DELETE_ATTEMPT", "Doctor tried to bypass closure review via API", { region, ipAddress: req.ip });
+        return res.status(403).json({ 
+            error: "Security Violation: You cannot delete an active account. You must first 'Request Account Closure' and wait for Admin review." 
+        });
+    }
 
     const regionalS3 = getRegionalS3Client(region);
     const baseBucket = process.env.BUCKET_NAME || 'mediconnect-doctor-data';
