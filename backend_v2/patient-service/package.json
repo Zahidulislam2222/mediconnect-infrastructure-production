@@ -11,6 +11,7 @@
         "test": "echo \"No tests defined yet\" && exit 0"
     },
     "dependencies": {
+        "@aws-sdk/client-cognito-identity-provider": "^3.1007.0",
         "@aws-sdk/client-dynamodb": "^3.0.0",
         "@aws-sdk/client-rekognition": "^3.0.0",
         "@aws-sdk/client-s3": "^3.0.0",
@@ -58,6 +59,7 @@
     "author": "",
     "license": "ISC",
     "overrides": {
-        "dompurify": "^3.2.4"
+        "dompurify": "^3.2.4",
+        "@tootallnate/once": "3.0.1"
     }
 }

@@ -8,12 +8,12 @@ import { TextractClient, AnalyzeDocumentCommand } from "@aws-sdk/client-textract
 import { PublishCommand } from "@aws-sdk/client-sns";
 import { google } from 'googleapis';
 import { PutCommand, GetCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
-import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient, getRegionalSNSClient } from '../../../shared/aws-config';
+import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient, getRegionalSNSClient, getRegionalSESClient, getRegionalCognitoClient } from '../../../shared/aws-config';
 import { writeAuditLog } from '../../../shared/audit';
 import jwt from 'jsonwebtoken';
 import { GoogleAuth } from "google-auth-library";
 import { SendEmailCommand } from "@aws-sdk/client-ses";
-import { getRegionalSESClient } from '../../../shared/aws-config';
+import { AdminDeleteUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 
 // 🟢 FIX 1: Use Getter to prevent loading race condition
 const CONFIG = {
@@ -747,6 +747,21 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
         }
     } catch (err) {
         console.error("Failed to send deletion alerts/emails", err);
+    }
+
+     try {
+        const cognitoClient = getRegionalCognitoClient(region);
+        const userPoolId = region.toUpperCase() === 'EU' ? process.env.COGNITO_USER_POOL_ID_EU : process.env.COGNITO_USER_POOL_ID_US;
+
+        if (userPoolId) {
+            await cognitoClient.send(new AdminDeleteUserCommand({
+                UserPoolId: userPoolId,
+                Username: id
+            }));
+            console.log(`[COMPLIANCE] Doctor Identity ${id} permanently erased from Cognito.`);
+        }
+    } catch (cognitoErr) {
+        console.error("Failed to remove doctor from Cognito Pool", cognitoErr);
     }
 
     await writeAuditLog(id, id, "DELETE_PROFILE", "User invoked GDPR Right to be Forgotten", {

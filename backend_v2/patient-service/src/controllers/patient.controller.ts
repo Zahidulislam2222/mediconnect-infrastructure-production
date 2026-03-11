@@ -7,7 +7,8 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { CompareFacesCommand } from "@aws-sdk/client-rekognition";
 import { PublishCommand } from "@aws-sdk/client-sns";
 import { SendEmailCommand } from "@aws-sdk/client-ses";
-import { getRegionalSESClient } from '../../../shared/aws-config';
+import { getRegionalSESClient, getRegionalCognitoClient } from '../../../shared/aws-config';
+import { AdminDeleteUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 
 // Shared Utilities
 import { safeError } from '../../../shared/logger';
@@ -450,6 +451,20 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
         }
     } catch (err) {
         console.error("Failed to send deletion alerts/emails", err);
+    }
+    try {
+        const cognitoClient = getRegionalCognitoClient(region);
+        const userPoolId = region.toUpperCase() === 'EU' ? process.env.COGNITO_USER_POOL_ID_EU : process.env.COGNITO_USER_POOL_ID_US;
+
+        if (userPoolId) {
+            await cognitoClient.send(new AdminDeleteUserCommand({
+                UserPoolId: userPoolId,
+                Username: userId
+            }));
+            console.log(`[COMPLIANCE] Patient Identity ${userId} permanently erased from Cognito.`);
+        }
+    } catch (cognitoErr) {
+        console.error("Failed to remove patient from Cognito Pool", cognitoErr);
     }
 
     res.json({ message: "Account fully anonymized and scheduled for hard deletion.", status: "DELETED" });

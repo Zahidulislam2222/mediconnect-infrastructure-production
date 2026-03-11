@@ -17,6 +17,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.1007.0",
     "@aws-sdk/client-dynamodb": "^3.0.0",
     "@aws-sdk/client-kms": "^3.0.0",
     "@aws-sdk/client-rekognition": "^3.0.0",
@@ -51,13 +52,25 @@
     "@types/jsonwebtoken": "^9.0.5",
     "@types/morgan": "^1.9.10",
     "@types/node": "^25.3.0",
+    "@types/pako": "^2.0.4",
     "@types/pdfkit": "^0.17.5",
+    "@types/trusted-types": "^2.0.7",
     "@types/uuid": "^10.0.0",
+    "@types/ws": "^8.18.1",
     "typescript": "^5.9.3"
   },
   "description": "",
   "overrides": {
     "dompurify": "^3.2.4",
-    "minimatch": "^10.2.1"
+    "minimatch": "^10.2.1",
+    "@tootallnate/once": "3.0.1",
+    "http-proxy-agent": {
+      "@tootallnate/once": "3.0.1"
+    },
+    "teeny-request": {
+      "http-proxy-agent": {
+        "@tootallnate/once": "3.0.1"
+      }
+    }
   }
 }

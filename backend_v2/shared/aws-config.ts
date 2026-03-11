@@ -10,6 +10,7 @@ import { KMSClient } from "@aws-sdk/client-kms";
 import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { SESClient } from "@aws-sdk/client-ses";
+import { CognitoIdentityProviderClient } from "@aws-sdk/client-cognito-identity-provider";
 
 // 🟢 HIPAA 2026 High Availability (HA) Configuration
 // PROPER AWS SDK v3 Implementation: Prevents Multi-Cloud Cold Starts and Socket Hangs
@@ -40,7 +41,8 @@ const clients: any = {
     ssm: {} as Record<string, SSMClient>,
     kms: {} as Record<string, KMSClient>,
     secrets: {} as Record<string, SecretsManagerClient>,
-    ses: {} as Record<string, SESClient>
+    ses: {} as Record<string, SESClient>,
+    cognito: {} as Record<string, CognitoIdentityProviderClient>
 };
 
 // =========================================================================
@@ -170,4 +172,11 @@ export const getRegionalSESClient = (region: string = "us-east-1"): SESClient =>
     if (clients.ses[target]) return clients.ses[target];
     clients.ses[target] = new SESClient({ ...awsConfigBase, region: target });
     return clients.ses[target];
+};
+
+export const getRegionalCognitoClient = (region: string = "us-east-1"): CognitoIdentityProviderClient => {
+    const target = normalizeRegion(region);
+    if (clients.cognito[target]) return clients.cognito[target];
+    clients.cognito[target] = new CognitoIdentityProviderClient({ ...awsConfigBase, region: target });
+    return clients.cognito[target];
 };
