@@ -11,6 +11,7 @@ permissions:
   contents: read
 
 env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE22: true
   AZURE_ACR: "zahidmediconnectacr.azurecr.io"
   AWS_ECR: "950110266426.dkr.ecr.eu-central-1.amazonaws.com"
   GCP_GAR: "us-central1-docker.pkg.dev/mediconnect-analytics/mediconnect-repo"
