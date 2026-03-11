@@ -9,6 +9,7 @@ import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
 import { KMSClient } from "@aws-sdk/client-kms";
 import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
+import { SESClient } from "@aws-sdk/client-ses";
 
 // 🟢 HIPAA 2026 High Availability (HA) Configuration
 // PROPER AWS SDK v3 Implementation: Prevents Multi-Cloud Cold Starts and Socket Hangs
@@ -38,7 +39,8 @@ const clients: any = {
     sns: {} as Record<string, SNSClient>,
     ssm: {} as Record<string, SSMClient>,
     kms: {} as Record<string, KMSClient>,
-    secrets: {} as Record<string, SecretsManagerClient>
+    secrets: {} as Record<string, SecretsManagerClient>,
+    ses: {} as Record<string, SESClient>
 };
 
 // =========================================================================
@@ -162,3 +164,10 @@ export async function getSecret(secretName: string, region: string = "us-east-1"
         return null;
     }
 }
+
+export const getRegionalSESClient = (region: string = "us-east-1"): SESClient => {
+    const target = normalizeRegion(region);
+    if (clients.ses[target]) return clients.ses[target];
+    clients.ses[target] = new SESClient({ ...awsConfigBase, region: target });
+    return clients.ses[target];
+};

@@ -12,6 +12,8 @@ import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient, g
 import { writeAuditLog } from '../../../shared/audit';
 import jwt from 'jsonwebtoken';
 import { GoogleAuth } from "google-auth-library";
+import { SendEmailCommand } from "@aws-sdk/client-ses";
+import { getRegionalSESClient } from '../../../shared/aws-config';
 
 // 🟢 FIX 1: Use Getter to prevent loading race condition
 const CONFIG = {
@@ -126,6 +128,21 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
     });
     
     logDoctorOnboarding(finalId, "SIGNUP", "UNVERIFIED", extractRegion(req)).catch(console.error);
+
+    // 🟢 ADMIN ALERT FIX: Notify Admin immediately when a doctor registers
+    try {
+        const regionalSns = getRegionalSNSClient(extractRegion(req));
+        const topicArn = extractRegion(req).toUpperCase() === 'EU' ? process.env.SNS_TOPIC_ARN_EU : process.env.SNS_TOPIC_ARN_US;
+        
+        await regionalSns.send(new PublishCommand({
+            TopicArn: topicArn,
+            Subject: "🩺 NEW DOCTOR REGISTRATION",
+            Message: `A new doctor (${email}) has registered on the platform.\nName: ${name}\nSpecialization: ${specialization || 'N/A'}\n\nThey have consented to terms and are currently UNVERIFIED. Awaiting credential upload.`
+        }));
+    } catch (snsErr) {
+        console.error("Failed to alert admin of new doctor", snsErr);
+    }
+
     res.status(201).json({ message: "Doctor profile created", profile: item });
 });
 
@@ -237,19 +254,29 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
     if (!id) return res.status(400).json({ error: 'Missing ID' });
     if (!authUser || authUser.sub !== id) return res.status(403).json({ error: "HIPAA Violation: Unauthorized." });
 
-    const parts: string[] =[];
-    const names: any = {};
-    const values: any = {};
-    
-    // Explicitly allow all fields the frontend sends
-    if (updates.avatar && updates.avatar.startsWith('http')) {
+    if (updates.avatar && typeof updates.avatar === 'string') {
+        if (!updates.avatar.includes(id)) {
+            await writeAuditLog(authUser.sub, id, "SPOOF_ATTEMPT", "Attempted to link external S3 asset", { region: extractRegion(req), ipAddress: req.ip });
+            return res.status(403).json({ error: "Security Violation: Cannot link to another user's avatar." });
+        }
         const match = updates.avatar.match(/(patient|doctor)\/[a-zA-Z0-9-]+\/[^?]+/);
         if (match) updates.avatar = match[0];
     }
-    const allowed =['name', 'specialization', 'bio', 'avatar', 'isEmailVerified', 'phone', 'address', 'preferences'];
+
+    const parts: string[] =[];
+    const names: any = {};
+    const values: any = {};
+
+    const allowed =['name', 'specialization', 'bio', 'avatar', 'phone', 'address', 'preferences'];
+
+    let requiresReverification = false;
 
     Object.keys(updates).forEach(key => {
         if (allowed.includes(key)) {
+            // 🟢 COMPLIANCE FIX: Detect core identity changes
+            if (key === 'name' || key === 'specialization') {
+                requiresReverification = true;
+            }
             parts.push(`#${key} = :${key}`);
             names[`#${key}`] = key;
             values[`:${key}`] = updates[key];
@@ -257,6 +284,12 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
     });
 
     if (parts.length === 0) return res.status(400).json({ error: "No valid fields to update" });
+
+    if (requiresReverification) {
+        parts.push("verificationStatus = :pending", "isOfficerApproved = :officer");
+        values[":pending"] = "PENDING_OFFICER_APPROVAL";
+        values[":officer"] = false;
+    }
 
     names["#res"] = "resource"; 
     
@@ -269,7 +302,7 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
     if (updates.specialization) {
         parts.push("#res.#qual = :fhirQualArr");
         names["#qual"] = "qualification";
-        values[":fhirQualArr"] =[{ code: { text: updates.specialization } }];
+        values[":fhirQualArr"] = [{ code: { text: updates.specialization } }];
     }
 
     parts.push("#res.#meta = :metaObj");
@@ -290,12 +323,25 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
             ReturnValues: "ALL_NEW"
         }));
 
-        await writeAuditLog(authUser.sub, id, "UPDATE_DOCTOR", "Profile and FHIR resource updated", { 
+        await writeAuditLog(authUser.sub, id, "UPDATE_DOCTOR", `Profile updated. Re-verification required: ${requiresReverification}`, { 
             region: extractRegion(req), 
             ipAddress: req.ip 
         });
+
+        if (requiresReverification) {
+            const regionalSns = getRegionalSNSClient(extractRegion(req));
+            const topicArn = extractRegion(req).toUpperCase() === 'EU' ? process.env.SNS_TOPIC_ARN_EU : process.env.SNS_TOPIC_ARN_US;
+            await regionalSns.send(new PublishCommand({
+                TopicArn: topicArn,
+                Subject: "⚠️ COMPLIANCE ALERT: Doctor Credentials Altered",
+                Message: `Doctor ${id} updated their Core Clinical Identity (Name or Specialization).\nTheir account has been automatically suspended pending administrative officer review.\nIP: ${req.ip}`
+            }));
+        }
         
-        res.status(200).json({ message: "Doctor profile updated", profile: response.Attributes });
+        res.status(200).json({ 
+            message: requiresReverification ? "Profile updated. Your account is suspended pending Admin review." : "Doctor profile updated", 
+            profile: response.Attributes 
+        });
     } catch (dbError: any) {
         console.error("DynamoDB Update Error:", dbError.message);
         res.status(500).json({ error: "Database update failed", details: dbError.message });
@@ -674,23 +720,33 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
 
     try {
         const regionalSns = getRegionalSNSClient(region);
+        const regionalSes = getRegionalSESClient(region);
         const topicArn = region.toUpperCase() === 'EU' ? process.env.SNS_TOPIC_ARN_EU : process.env.SNS_TOPIC_ARN_US;
 
+        // 1. Alert Admin via SNS
         await regionalSns.send(new PublishCommand({
             TopicArn: topicArn,
             Subject: "⚠️ SECURITY ALERT: Doctor Account Closure Finalized",
             Message: `CRITICAL: Doctor account ${id} has been fully anonymized. Biometric photos purged. Credentials (ID/Diploma) tagged for 7-year legal retention. \nRegion: ${region}\nRequest IP: ${req.ip}`
         }));
 
+        // 2. Alert Doctor via SES
         if (userCheck.Item?.email) {
-            await regionalSns.send(new PublishCommand({
-                TopicArn: topicArn,
-                Subject: "MediConnect - Account Closed Successfully",
-                Message: `Hello Dr. ${userCheck.Item.name || id}, \n\nYour professional account with MediConnect has been closed. Your medical identity has been anonymized and biometric data has been destroyed. \n\nIn accordance with medical record laws, your board credentials will be retained for the legal 7-year period to satisfy audit requirements. \n\nThank you for your service.`
+            await regionalSes.send(new SendEmailCommand({
+                Source: process.env.SYSTEM_EMAIL || "noreply@yourdomain.com", // 🟢 Must be verified in AWS SES
+                Destination: { ToAddresses: [userCheck.Item.email] },
+                Message: {
+                    Subject: { Data: "MediConnect - Account Closed Successfully" },
+                    Body: { 
+                        Text: { 
+                            Data: `Hello Dr. ${userCheck.Item.name || id}, \n\nYour professional account with MediConnect has been closed. Your medical identity has been anonymized and biometric data has been destroyed. \n\nIn accordance with medical record laws, your board credentials will be retained for the legal 7-year period to satisfy audit requirements. \n\nThank you for your service.` 
+                        } 
+                    }
+                }
             }));
         }
-    } catch (snsErr) {
-        console.error("Failed to send deletion alerts to SNS", snsErr);
+    } catch (err) {
+        console.error("Failed to send deletion alerts/emails", err);
     }
 
     await writeAuditLog(id, id, "DELETE_PROFILE", "User invoked GDPR Right to be Forgotten", {

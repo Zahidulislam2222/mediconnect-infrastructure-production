@@ -12,7 +12,10 @@ import {
     searchPatients,
     extractRegion
 } from '../controllers/patient.controller';
+
+// 🟢 BOTH MIDDLEWARES IMPORTED HERE
 import { authMiddleware } from '../middleware/auth.middleware';
+import { requireIdentityVerification } from '../middleware/verification.middleware';
 import { writeAuditLog } from '../../../shared/audit';
 
 const router = Router();
@@ -20,7 +23,6 @@ const router = Router();
 // ==========================================
 // 📖 1. PUBLIC ROUTES (No Token Required)
 // ==========================================
-
 export const getPublicKnowledge = async (req: Request, res: Response) => {
     try {
         const userRegion = extractRegion(req);
@@ -81,30 +83,25 @@ router.get('/public/knowledge/:id', getPublicArticle);
 // ==========================================
 // 🔒 2. SECURE BOUNDARY (Token Required)
 // ==========================================
+// The "Security Guard" checks everyone who passes this line
 router.use(authMiddleware);
 
 // ==========================================
-// 🛡️ 3. PROTECTED ROUTES (HIPAA Enforced)
+// 🏥 3. LOBBY ROUTES (No ID Verification Needed)
+// Users need to access these so they CAN verify themselves
 // ==========================================
-
-// 1. Specific Static Routes (MUST COME FIRST)
-// If these are below /:id, "stats" or "search" will be treated as a userId.
-router.get('/stats/demographics', getDemographics);
-router.get('/search', searchPatients); 
-
-// 2. Registration & Identity
 router.post(['/register-patient', '/'], createPatient); 
 router.post('/patients/:id/verify-identity', verifyIdentity);
-
-// 3. Current User Profile (No ID param required)
 router.get(['/register-patient', '/me'], getProfile); 
-router.delete('/me', deleteProfile);
-
-// 4. Dynamic ID Routes (Wildcards come LAST)
-// GET: Fetch specific patient by ID
 router.get(['/patients/:id', '/:id'], getPatientById);
 
-// PUT: Update specific patient by ID
-router.put(['/patients/:id', '/:id'], updateProfile);
+// ==========================================
+// 🛡️ 4. SURGERY ROOM (STRICT: Requires Verified ID)
+// Notice we add `requireIdentityVerification` to these specific routes
+// ==========================================
+router.get('/stats/demographics', requireIdentityVerification, getDemographics);
+router.get('/search', requireIdentityVerification, searchPatients); 
+router.delete('/me', requireIdentityVerification, deleteProfile);
+router.put(['/patients/:id', '/:id'], requireIdentityVerification, updateProfile);
 
 export default router;

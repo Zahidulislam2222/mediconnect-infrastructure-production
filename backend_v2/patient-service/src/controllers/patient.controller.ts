@@ -1,11 +1,13 @@
 import { Request, Response, NextFunction } from 'express';
 
 // AWS SDK v3
-import { GetCommand, PutCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, PutCommand, UpdateCommand, ScanCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { CompareFacesCommand } from "@aws-sdk/client-rekognition";
 import { PublishCommand } from "@aws-sdk/client-sns";
+import { SendEmailCommand } from "@aws-sdk/client-ses";
+import { getRegionalSESClient } from '../../../shared/aws-config';
 
 // Shared Utilities
 import { safeError } from '../../../shared/logger';
@@ -192,7 +194,7 @@ export const getProfile = catchAsync(async (req: Request, res: Response) => {
 });
 
 /**
- * 3. UPDATE PROFILE (FHIR Sync)
+ * 3. UPDATE PROFILE (FHIR Sync) - SECURED
  */
 export const updateProfile = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req);
@@ -207,13 +209,19 @@ export const updateProfile = catchAsync(async (req: Request, res: Response) => {
 
     const body = req.body;
 
-    if (body.avatar && typeof body.avatar === 'string' && body.avatar.startsWith('http')) {
+    // 🟢 SECURITY FIX: Prevent S3 Avatar Spoofing
+    if (body.avatar && typeof body.avatar === 'string') {
+        if (!body.avatar.includes(requesterId)) {
+            await writeAuditLog(requesterId, requestedId, "SPOOF_ATTEMPT", "Attempted to link external S3 asset", { region, ipAddress: req.ip });
+            return res.status(403).json({ error: "Security Violation: Cannot link to another user's avatar." });
+        }
         const match = body.avatar.match(/(patient|doctor)\/[a-zA-Z0-9-]+\/[^?]+/);
         if (match) body.avatar = match[0];
     }
 
-    const allowedUpdates = ['name', 'avatar', 'phone', 'address', 'preferences', 'dob', 'fcmToken', 'isEmailVerified']; 
-    const parts: string[] = [];
+    // 🟢 SECURITY FIX: Removed 'isEmailVerified' to prevent Privilege Escalation
+    const allowedUpdates =['name', 'avatar', 'phone', 'address', 'preferences', 'dob', 'fcmToken']; 
+    const parts: string[] =[];
     const names: any = {};
     const values: any = {};
 
@@ -223,7 +231,7 @@ export const updateProfile = catchAsync(async (req: Request, res: Response) => {
             names[`#${field}`] = field;
             values[`:${field}`] = body[field];
 
-            // 🟢 DYNAMODB RESERVED WORD FIX (Escaping 'name', 'text', 'value')
+            // FHIR Mapping
             if (field === 'name') {
                 parts.push("#res.#nm[0].#txt = :fhirName");
                 names["#res"] = "resource";
@@ -415,23 +423,33 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
 
     try {
         const regionalSns = getRegionalSNSClient(region);
+        const regionalSes = getRegionalSESClient(region);
         const topicArn = region.toUpperCase() === 'EU' ? process.env.SNS_TOPIC_ARN_EU : process.env.SNS_TOPIC_ARN_US;
 
+        // 1. Send Security Alert to Admins via SNS
         await regionalSns.send(new PublishCommand({
             TopicArn: topicArn,
             Subject: "⚠️ SECURITY ALERT: Patient Identity Purged",
             Message: `CRITICAL: Patient account ${userId} has been anonymized. Biometric photos deleted. \nRegion: ${region}\nIP: ${req.ip}`
         }));
 
+        // 2. Send Formal Deletion Notice to Patient via SES
         if (userCheck.Item?.email) {
-            await regionalSns.send(new PublishCommand({
-                TopicArn: topicArn,
-                Subject: "MediConnect - Account Deleted Successfully",
-                Message: `Hello, \n\nThis is a formal confirmation that your MediConnect account and all biometric data have been erased as per your request. \n\nIn accordance with medical record laws, your clinical data has been anonymized and will be retained for the legal minimum period. \n\nThank you.`
+            await regionalSes.send(new SendEmailCommand({
+                Source: process.env.SYSTEM_EMAIL || "noreply@yourdomain.com", // 🟢 Must be verified in AWS SES
+                Destination: { ToAddresses: [userCheck.Item.email] },
+                Message: {
+                    Subject: { Data: "MediConnect - Account Deleted Successfully" },
+                    Body: { 
+                        Text: { 
+                            Data: `Hello, \n\nThis is a formal confirmation that your MediConnect account and all biometric data have been erased as per your request under GDPR/HIPAA regulations. \n\nIn accordance with medical record laws, your clinical data has been anonymized and will be retained for the legal minimum period for audit purposes only. \n\nThank you.` 
+                        } 
+                    }
+                }
             }));
         }
-    } catch (snsErr) {
-        console.error("Failed to send deletion alerts", snsErr);
+    } catch (err) {
+        console.error("Failed to send deletion alerts/emails", err);
     }
 
     res.json({ message: "Account fully anonymized and scheduled for hard deletion.", status: "DELETED" });
@@ -500,20 +518,40 @@ export const getDemographics = catchAsync(async (req: Request, res: Response) =>
 });
 
 /**
- * 8. GET PATIENT BY ID (Shared Access for Doctors)
+ * 8. GET PATIENT BY ID (HIPAA Compliant Minimum Necessary Access)
  */
 export const getPatientById = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req);
     const dynamicDb = getRegionalClient(region);
     
-    // Support both /:userId and /:id parameters
     const requestedId = req.params.userId || req.params.id;
     const requesterId = (req as any).user?.id;
     const isDoctor = (req as any).user?.isDoctor;
 
-    // 🟢 ACCESS CONTROL: Owner OR Doctor Only
-    if (requestedId !== requesterId && !isDoctor) {
-         return res.status(403).json({ error: "Unauthorized access to patient record." });
+    // 🟢 HIPAA ACCESS CONTROL: Only the Owner OR a Doctor with an active relationship
+    if (requestedId !== requesterId) {
+        if (!isDoctor) {
+             return res.status(403).json({ error: "Unauthorized access to patient record." });
+        }
+
+        // 🟢 HIPAA "Minimum Necessary" Rule: Check Clinical Relationship
+        const relationshipCheck = await dynamicDb.send(new QueryCommand({
+            TableName: process.env.APPOINTMENT_TABLE || "mediconnect-appointments",
+            IndexName: "PatientIndex", // Uses the GSI to look up the patient
+            KeyConditionExpression: "patientId = :pid",
+            FilterExpression: "doctorId = :did AND #st <> :cancelled",
+            ExpressionAttributeNames: { "#st": "status" },
+            ExpressionAttributeValues: { 
+                ":pid": requestedId, 
+                ":did": requesterId, 
+                ":cancelled": "CANCELLED" 
+            }
+        }));
+
+        if (!relationshipCheck.Items || relationshipCheck.Items.length === 0) {
+            await writeAuditLog(requesterId, requestedId, "ILLEGAL_ACCESS_ATTEMPT", "Doctor attempted to view unassigned patient.", { region, role: 'doctor', ipAddress: req.ip });
+            return res.status(403).json({ error: "HIPAA Violation: You do not have an active clinical relationship with this patient." });
+        }
     }
 
     const response = await dynamicDb.send(new GetCommand({
@@ -523,9 +561,8 @@ export const getPatientById = catchAsync(async (req: Request, res: Response) => 
 
     if (!response.Item) return res.status(404).json({ error: "Patient not found." });
     
-    // Sign the avatar URL before returning
     response.Item.avatar = await signAvatarUrl(response.Item.avatar, region);
 
-    await writeAuditLog(requesterId, requestedId, "READ_PATIENT_BY_ID", "Direct ID lookup performed", { region, role: isDoctor ? 'doctor' : 'patient' });
+    await writeAuditLog(requesterId, requestedId, "READ_PATIENT_BY_ID", "Authorized medical record accessed", { region, role: isDoctor ? 'doctor' : 'patient' });
     res.json(response.Item);
 });
