@@ -668,7 +668,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
     await docClient.send(new UpdateCommand({
         TableName: CONFIG.DYNAMO_TABLE, 
         Key: { doctorId: id },
-        UpdateExpression: "SET #n = :del, #e = :del, #a = :null, #v = :status, #res = :safeFhir",
+        UpdateExpression: "SET #n = :del, #e = :del, #a = :null, #v = :status, #res = :safeFhir, bio = :null, phone = :null, address = :null, aiExtractedText = :null, licenseNumber = :null, googleRefreshToken = :null",
         ExpressionAttributeNames: { 
             "#n": "name",
             "#e": "email",
@@ -718,7 +718,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
         // 🟢 PROFESSIONAL FIX: Tag as Biometric so your 1-day rule also catches them
         const biometricTags = { Tagging: { TagSet: [{ Key: "DataType", Value: "Biometric" }] } };
         
-        const photos = [`doctor/${id}/profile_picture.jpg`, `doctor/${id}/selfie_verified.jpg` ];
+        const photos = [`doctor/${id}/profile_picture.jpg`, `doctor/${id}/profile_picture.png`, `doctor/${id}/selfie_verified.jpg`, `doctor/${id}/selfie_verified.png` ];
         for (const key of photos) {
             // First tag it as biometric (extra safety) then delete
             await regionalS3.send(new PutObjectTaggingCommand({ Bucket: bucketName, Key: key, ...biometricTags }));

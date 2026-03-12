@@ -386,12 +386,22 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
     await dynamicDb.send(new UpdateCommand({
         TableName: CONFIG.DYNAMO_TABLE,
         Key: { patientId: userId },
-        UpdateExpression: "SET #s = :s, #ttl = :ttl, #n = :n, email = :e, avatar = :a, deletedAt = :now, #res = :empty",
-        ExpressionAttributeNames: { "#s": "status", "#ttl": "ttl", "#n": "name", "#res": "resource" },
+        UpdateExpression: "SET #s = :s, #ttl = :ttl, #n = :n, email = :e, avatar = :a, deletedAt = :now, #res = :empty, address = :null, phone = :null, dob = :null, preferences = :empty, fcmToken = :null",
+        ExpressionAttributeNames: { 
+            "#s": "status", 
+            "#ttl": "ttl", 
+            "#n": "name", 
+            "#res": "resource" 
+        },
         ExpressionAttributeValues: { 
-            ":s": "DELETED", ":ttl": ttl, 
-            ":n": `ANONYMIZED_USER`, ":e": `gdpr_deleted_${userId}@mediconnect.local`, 
-            ":a": null, ":now": new Date().toISOString(), ":empty": {} 
+            ":s": "DELETED", 
+            ":ttl": ttl, 
+            ":n": "ANONYMIZED_USER", 
+            ":e": `gdpr_deleted_${userId}@mediconnect.local`, 
+            ":a": null, 
+            ":now": new Date().toISOString(), 
+            ":empty": {},
+            ":null": null 
         }
     }));
 
@@ -403,7 +413,9 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
         
         const filesToDelete = [
             `patient/${userId}/selfie_verified.jpg`,
-            `patient/${userId}/profile_picture.jpg`
+            `patient/${userId}/selfie_verified.png`,
+            `patient/${userId}/profile_picture.jpg`,
+            `patient/${userId}/profile_picture.png`
         ];
 
         for (const key of filesToDelete) {
