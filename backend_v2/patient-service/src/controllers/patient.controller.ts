@@ -486,6 +486,9 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
  * 6. SEARCH PATIENTS (FHIR Interoperability)
  */
 export const searchPatients = catchAsync(async (req: Request, res: Response) => {
+    if (!(req as any).user?.isDoctor) {
+        return res.status(403).json({ error: "Access Denied: Only medical practitioners can search the directory." });
+    }
     const region = extractRegion(req);
     const dynamicDb = getRegionalClient(region);
     const { name } = req.query;
