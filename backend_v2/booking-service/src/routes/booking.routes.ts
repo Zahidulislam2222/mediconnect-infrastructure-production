@@ -8,6 +8,10 @@ import {
     updateAppointment 
 } from '../controllers/booking.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
+
+// 🟢 ADD THIS IMPORT
+import { requireIdentityVerification } from '../middleware/verification.middleware'; 
+
 import {
     getPatientBilling,
     payBill,
@@ -17,45 +21,30 @@ import {
 const router = Router();
 
 // =============================================================================
-// 🏥 CLINICAL BOOKING ROUTES (Protected)
+// 🏥 CLINICAL BOOKING ROUTES (Protected & Verified)
 // =============================================================================
 
-// 1. Create Appointment (POST)
-router.post('/appointments', authMiddleware, createBooking);
-
-// 2. Fetch Appointments (GET) - Handles both ?patientId and ?doctorId
-// 🟢 FIXED: Named neutrally so it doesn't look like a security flaw
-router.get('/appointments', authMiddleware, getAppointments);
-
-// 3. Update Status / Check-In (PUT)
-router.put('/appointments', authMiddleware, updateAppointment);
-
-// 4. Cancel Appointment (POST)
-router.post('/appointments/cancel', authMiddleware, cancelBookingUser);
+// 🟢 ADD requireIdentityVerification to all of these
+router.post('/appointments', authMiddleware, requireIdentityVerification, createBooking);
+router.get('/appointments', authMiddleware, requireIdentityVerification, getAppointments);
+router.put('/appointments', authMiddleware, requireIdentityVerification, updateAppointment);
+router.post('/appointments/cancel', authMiddleware, requireIdentityVerification, cancelBookingUser);
 
 
 // =============================================================================
-// 💳 BILLING & ANALYTICS
+// 💳 BILLING & ANALYTICS (Protected & Verified)
 // =============================================================================
 
-// 5. Patient Billing History
-router.get('/billing', authMiddleware, getPatientBilling);
-
-// 6. Execute Payment
-router.post('/billing/pay', authMiddleware, payBill);
-
-// 7. Download Receipt
-router.get('/billing/receipt/:appointmentId', authMiddleware, getReceipt);
-
-// 8. Doctor Revenue Analytics
-router.get('/analytics/revenue', authMiddleware, getDoctorAnalytics);
+router.get('/billing', authMiddleware, requireIdentityVerification, getPatientBilling);
+router.post('/billing/pay', authMiddleware, requireIdentityVerification, payBill);
+router.get('/billing/receipt/:appointmentId', authMiddleware, requireIdentityVerification, getReceipt);
+router.get('/analytics/revenue', authMiddleware, requireIdentityVerification, getDoctorAnalytics);
 
 
 // =============================================================================
-// ⚙️ SYSTEM & MAINTENANCE (Internal)
+// ⚙️ SYSTEM & MAINTENANCE (Internal - No User Auth Needed)
 // =============================================================================
 
-// 🟢 FIXED: Grouped under /system and still relies on Internal Secret in controller
 router.post('/system/cleanup-no-shows', cleanupAppointments);
 
 export default router;

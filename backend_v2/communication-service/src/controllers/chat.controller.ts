@@ -1,4 +1,4 @@
-import { Router, Request, Response } from "express";
+import { Request, Response, NextFunction } from "express";
 import {
     ApiGatewayManagementApi,
     PostToConnectionCommand
@@ -8,7 +8,9 @@ import { getRegionalClient } from '../../../shared/aws-config';
 import { mapToFHIRCommunication, scrubPII } from "../utils/fhir-mapper";
 import { writeAuditLog } from "../../../shared/audit";
 
-const router = Router();
+const catchAsync = (fn: any) => (req: Request, res: Response, next: NextFunction) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+};
 
 const DB_TABLES = {
     HISTORY: "mediconnect-chat-history",
@@ -54,7 +56,7 @@ const normalizeWsEvent = async (req: Request) => {
     };
 };
 
-router.get("/history", async (req: Request, res: Response) => {
+export const getChatHistory = catchAsync(async (req: Request, res: Response) => {
     try {
         const region = extractRegion(req);
         const regionalDb = getRegionalClient(region);
@@ -98,7 +100,7 @@ router.get("/history", async (req: Request, res: Response) => {
     }
 });
 
-router.post("/ws-event", async (req: Request, res: Response) => {
+export const handleWsEventHttp = catchAsync(async (req: Request, res: Response) => {
     try {
         const event = await normalizeWsEvent(req);
         if (!event.userId && event.routeKey !== "$disconnect") return res.status(401).json({ message: "Unauthorized" });
@@ -204,5 +206,3 @@ export const handleWebSocketEvent = async (event: any) => {
             return { statusCode: 400, body: { error: "Unknown Route" } };
     }
 };
-
-export const chatController = router;

@@ -153,9 +153,17 @@ export const getDoctorAnalytics = async (req: Request, res: Response) => {
         const region = extractRegion(req);
         const regionalDb = getRegionalClient(region);
 
-        // 🟢 1. GET PERIOD FROM QUERY
         const { doctorId, period = "6m" } = req.query; 
+        const authReq = req as AuthRequest;
+        const requesterId = authReq.user?.sub || authReq.user?.id;
+
         if (!doctorId) return res.status(400).json({ error: "Missing Doctor ID" });
+
+        // 🟢 SECURITY FIX (IDOR): Only the doctor can view their own revenue
+        if (requesterId !== doctorId) {
+            await writeAuditLog(requesterId || "SYSTEM", String(doctorId), "ILLEGAL_ANALYTICS_ACCESS", "Attempted to view other doctor's financials", { region, ipAddress: req.ip });
+            return res.status(403).json({ error: "Unauthorized access to financial analytics." });
+        }
 
         // 🟢 2. DYNAMIC FILTER LOGIC
         let keyCondition = "doctorId = :did";

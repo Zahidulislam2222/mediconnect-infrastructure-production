@@ -6,8 +6,7 @@ import dotenv from "dotenv";
 import rateLimit from "express-rate-limit";
 import { GetParametersCommand } from "@aws-sdk/client-ssm";
 
-import { chatController } from "./controllers/chat.controller";
-import { videoController } from "./controllers/video.controller";
+import { communicationRoutes } from "./routes/communication.routes";
 import { aiRoutes } from "./routes/ai.routes"; 
 import { authMiddleware } from './middleware/auth.middleware';
 import { getRegionalSSMClient } from '../../shared/aws-config'; 
@@ -98,9 +97,8 @@ app.use(morgan((tokens, req, res) => {
 }, { skip: (req) => req.url === '/health' || req.method === 'OPTIONS' }));
 
 // Apply auth middleware to all clinical routes
-app.use("/chat", authMiddleware, chatController);
-app.use("/video", authMiddleware, videoController);
-app.use("/ai", aiRoutes); 
+app.use("/", communicationRoutes);
+app.use("/ai", aiRoutes);
 
 // --- 4. 100% COMPLIANT VAULT SYNC ---
 async function loadSecrets() {

@@ -1,4 +1,4 @@
-import { Router, Request, Response } from "express";
+import { Request, Response, NextFunction } from "express";
 import { ChimeSDKMeetingsClient, CreateMeetingCommand, CreateAttendeeCommand, DeleteMeetingCommand } from "@aws-sdk/client-chime-sdk-meetings";
 import { ChimeSDKMediaPipelinesClient, CreateMediaCapturePipelineCommand, DeleteMediaCapturePipelineCommand } from "@aws-sdk/client-chime-sdk-media-pipelines";
 import { getRegionalClient } from '../../../shared/aws-config';
@@ -6,7 +6,9 @@ import { PutCommand, GetCommand, DeleteCommand, UpdateCommand } from "@aws-sdk/l
 import { v4 as uuidv4 } from "uuid";
 import { writeAuditLog } from "../../../shared/audit";
 
-const router = Router();
+const catchAsync = (fn: any) => (req: Request, res: Response, next: NextFunction) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+};
 
 const TABLE_SESSIONS = process.env.TABLE_SESSIONS || "mediconnect-video-sessions";
 const BASE_RECORDING_BUCKET = process.env.RECORDING_BUCKET || "mediconnect-consultation-recordings";
@@ -18,7 +20,7 @@ export const extractRegion = (req: Request): string => {
 };
 
 // POST /video/session - Create or Join a meeting
-router.post("/session", async (req: Request, res: Response) => {
+export const createOrJoinSession = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req);
     const regionalDb = getRegionalClient(region);
     
@@ -29,7 +31,7 @@ router.post("/session", async (req: Request, res: Response) => {
     const chimeClient = new ChimeSDKMeetingsClient({ region: targetAwsRegion });
     const pipelineClient = new ChimeSDKMediaPipelinesClient({ region: targetAwsRegion });
 
-    const { appointmentId } = req.body;
+    const { appointmentId, consentToRecord } = req.body;
     const userId = (req as any).user?.sub; 
 
     if (!appointmentId || !userId) return res.status(400).json({ error: "Missing appointmentId or User ID" });
@@ -62,9 +64,10 @@ router.post("/session", async (req: Request, res: Response) => {
             meeting = chimeRes.Meeting;
 
             let pipelineId = null;
-            if (meeting?.MeetingArn) {
-                try {
-                    const pipelineRes = await pipelineClient.send(new CreateMediaCapturePipelineCommand({
+
+    if (meeting?.MeetingArn && consentToRecord === true) {
+        try {
+            const pipelineRes = await pipelineClient.send(new CreateMediaCapturePipelineCommand({
                         SourceType: "ChimeSdkMeeting",
                         SourceArn: meeting.MeetingArn,
                         SinkType: "S3Bucket",
@@ -78,8 +81,9 @@ router.post("/session", async (req: Request, res: Response) => {
                         }
                     }));
                     pipelineId = pipelineRes.MediaCapturePipeline?.MediaPipelineId;
-                } catch (recErr: any) {
-                    console.error("Failed to start recording:", recErr.message);
+            await writeAuditLog(userId, apt.patientId, "RECORDING_STARTED", "Patient consented to video recording", { region });
+        } catch (recErr: any) {
+            console.error("Failed to start recording:", recErr.message);
                 }
             }
 
@@ -116,7 +120,7 @@ router.post("/session", async (req: Request, res: Response) => {
     }
 });
 
-router.delete("/session", async (req: Request, res: Response) => {
+export const endSession = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req);
     const regionalDb = getRegionalClient(region);
     const targetAwsRegion = region.toUpperCase() === 'EU' ? 'eu-central-1' : 'us-east-1';
@@ -126,53 +130,50 @@ router.delete("/session", async (req: Request, res: Response) => {
 
     const appointmentId = req.query.appointmentId as string;
     const userId = (req as any).user?.sub;
-    const groups = (req as any).user?.['cognito:groups'] || [];
-    const userRole = groups.includes('doctor') ? 'doctor' : 'patient';
+    const isDoctor = (req as any).user?.isDoctor; 
 
     try {
+
+        const aptRes = await regionalDb.send(new GetCommand({
+            TableName: "mediconnect-appointments",
+            Key: { appointmentId }
+        }));
+
+        if (!aptRes.Item || (aptRes.Item.patientId !== userId && aptRes.Item.doctorId !== userId)) {
+            return res.status(403).json({ error: "Unauthorized to end this session." });
+        }
+
+        if (!isDoctor) {
+            await writeAuditLog(userId, aptRes.Item.patientId, "ILLEGAL_MEETING_TERMINATION", "Patient attempted to destroy Chime meeting", { region, ipAddress: req.ip });
+            return res.status(403).json({ error: "Only the presiding physician can end the consultation session." });
+        }
+
         const dbRes = await regionalDb.send(new GetCommand({
             TableName: TABLE_SESSIONS, Key: { appointmentId }
         }));
         const session = dbRes.Item;
 
-        const aptRes = await regionalDb.send(new GetCommand({
-    TableName: "mediconnect-appointments",
-    Key: { appointmentId }
-}));
-if (!aptRes.Item || (aptRes.Item.patientId !== userId && aptRes.Item.doctorId !== userId)) {
-    return res.status(403).json({ error: "Unauthorized to end this session." });
-}
-
         if (session?.pipelineId) {
-            try {
-                await pipelineClient.send(new DeleteMediaCapturePipelineCommand({ MediaPipelineId: session.pipelineId }));
-            } catch (e) { console.warn("Failed to stop recording pipeline", e); }
+            try { await pipelineClient.send(new DeleteMediaCapturePipelineCommand({ MediaPipelineId: session.pipelineId })); } catch (e) { }
         }
 
         if (session?.meeting?.MeetingId) {
-            try {
-                await chimeClient.send(new DeleteMeetingCommand({ MeetingId: session.meeting.MeetingId }));
-            } catch (e) { console.warn("Meeting already deleted"); }
-
+            try { await chimeClient.send(new DeleteMeetingCommand({ MeetingId: session.meeting.MeetingId })); } catch (e) { }
             await regionalDb.send(new DeleteCommand({ TableName: TABLE_SESSIONS, Key: { appointmentId } }));
-
-            const clinicalStatus = userRole === 'doctor' ? 'fulfilled' : 'arrived';
             
             await regionalDb.send(new UpdateCommand({
                 TableName: "mediconnect-appointments", Key: { appointmentId },
                 UpdateExpression: "SET #res.#stat = :s, #s = :legacyStatus",
                 ExpressionAttributeNames: { "#res": "resource", "#stat": "status", "#s": "status" },
-                ExpressionAttributeValues: { ":s": clinicalStatus, ":legacyStatus": userRole === 'doctor' ? "COMPLETED" : "CONFIRMED" }
+                ExpressionAttributeValues: { ":s": "fulfilled", ":legacyStatus": "COMPLETED" }
             }));
 
             await writeAuditLog(userId, userId, "VIDEO_SESSION_ENDED", `Meeting ${appointmentId} ended`, { region, ipAddress: req.ip });
         }
 
-        res.json({ success: true, message: "Meeting ended and billing stopped" });
+        res.json({ success: true, message: "Meeting ended successfully" });
     } catch (error: any) {
         console.error("End Session Error:", error);
         res.status(500).json({ error: "Failed to end session" });
     }
 });
-
-export const videoController = router;

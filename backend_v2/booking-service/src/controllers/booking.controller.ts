@@ -55,23 +55,13 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
     let paymentIntentId: string | null = null;
     let lockKey: string | null = null;
 
-    const {
-        patientName, doctorId, doctorName, timeSlot, paymentToken,
-        priority = "Low", reason = "General Checkup"
-    } = req.body;
+    const { patientName, doctorId, doctorName, timeSlot, paymentToken, priority = "Low", reason = "General Checkup" } = req.body;
 
-    // 🟢 SECURITY FIX: Stop trusting req.body.patientId! Hackers can spoof it.
-    // Strictly use the Verified Token ID from Cognito.
     const authReq = req as AuthRequest;
     const patientId = authReq.user?.sub || authReq.user?.id;
     
-    if (!patientId) {
-        return res.status(401).json({ message: "Identity Spoofing Detected. Missing verified token." });
-    }
-
-    if (!timeSlot || !doctorId) {
-        return res.status(400).json({ message: "Missing required booking fields" });
-    }
+    if (!patientId) return res.status(401).json({ message: "Identity Spoofing Detected. Missing verified token." });
+    if (!timeSlot || !doctorId) return res.status(400).json({ message: "Missing required booking fields" });
 
     const normalizedTime = normalizeTimeSlot(timeSlot);
     lockKey = `${doctorId}#${normalizedTime}`;
@@ -79,22 +69,21 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
     const appointmentId = randomUUID();
     const timestamp = new Date().toISOString();
 
-    // 1. Data Enrichment (Age, Avatar)
     let patientAge = "N/A";
     let patientAvatar: string | null = null;
     let amountToCharge = 5000; 
 
-    // 1. STRICT EXISTENCE & REGION CHECK
     const [patientRes, doctorRes] = await Promise.all([
         docClient.send(new GetCommand({ TableName: TABLE_PATIENTS, Key: { patientId } })),
         docClient.send(new GetCommand({ TableName: TABLE_DOCTORS, Key: { doctorId } }))
     ]);
 
-    if (!patientRes.Item || patientRes.Item.status === 'DELETED') {
-        return res.status(401).json({ message: "Patient account invalid or deleted. Booking aborted." });
+    if (!patientRes.Item || patientRes.Item.status === 'DELETED' || patientRes.Item.isIdentityVerified !== true) {
+        return res.status(403).json({ message: "HIPAA Block: Patient identity not verified." });
     }
-    if (!doctorRes.Item || doctorRes.Item.verificationStatus === 'DELETED') {
-        return res.status(404).json({ message: "Doctor not found in your region or no longer available." });
+
+    if (!doctorRes.Item || doctorRes.Item.verificationStatus !== 'APPROVED') {
+        return res.status(404).json({ message: "Doctor is currently unavailable or unverified." });
     }
 
     // Safely extract data
@@ -276,48 +265,50 @@ export const getAppointments = catchAsync(async (req: Request, res: Response) =>
     const docClient = getRegionalClient(region);
     
     const { doctorId, patientId, startKey } = req.query;
+    const authReq = req as AuthRequest;
+    const requesterId = authReq.user?.sub || authReq.user?.id;
+    const isDoctor = (req as any).user?.isDoctor;
 
     let exclusiveStartKey: any = undefined;
     if (startKey) {
-        try {
-            exclusiveStartKey = JSON.parse(decodeURIComponent(startKey as string));
-        } catch (e) {
-            console.error("Malformed startKey ignored");
-        }
+        try { exclusiveStartKey = JSON.parse(decodeURIComponent(startKey as string)); } catch (e) { }
     }
 
     if (patientId) {
+        // 🟢 IDOR FIX: Only the owner or a doctor can view a patient's history
+        if (patientId !== requesterId && !isDoctor) return res.status(403).json({ error: "Unauthorized" });
+
         const command = new QueryCommand({
-            TableName: TABLE_APPOINTMENTS,
-            IndexName: "PatientIndex",
+            TableName: TABLE_APPOINTMENTS, IndexName: "PatientIndex",
             KeyConditionExpression: "patientId = :pid",
             ExpressionAttributeValues: { ":pid": patientId },
-            ScanIndexForward: false,
-            Limit: 50,
-            ExclusiveStartKey: exclusiveStartKey 
+            ScanIndexForward: false, Limit: 50, ExclusiveStartKey: exclusiveStartKey 
         });
         const response = await docClient.send(command);
-        return res.status(200).json({ 
-            existingBookings: response.Items || [],
-            lastEvaluatedKey: response.LastEvaluatedKey
-         });
+        return res.status(200).json({ existingBookings: response.Items ||[], lastEvaluatedKey: response.LastEvaluatedKey });
     }
 
     if (doctorId) {
         const bookingCommand = new QueryCommand({
-            TableName: TABLE_APPOINTMENTS,
-            IndexName: "DoctorIndex",
+            TableName: TABLE_APPOINTMENTS, IndexName: "DoctorIndex",
             KeyConditionExpression: "doctorId = :did",
             ExpressionAttributeValues: { ":did": doctorId },
-            ScanIndexForward: false, 
-            Limit: 50,               
-            ExclusiveStartKey: exclusiveStartKey 
+            ScanIndexForward: false, Limit: 50, ExclusiveStartKey: exclusiveStartKey 
         });
         const bookingRes = await docClient.send(bookingCommand);
-        return res.status(200).json({ 
-            existingBookings: bookingRes.Items || [],
-            lastEvaluatedKey: bookingRes.LastEvaluatedKey 
-        });
+        let bookings = bookingRes.Items ||[];
+
+        if (!isDoctor || requesterId !== doctorId) {
+            bookings = bookings.map(b => ({
+                appointmentId: b.appointmentId,
+                doctorId: b.doctorId,
+                timeSlot: b.timeSlot,
+                resource: { start: b.resource?.start },
+                status: b.status // Only show taken/cancelled status, hide name/reason!
+            }));
+        }
+
+        return res.status(200).json({ existingBookings: bookings, lastEvaluatedKey: bookingRes.LastEvaluatedKey });
     }
 
     res.status(400).json({ error: "Missing doctorId or patientId" });
@@ -394,6 +385,18 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
     if (!apt) return res.status(404).json({ message: "Appointment not found" });
     if (apt.patientId !== patientId) return res.status(403).json({ message: "Identity mismatch." });
 
+    // 🟢 SECURITY FIX 1: Prevent Post-Consultation Refunds (Fraud Prevention)
+    if (apt.status === 'COMPLETED' || apt.status === 'IN_PROGRESS') {
+        await writeAuditLog(patientId, patientId, "FRAUD_ATTEMPT", "Tried to refund a completed session", { region, ipAddress: req.ip });
+        return res.status(400).json({ message: "Cannot cancel an appointment that is already in progress or completed." });
+    }
+
+    // 🟢 SECURITY FIX 2: Prevent Time-Travel Refunds
+    const aptTime = new Date(apt.timeSlot).getTime();
+    if (aptTime <= Date.now()) {
+        return res.status(400).json({ message: "Cannot cancel past appointments." });
+    }
+
     // 1. Refund Logic
     let refundId = "NOT_APPLICABLE";
     if (apt.paymentId && apt.paymentId !== "TEST_MODE") {
@@ -469,8 +472,57 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
     const docClient = getRegionalClient(region);
     
     const { appointmentId, patientArrived, status } = req.body;
+    const authReq = req as AuthRequest;
+    const requesterId = authReq.user?.sub || authReq.user?.id;
+    const isDoctor = (req as any).user?.isDoctor; // 🟢 Ensure this is defined here!
 
     if (!appointmentId) return res.status(400).json({ message: "Missing appointmentId" });
+
+    const existing = await docClient.send(new GetCommand({ TableName: TABLE_APPOINTMENTS, Key: { appointmentId } }));
+    if (!existing.Item) return res.status(404).json({ message: "Not found" });
+
+    // 🟢 Verify Ownership Before Updating
+    if (existing.Item.patientId !== requesterId && existing.Item.doctorId !== requesterId) {
+        await writeAuditLog(requesterId || "SYSTEM", existing.Item.patientId, "HIJACK_ATTEMPT", "User tried to modify another user's appointment", { region, ipAddress: req.ip });
+        return res.status(403).json({ message: "Unauthorized to modify this appointment" });
+    }
+
+    if (!isDoctor && status) {
+        await writeAuditLog(requesterId || "SYSTEM", existing.Item.patientId, "FRAUD_ATTEMPT", "Patient tried to alter appointment status directly", { region, ipAddress: req.ip });
+        return res.status(403).json({ message: "Security Block: Patients cannot manually change appointment statuses." });
+    }
+
+    if (status === 'CANCELLED' || status === 'CANCELLED_NO_SHOW') {
+        let refundId = "REFUND_FAILED";
+
+        if (existing.Item.paymentId && existing.Item.paymentId !== "TEST_MODE") {
+            try {
+                const stripeKey = await getSSMParameter(STRIPE_SECRET_NAME, region, true);
+                if (stripeKey) {
+                    const stripe = new Stripe(stripeKey);
+                    const refund = await stripe.refunds.create({ payment_intent: existing.Item.paymentId });
+                    refundId = refund.id;
+                    
+                    // Log the refund transaction
+                    await docClient.send(new PutCommand({
+                        TableName: TABLE_TRANSACTIONS,
+                        Item: {
+                            billId: randomUUID(), referenceId: appointmentId,
+                            patientId: existing.Item.patientId, doctorId: existing.Item.doctorId,
+                            type: "REFUND", amount: -(existing.Item.amountPaid || 0),
+                            currency: "USD", status: "PROCESSED",
+                            createdAt: new Date().toISOString(), description: "Doctor requested cancellation"
+                        }
+                    }));
+                }
+            } catch (e: any) {
+                console.error("Stripe Refund Failed during Doctor Cancel:", e.message);
+            }
+        }
+
+        await cancelAppointment(existing.Item, status, refundId, region);
+        return res.status(200).json({ message: "Appointment cancelled, refunded, and schedule unlocked." });
+    }
 
     let updateExpression = "set lastUpdated = :now";
     const expressionAttributeValues: any = { ":now": new Date().toISOString() };

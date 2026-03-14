@@ -21,7 +21,10 @@ const PII_REGEX = {
  */
 export const scrubPII = (text: string): string => {
     if (!text) return "";
-    return text
+
+    const safeText = text.length > 10000 ? text.substring(0, 10000) + "...[TRUNCATED]" : text;
+
+    return safeText
         .replace(PII_REGEX.SSN, "[REDACTED_ID]")
         .replace(PII_REGEX.CREDIT_CARD, "[REDACTED_PAYMENT]")
         .replace(PII_REGEX.PHONE, "[REDACTED_CONTACT]")
