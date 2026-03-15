@@ -486,11 +486,25 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
  * 6. SEARCH PATIENTS (FHIR Interoperability)
  */
 export const searchPatients = catchAsync(async (req: Request, res: Response) => {
-    if (!(req as any).user?.isDoctor) {
-        return res.status(403).json({ error: "Access Denied: Only medical practitioners can search the directory." });
-    }
+    const user = (req as any).user;
     const region = extractRegion(req);
     const dynamicDb = getRegionalClient(region);
+
+    if (!user?.isDoctor) {
+        return res.status(403).json({ error: "Access Denied: Only medical practitioners can search the directory." });
+    }
+
+    // 🟢 SECURITY FIX: Manual Verification Gate (Replaces Middleware)
+    const docCheck = await dynamicDb.send(new GetCommand({
+        TableName: process.env.DYNAMO_TABLE_DOCTORS || 'mediconnect-doctors',
+        Key: { doctorId: user.id }
+    }));
+
+    if (!docCheck.Item || docCheck.Item.verificationStatus !== 'APPROVED') {
+        await writeAuditLog(user.id, "SYSTEM", "UNVERIFIED_SEARCH_ATTEMPT", "Unapproved doctor attempted to search patients", { region, ipAddress: req.ip });
+        return res.status(403).json({ error: "Compliance Block: You must be a fully verified doctor to search patient records." });
+    }
+
     const { name } = req.query;
 
     const command = new ScanCommand({
@@ -502,19 +516,39 @@ export const searchPatients = catchAsync(async (req: Request, res: Response) => 
 
     const result = await dynamicDb.send(command);
     
-    await writeAuditLog((req as any).user?.id || "SYSTEM", "MULTIPLE", "SEARCH_PATIENT", "Database search performed", {
+    await writeAuditLog(user.id, "MULTIPLE", "SEARCH_PATIENT", "Database search performed", {
         region, ipAddress: req.ip
     });
 
-    res.json(result.Items || []);
+    res.json(result.Items ||[]);
 });
 
 /**
  * 7. GET DEMOGRAPHICS (Analytics Dashboard)
  */
 export const getDemographics = catchAsync(async (req: Request, res: Response) => {
+    const user = (req as any).user;
     const region = extractRegion(req);
     const dynamicDb = getRegionalClient(region);
+
+    // 🟢 SECURITY FIX: Strict Role & Verification Checking
+    if (user?.isDoctor) {
+        const docCheck = await dynamicDb.send(new GetCommand({
+            TableName: process.env.DYNAMO_TABLE_DOCTORS || 'mediconnect-doctors',
+            Key: { doctorId: user.id }
+        }));
+        if (!docCheck.Item || docCheck.Item.verificationStatus !== 'APPROVED') {
+            return res.status(403).json({ error: "Access Denied: Doctor not verified." });
+        }
+    } else {
+        const patCheck = await dynamicDb.send(new GetCommand({
+            TableName: CONFIG.DYNAMO_TABLE,
+            Key: { patientId: user?.id }
+        }));
+        if (!patCheck.Item || patCheck.Item.isIdentityVerified !== true) {
+            return res.status(403).json({ error: "Access Denied: Patient identity not verified." });
+        }
+    }
 
     const command = new ScanCommand({
         TableName: CONFIG.DYNAMO_TABLE,
@@ -523,7 +557,7 @@ export const getDemographics = catchAsync(async (req: Request, res: Response) =>
     });
 
     const response = await dynamicDb.send(command);
-    const items = response.Items || [];
+    const items = response.Items ||[];
 
     const ageGroups: Record<string, number> = { '18-30': 0, '31-50': 0, '51-70': 0, '70+': 0 };
     let patientCount = 0;
@@ -551,12 +585,32 @@ export const getDemographics = catchAsync(async (req: Request, res: Response) =>
  * 8. GET PATIENT BY ID (HIPAA Compliant Minimum Necessary Access)
  */
 export const getPatientById = catchAsync(async (req: Request, res: Response) => {
+    const user = (req as any).user;
     const region = extractRegion(req);
     const dynamicDb = getRegionalClient(region);
     
     const requestedId = req.params.userId || req.params.id;
-    const requesterId = (req as any).user?.id;
-    const isDoctor = (req as any).user?.isDoctor;
+    const requesterId = user?.id;
+    const isDoctor = user?.isDoctor;
+
+    // 🟢 SECURITY FIX: Manual Verification Gate
+    if (isDoctor) {
+        const docCheck = await dynamicDb.send(new GetCommand({
+            TableName: process.env.DYNAMO_TABLE_DOCTORS || 'mediconnect-doctors',
+            Key: { doctorId: requesterId }
+        }));
+        if (!docCheck.Item || docCheck.Item.verificationStatus !== 'APPROVED') {
+            return res.status(403).json({ error: "Compliance Block: Doctor not verified." });
+        }
+    } else {
+        const patCheck = await dynamicDb.send(new GetCommand({
+            TableName: CONFIG.DYNAMO_TABLE,
+            Key: { patientId: requesterId }
+        }));
+        if (!patCheck.Item || patCheck.Item.isIdentityVerified !== true) {
+            return res.status(403).json({ error: "Compliance Block: Patient not verified." });
+        }
+    }
 
     // 🟢 HIPAA ACCESS CONTROL: Only the Owner OR a Doctor with an active relationship
     if (requestedId !== requesterId) {
@@ -567,7 +621,7 @@ export const getPatientById = catchAsync(async (req: Request, res: Response) => 
         // 🟢 HIPAA "Minimum Necessary" Rule: Check Clinical Relationship
         const relationshipCheck = await dynamicDb.send(new QueryCommand({
             TableName: process.env.APPOINTMENT_TABLE || "mediconnect-appointments",
-            IndexName: "PatientIndex", // Uses the GSI to look up the patient
+            IndexName: "PatientIndex", 
             KeyConditionExpression: "patientId = :pid",
             FilterExpression: "doctorId = :did AND #st <> :cancelled",
             ExpressionAttributeNames: { "#st": "status" },
