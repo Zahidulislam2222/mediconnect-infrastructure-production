@@ -61,7 +61,9 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
     const patientId = authReq.user?.sub || authReq.user?.id;
     
     if (!patientId) return res.status(401).json({ message: "Identity Spoofing Detected. Missing verified token." });
-    if (!timeSlot || !doctorId) return res.status(400).json({ message: "Missing required booking fields" });
+    if (!timeSlot || !doctorId || !paymentToken) {
+        return res.status(400).json({ message: "Missing required booking fields or payment method." });
+    }
 
     const normalizedTime = normalizeTimeSlot(timeSlot);
     lockKey = `${doctorId}#${normalizedTime}`;
@@ -94,9 +96,9 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         const dob = new Date(patientRes.Item.dob);
         patientAge = Math.abs(new Date(Date.now() - dob.getTime()).getUTCFullYear() - 1970).toString();
     }
-    if (doctorRes.Item.consultationFee) {
-        amountToCharge = Math.round(Number(doctorRes.Item.consultationFee) * 100);
-    }
+    let fee = Number(doctorRes.Item.consultationFee);
+    if (isNaN(fee) || fee < 0) fee = 50; // Fallback to safe default
+    amountToCharge = Math.round(fee * 100);
 
     // 2. Atomic Locking (Condition: attribute_not_exists)
     try {
@@ -126,10 +128,14 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         const paymentIntent = await stripeInstance.paymentIntents.create({
             amount: amountToCharge,
             currency: "usd",
-            payment_method: paymentToken || "pm_card_visa",
+            payment_method: paymentToken,
             confirm: true,
             capture_method: 'manual', // CRITICAL: Do not take money yet
-            metadata: { appointmentId, doctorId, patientId, billId: transactionId, type: 'BOOKING_FEE' },
+            metadata: { 
+            appointmentId, doctorId, patientId, 
+            billId: transactionId, type: 'BOOKING_FEE', 
+            region 
+            },
             automatic_payment_methods: { enabled: true, allow_redirects: 'never' }
         });
         paymentIntentId = paymentIntent.id;
@@ -275,8 +281,20 @@ export const getAppointments = catchAsync(async (req: Request, res: Response) =>
     }
 
     if (patientId) {
-        // 🟢 IDOR FIX: Only the owner or a doctor can view a patient's history
-        if (patientId !== requesterId && !isDoctor) return res.status(403).json({ error: "Unauthorized" });
+    if (patientId !== requesterId) {
+        if (!isDoctor) return res.status(403).json({ error: "Unauthorized" });
+
+        const graphCommand = new GetCommand({
+            TableName: TABLE_GRAPH,
+            Key: { PK: `DOCTOR#${requesterId}`, SK: `PATIENT#${patientId}` }
+        });
+        const graphRes = await docClient.send(graphCommand);
+        
+        if (!graphRes.Item) {
+            await writeAuditLog(requesterId as string, patientId as string, "HIPAA_VIOLATION_ATTEMPT", "Attempted to view ePHI of an unaffiliated patient", { region, ipAddress: req.ip });
+            return res.status(403).json({ error: "HIPAA Block: No active treatment relationship with this patient." });
+        }
+    }
 
         const command = new QueryCommand({
             TableName: TABLE_APPOINTMENTS, IndexName: "PatientIndex",
@@ -318,7 +336,6 @@ export const cleanupAppointments = catchAsync(async (req: Request, res: Response
     const region = extractRegion(req);
     const docClient = getRegionalClient(region);
     
-    // 1. Security Check
     const secretHeader = req.headers['x-internal-secret'];
     const validSecret = await getSSMParameter(CLEANUP_SECRET_PARAM, region, true);
 
@@ -326,44 +343,51 @@ export const cleanupAppointments = catchAsync(async (req: Request, res: Response
         return res.status(403).json({ error: "Unauthorized" });
     }
 
-    const scanRes = await docClient.send(new QueryCommand({
-    TableName: TABLE_APPOINTMENTS,
-    IndexName: "StatusIndex", 
-    KeyConditionExpression: "#s = :confirmed", 
-    ExpressionAttributeNames: { "#s": "status" },
-    ExpressionAttributeValues: { ":confirmed": "CONFIRMED" },
-    Limit: 100 
-}));
-
-    const appointments = scanRes.Items || [];
     const now = new Date();
     const stripeKey = await getSSMParameter(STRIPE_SECRET_NAME, region, true);
     const stripe = stripeKey ? new Stripe(stripeKey) : null;
     let processed = 0;
+    let exclusiveStartKey: any = undefined;
 
-    for (const apt of appointments) {
-        if (!apt.timeSlot) continue;
-        const aptTime = new Date(apt.timeSlot);
-        const diffMinutes = Math.floor((now.getTime() - aptTime.getTime()) / 60000);
+    // 🟢 PAGINATION FIX
+    do {
+        const scanRes: any = await docClient.send(new QueryCommand({
+            TableName: TABLE_APPOINTMENTS,
+            IndexName: "StatusIndex", 
+            KeyConditionExpression: "#s = :confirmed", 
+            ExpressionAttributeNames: { "#s": "status" },
+            ExpressionAttributeValues: { ":confirmed": "CONFIRMED" },
+            Limit: 100,
+            ExclusiveStartKey: exclusiveStartKey
+        }));
 
-        if (diffMinutes >= 10 && !apt.patientArrived) {
-            await cancelAppointment(apt, "CANCELLED_NO_SHOW", "FAILED", region);
-            processed++;
-            continue;
-        }
+        const appointments = scanRes.Items ||[];
+        exclusiveStartKey = scanRes.LastEvaluatedKey;
 
-        if (diffMinutes >= 30 && apt.patientArrived) {
-            let refundId = "REFUND_FAILED";
-            if (stripe && apt.paymentId && apt.paymentId !== "TEST_MODE") {
-                try {
-                    const refund = await stripe.refunds.create({ payment_intent: apt.paymentId });
-                    refundId = refund.id;
-                } catch (e) { console.error("Refund failed", e); }
+        for (const apt of appointments) {
+            if (!apt.timeSlot) continue;
+            const aptTime = new Date(apt.timeSlot);
+            const diffMinutes = Math.floor((now.getTime() - aptTime.getTime()) / 60000);
+
+            if (diffMinutes >= 10 && !apt.patientArrived) {
+                await cancelAppointment(apt, "CANCELLED_NO_SHOW", "FAILED", region);
+                processed++;
+                continue;
             }
-            await cancelAppointment(apt, "CANCELLED_DOCTOR_FAULT", refundId, region);
-            processed++;
+
+            if (diffMinutes >= 30 && apt.patientArrived) {
+                let refundId = "REFUND_FAILED";
+                if (stripe && apt.paymentId && apt.paymentId !== "TEST_MODE") {
+                    try {
+                        const refund = await stripe.refunds.create({ payment_intent: apt.paymentId });
+                        refundId = refund.id;
+                    } catch (e) { console.error("Refund failed", e); }
+                }
+                await cancelAppointment(apt, "CANCELLED_DOCTOR_FAULT", refundId, region);
+                processed++;
+            }
         }
-    }
+    } while (exclusiveStartKey);
 
     res.status(200).json({ message: "Cleanup Complete", processed });
 });
@@ -414,16 +438,18 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
     }
 
     // 2. Update Appointment Status
-    let updateExpression = "set #s = :s";
-    const expressionAttributeValues: any = { ":s": "CANCELLED" };
-    const expressionAttributeNames: any = { "#s": "status" };
-
-    if (apt.resource) {
-        updateExpression += ", #res.#rs = :cancelled";
-        expressionAttributeNames["#res"] = "resource";
-        expressionAttributeNames["#rs"] = "status";
-        expressionAttributeValues[":cancelled"] = "cancelled";
+    let fhirResource = apt.resource;
+    if (fhirResource) {
+        fhirResource.status = "cancelled"; // Root status
+        if (Array.isArray(fhirResource.participant)) {
+            // FHIR Spec: Participants decline, they do not "cancel"
+            fhirResource.participant.forEach((p: any) => p.status = "declined"); 
+        }
     }
+
+    let updateExpression = "set #s = :s, #res = :resource";
+    const expressionAttributeValues: any = { ":s": "CANCELLED", ":resource": fhirResource || null };
+    const expressionAttributeNames: any = { "#s": "status", "#res": "resource" };
 
     await docClient.send(new UpdateCommand({
         TableName: TABLE_APPOINTMENTS, Key: { appointmentId },
@@ -452,17 +478,22 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
     } catch (e) { console.warn("Audit log failed..."); }
 
     // 5. Ledger Entry
-    const transactionId = randomUUID();
-    await docClient.send(new PutCommand({
-        TableName: TABLE_TRANSACTIONS,
-        Item: {
-            billId: transactionId, referenceId: appointmentId,
-            patientId, doctorId: apt.doctorId || "UNKNOWN",
-            type: "REFUND", amount: -(apt.amountPaid || 0),
-            currency: "USD", status: "PROCESSED",
-            createdAt: new Date().toISOString(), description: "User requested cancellation"
-        }
-    }));
+    if (apt.amountPaid > 0) {
+        const transactionId = randomUUID();
+        const txStatus = refundId === "REFUND_FAILED_MANUAL_REQUIRED" ? "FAILED_REQUIRES_MANUAL_REFUND" : "PROCESSED";
+        
+        await docClient.send(new PutCommand({
+            TableName: TABLE_TRANSACTIONS,
+            Item: {
+                billId: transactionId, referenceId: appointmentId,
+                patientId, doctorId: apt.doctorId || "UNKNOWN",
+                type: "REFUND", amount: -(apt.amountPaid || 0),
+                currency: "USD", status: txStatus, // 🟢 ACCOUNTING FIX: Track failed refunds
+                createdAt: new Date().toISOString(), 
+                description: txStatus === "PROCESSED" ? "User requested cancellation" : "Refund Failed - Contact Support"
+            }
+        }));
+    }
 
     res.status(200).json({ message: "Appointment cancelled and refunded" });
 });
@@ -550,19 +581,27 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
 });
 
 // Helper Function
+// Helper Function
 async function cancelAppointment(apt: any, newStatus: string, refundId: string, region: string) {
     const docClient = getRegionalClient(region);
     try {
-        let updateExpression = "set #s = :s, refundId = :r, lastUpdated = :now";
-        const expressionAttributeValues: any = { ":s": newStatus, ":r": refundId, ":now": new Date().toISOString() };
-        const expressionAttributeNames: any = { "#s": "status" };
-
-        if (apt.resource) {
-            updateExpression += ", #res.#rs = :cancelled";
-            expressionAttributeNames["#res"] = "resource";
-            expressionAttributeNames["#rs"] = "status";
-            expressionAttributeValues[":cancelled"] = "cancelled";
+        // 🟢 FHIR & DYNAMODB CRASH FIX (Applied to Helper)
+        let fhirResource = apt.resource;
+        if (fhirResource) {
+            fhirResource.status = "cancelled"; 
+            if (Array.isArray(fhirResource.participant)) {
+                fhirResource.participant.forEach((p: any) => p.status = "declined"); 
+            }
         }
+
+        let updateExpression = "set #s = :s, refundId = :r, lastUpdated = :now, #res = :resource";
+        const expressionAttributeValues: any = { 
+            ":s": newStatus, 
+            ":r": refundId, 
+            ":now": new Date().toISOString(),
+            ":resource": fhirResource || null
+        };
+        const expressionAttributeNames: any = { "#s": "status", "#res": "resource" };
 
         await docClient.send(new UpdateCommand({
             TableName: TABLE_APPOINTMENTS, Key: { appointmentId: apt.appointmentId },
@@ -576,7 +615,6 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
             await docClient.send(new DeleteCommand({ TableName: TABLE_LOCKS, Key: { lockId: lockKey } }));
         }
 
-        // 🟢 THE FIX: Also delete from calendar if this was an auto-cleanup cancellation
         if (apt.googleEventId && apt.doctorId) {
             deleteFromGoogleCalendar(apt.doctorId, apt.googleEventId, region).catch(e => 
                 console.error("[Cleanup] Calendar delete failed:", e.message)

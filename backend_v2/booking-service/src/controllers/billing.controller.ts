@@ -34,11 +34,13 @@ export const getPatientBilling = async (req: Request, res: Response) => {
             } catch (e) { console.error("Malformed startKey ignored"); }
         }
 
+        // 🟢 IDOR PROTECTION: Only the patient themselves can view these financial records
         if (requesterId && requesterId !== patientId) {
             await writeAuditLog(requesterId, String(patientId), "UNAUTHORIZED_BILLING_ACCESS", "Blocked access to financial records", { region, ipAddress: req.ip });
             return res.status(403).json({ message: "Unauthorized access to billing records." });
         }
 
+        // 🟢 CORRECT QUERY: Use PatientIndex and properly handle the patientId
         const command = new QueryCommand({
             TableName: TABLE_TRANSACTIONS,
             IndexName: "PatientIndex",
@@ -52,6 +54,7 @@ export const getPatientBilling = async (req: Request, res: Response) => {
         const response = await regionalDb.send(command);
         const transactions = response.Items || [];
 
+        // 🟢 CORRECT CALCULATION: Summing the transactions returned
         const outstandingBalance = transactions
             .filter(t => t.status === 'PENDING' || t.status === 'DUE' || t.status === 'UNPAID')
             .reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
@@ -104,40 +107,12 @@ export const payBill = async (req: Request, res: Response) => {
             payment_method: paymentMethodId,
             confirm: true,
             off_session: false,
-            metadata: { billId, patientId, type: billItem.type || "PHARMACY" },
+            metadata: { billId, patientId, type: billItem.type || "PHARMACY", region }, 
             automatic_payment_methods: { enabled: true, allow_redirects: 'never' }
         });
 
         if (paymentIntent.status === 'succeeded') {
-            const timestamp = new Date().toISOString();
-
-            await regionalDb.send(new UpdateCommand({
-                TableName: TABLE_TRANSACTIONS,
-                Key: { billId },
-                UpdateExpression: "SET #s = :status, paidAt = :date, paymentIntentId = :pid",
-                ExpressionAttributeNames: { "#s": "status" },
-                ExpressionAttributeValues: { ":status": "PAID", ":date": timestamp, ":pid": paymentIntent.id }
-            }));
-
-            if (billItem.type === 'PHARMACY' && billItem.referenceId) {
-                try {
-                    await regionalDb.send(new UpdateCommand({
-                        TableName: "mediconnect-prescriptions",
-                        Key: { prescriptionId: billItem.referenceId },
-                        UpdateExpression: "SET paymentStatus = :p",
-                        ExpressionAttributeValues: { ":p": "PAID" }
-                    }));
-                } catch (e) { console.warn("Could not sync prescription status", e); }
-            }
-
-            // 🟢 HIPAA AUDIT LOG
-            await writeAuditLog(requesterId || "SYSTEM", String(patientId), "BILL_PAID", `Paid bill ${billId}`, { region, ipAddress: req.ip });
-            pushRevenueToBigQuery({
-                billId,
-                patientId,
-                doctorId: billItem.doctorId || "UNKNOWN", // Pass Doctor ID from DB Item
-                amount: Number(billItem.amount)
-            }, region).catch(console.error);
+             await writeAuditLog(requesterId || "SYSTEM", String(patientId), "PAYMENT_SUBMITTED", `Payment intent generated for ${billId}`, { region, ipAddress: req.ip });
         }
 
         res.status(200).json({ success: true, status: paymentIntent.status });
@@ -165,7 +140,7 @@ export const getDoctorAnalytics = async (req: Request, res: Response) => {
             return res.status(403).json({ error: "Unauthorized access to financial analytics." });
         }
 
-        // 🟢 2. DYNAMIC FILTER LOGIC
+        // 🟢 DYNAMIC FILTER LOGIC
         let keyCondition = "doctorId = :did";
         let expressionValues: any = { ":did": doctorId };
 
@@ -178,20 +153,27 @@ export const getDoctorAnalytics = async (req: Request, res: Response) => {
             const cutoffDate = new Date();
             cutoffDate.setMonth(now.getMonth() - monthsToSubtract);
             
-            // Add date filter to the query
             keyCondition += " AND createdAt >= :cutoff";
             expressionValues[":cutoff"] = cutoffDate.toISOString();
         }
 
-        const command = new QueryCommand({
-            TableName: TABLE_TRANSACTIONS,
-            IndexName: "DoctorIndex",
-            KeyConditionExpression: keyCondition, // 🟢 USE DYNAMIC CONDITION
-            ExpressionAttributeValues: expressionValues
-        });
+        // 🟢 THE 1MB PAGINATION BUG FIX (PROPERLY PLACED HERE)
+        let allTxs: any[] =[];
+        let exclusiveStartKey: any = undefined;
 
-        const response = await regionalDb.send(command);
-        const allTxs = response.Items || [];
+        do {
+            const command = new QueryCommand({
+                TableName: TABLE_TRANSACTIONS,
+                IndexName: "DoctorIndex",
+                KeyConditionExpression: keyCondition, 
+                ExpressionAttributeValues: expressionValues,
+                ExclusiveStartKey: exclusiveStartKey
+            });
+
+            const response = await regionalDb.send(command);
+            allTxs = allTxs.concat(response.Items ||[]);
+            exclusiveStartKey = response.LastEvaluatedKey;
+        } while (exclusiveStartKey);
 
         const doctorSpecificTxs = allTxs.filter(t => t.type === 'BOOKING_FEE' || t.type === 'REFUND');
         const netRevenue = doctorSpecificTxs.reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
@@ -200,7 +182,7 @@ export const getDoctorAnalytics = async (req: Request, res: Response) => {
         const refundsCount = doctorSpecificTxs.filter(t => t.type === 'REFUND').length;
         const finalConsultationCount = Math.max(0, feesCount - refundsCount);
 
-        const monthNames = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+        const monthNames =["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
         const monthlyData: Record<string, number> = {};
 
         doctorSpecificTxs.forEach(t => {
@@ -230,7 +212,7 @@ export const getDoctorAnalytics = async (req: Request, res: Response) => {
 };
 
 // 🟢 GDPR FIX: Push revenue data to regional BigQuery
-const pushRevenueToBigQuery = async (txData: any, region: string) => {
+export const pushRevenueToBigQuery = async (txData: any, region: string) => {
     try {
         const auth = new GoogleAuth({
             scopes:['https://www.googleapis.com/auth/cloud-platform']

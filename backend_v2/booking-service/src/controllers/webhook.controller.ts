@@ -2,6 +2,8 @@ import { Request, Response } from 'express';
 import Stripe from 'stripe';
 import { getRegionalClient, getSSMParameter } from '../../../shared/aws-config';
 import { TransactWriteCommand, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { createHash } from 'crypto';
+import { pushRevenueToBigQuery } from './billing.controller';
 
 const STRIPE_SECRET_NAME = "/mediconnect/stripe/keys";
 const STRIPE_WEBHOOK_SECRET_NAME = "/mediconnect/stripe/webhook_secret";
@@ -13,10 +15,15 @@ const TABLE_INVENTORY = process.env.TABLE_INVENTORY || "mediconnect-pharmacy-inv
 
 export const handleStripeWebhook = async (req: Request, res: Response) => {
     let event: Stripe.Event;
-    
-    // 🟢 GDPR/Schrems II: Stripe doesn't send standard headers. 
-    // We fall back to the Region defined by the Docker Container's deployment environment.
-    const region = (req.headers['x-user-region'] as string) || process.env.AWS_REGION || "us-east-1";
+
+    let region = process.env.AWS_REGION || "us-east-1";
+    try {
+        const unverifiedPayload = JSON.parse(req.body.toString());
+        if (unverifiedPayload.data?.object?.metadata?.region) {
+            region = unverifiedPayload.data.object.metadata.region;
+        }
+    } catch (e) { console.warn("Could not parse unverified webhook payload"); }
+
     const regionalDb = getRegionalClient(region);
 
     try {
@@ -42,7 +49,7 @@ export const handleStripeWebhook = async (req: Request, res: Response) => {
     if (event.type === 'payment_intent.succeeded') {
         const paymentIntent = event.data.object as Stripe.PaymentIntent;
         console.log(`💰 Payment Captured: ${paymentIntent.id} in region ${region}`);
-        await handlePaymentSuccess(paymentIntent, regionalDb);
+        await handlePaymentSuccess(paymentIntent, regionalDb, region);
     } else if (event.type === 'payment_intent.payment_failed') {
         const paymentIntent = event.data.object as Stripe.PaymentIntent;
         console.log(`❌ Payment Failed: ${paymentIntent.last_payment_error?.message}`);
@@ -51,7 +58,7 @@ export const handleStripeWebhook = async (req: Request, res: Response) => {
     res.json({ received: true });
 };
 
-async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regionalDb: any) {
+async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regionalDb: any, region: string) {
     const { billId, referenceId, type, pharmacyId, medication } = paymentIntent.metadata || {};
 
     if (!billId) {
@@ -59,13 +66,18 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
         return;
     }
 
+    let existingTxItem: any = null; // 🟢 Declare OUTSIDE the try block
+
     try {
         const existingTx = await regionalDb.send(new GetCommand({
             TableName: TABLE_TRANSACTIONS,
             Key: { billId }
         }));
+        
+        existingTxItem = existingTx.Item;
 
-        if (existingTx.Item && existingTx.Item.status === 'PAID') {
+        if (existingTxItem && existingTxItem.status === 'PAID') {
+
             console.log(`⚠️ Idempotency Check: Transaction ${billId} is already PAID. Skipping.`);
             return; // STOP EXECUTION HERE
         }
@@ -122,6 +134,19 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
     try {
         await regionalDb.send(new TransactWriteCommand({ TransactItems: transactItems }));
         console.log(`✅ DATABASE SYNCED: Transaction ${billId} + ${type} Record`);
+
+        // 🟢 HIPAA FIX: Pseudonymize Patient ID before sending to Analytics
+        const existingTxData = existingTxItem;
+        if (existingTxData && existingTxData.patientId) {
+            const hashedPatientId = createHash('sha256').update(existingTxData.patientId + process.env.HIPAA_SALT).digest('hex');
+
+            pushRevenueToBigQuery({
+                billId,
+                patientId: hashedPatientId, // 🛡️ SECURE
+                doctorId: existingTxData.doctorId || "UNKNOWN",
+                amount: existingTxData.amount
+            }, region).catch(e => console.error("BigQuery sync failed", e));
+        }
     } catch (error) {
         console.error("CRITICAL DB ERROR: Webhook failed to write to Regional DynamoDB", error);
     }
