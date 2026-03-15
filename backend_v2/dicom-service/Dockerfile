@@ -30,4 +30,4 @@ EXPOSE 8005
 USER dicomuser
 
 # Starts Uvicorn on Port 8005 (K8s) OR dynamic $PORT (Cloud Run)
-CMD["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8005} --workers 2"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8005} --workers 2"]
