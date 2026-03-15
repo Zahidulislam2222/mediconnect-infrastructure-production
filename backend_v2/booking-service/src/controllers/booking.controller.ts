@@ -639,19 +639,27 @@ export const getReceipt = catchAsync(async (req: Request, res: Response) => {
     if (!apt) return res.status(404).json({ message: "Appointment not found" });
     if (apt.patientId !== userId) return res.status(403).json({ message: "Unauthorized" });
 
-    const isCancelled = apt.status.includes("CANCELLED");
+    const statusStr = apt.status || "";
+    const isCancelled = statusStr.includes("CANCELLED");
 
-    const generator = new BookingPDFGenerator();
-    const url = await generator.generateReceipt({
-        appointmentId: apt.appointmentId,
-        billId: apt.paymentId || "N/A", patientName: apt.patientName,
-        doctorName: apt.doctorName, amount: apt.amountPaid || 50,
-        date: apt.timeSlot,
-        status: isCancelled ? "REFUNDED" : "PAID",
-        type: isCancelled ? "REFUND" : "BOOKING"
-    });
+    try {
+        const generator = new BookingPDFGenerator();
+        const url = await generator.generateReceipt({
+            appointmentId: apt.appointmentId,
+            billId: apt.paymentId || appointmentId, 
+            patientName: apt.patientName || "Patient",
+            doctorName: apt.doctorName || "Doctor", 
+            amount: apt.amountPaid || 50,
+            date: apt.timeSlot || new Date().toISOString(),
+            status: isCancelled ? "REFUNDED" : "PAID",
+            type: isCancelled ? "REFUND" : "BOOKING"
+        }, region); 
 
-    res.status(200).json({ downloadUrl: url });
+        res.status(200).json({ downloadUrl: url });
+    } catch (pdfError: any) {
+        console.error("PDF Generation Error:", pdfError);
+        res.status(500).json({ message: "Receipt generation failed on the server." });
+    }
 });
 
 // 🟢 NEW HELPER: Sync to Google Calendar (DynamoDB Migrated)
