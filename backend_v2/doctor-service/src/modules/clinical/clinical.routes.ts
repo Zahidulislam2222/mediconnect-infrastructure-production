@@ -8,7 +8,7 @@ import {
     generateQR
 } from "./prescription.controller";
 import { handleEhrAction } from "./ehr.controller";
-import { getPatientScans } from './imaging.viewer';
+import { getPatientScans, uploadDicom } from './imaging.controller';
 import { getRelationships } from "./relationship.controller";
 import { authMiddleware } from "../../middleware/auth.middleware";
 import { writeAuditLog } from "../../../../shared/audit";

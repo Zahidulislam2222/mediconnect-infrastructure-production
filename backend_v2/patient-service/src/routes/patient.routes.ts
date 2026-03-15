@@ -12,7 +12,7 @@ import {
     searchPatients,
     extractRegion
 } from '../controllers/patient.controller';
-import { uploadDicom } from '../controllers/imaging.controller';
+import { uploadDicom } from '../modules/clinical/imaging.controller';
 import multer from 'multer';
 
 // 🟢 BOTH MIDDLEWARES IMPORTED HERE

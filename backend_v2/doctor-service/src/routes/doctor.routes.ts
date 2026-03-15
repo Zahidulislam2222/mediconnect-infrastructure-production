@@ -4,6 +4,9 @@ import * as DoctorController from '../controllers/doctor.controller';
 // 🟢 BOTH MIDDLEWARES IMPORTED HERE
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireDoctorVerification } from '../middleware/verification.middleware';
+import multer from 'multer';
+import { uploadDicom } from '../modules/clinical/imaging.controller';
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 const router = Router();
 
@@ -42,6 +45,8 @@ router.put('/doctors/:id', authMiddleware, requireDoctorVerification, DoctorCont
 // GDPR FIX: Right to Erasure
 router.delete('/doctors/:id', authMiddleware, requireDoctorVerification, DoctorController.deleteDoctor);
 
+router.post('/upload-scan', authMiddleware, requireDoctorVerification, upload.single('dicom'), uploadDicom);
+
 // SCHEDULE ROUTES
 router.get('/doctors/:id/schedule', authMiddleware, requireDoctorVerification, DoctorController.getSchedule);
 router.put('/doctors/:id/schedule', authMiddleware, requireDoctorVerification, DoctorController.updateSchedule);
@@ -54,10 +59,6 @@ router.delete('/doctors/:id/calendar', authMiddleware, requireDoctorVerification
 // CLOSURE REQUEST
 router.post('/doctors/:id/request-closure', authMiddleware, requireDoctorVerification, DoctorController.requestDoctorClosure);
 
-/**
- * 🟢 SECURITY NOTE: Google Callback remains public.
- * Security is enforced via a signed JWT state parameter in the Controller.
- */
 router.get('/doctors/auth/google/callback', DoctorController.googleCallback);
 
 export default router;

@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import FormData from 'form-data';
 import fetch from 'node-fetch'; // Or native fetch in Node 20
-import { getRegionalClient } from '../../../shared/aws-config';
+import { getRegionalClient } from '../../../../shared/aws-config';
 import { PutCommand } from "@aws-sdk/lib-dynamodb";
 import { v4 as uuidv4 } from "uuid";
 
