@@ -12,11 +12,15 @@ import {
     searchPatients,
     extractRegion
 } from '../controllers/patient.controller';
+import { uploadDicom } from '../controllers/imaging.controller';
+import multer from 'multer';
 
 // 🟢 BOTH MIDDLEWARES IMPORTED HERE
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireIdentityVerification } from '../middleware/verification.middleware';
 import { writeAuditLog } from '../../../shared/audit';
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 const router = Router();
 
@@ -99,6 +103,7 @@ router.get(['/patients/:id', '/:id'], getPatientById);
 // 🛡️ 4. SURGERY ROOM (STRICT: Requires Verified ID)
 // Notice we add `requireIdentityVerification` to these specific routes
 // ==========================================
+router.post('/upload-scan', requireIdentityVerification, upload.single('dicom'), uploadDicom);
 router.get('/stats/demographics', requireIdentityVerification, getDemographics);
 router.get('/search', requireIdentityVerification, searchPatients); 
 router.delete('/me', requireIdentityVerification, deleteProfile);

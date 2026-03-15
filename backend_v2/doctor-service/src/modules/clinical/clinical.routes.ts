@@ -8,6 +8,7 @@ import {
     generateQR
 } from "./prescription.controller";
 import { handleEhrAction } from "./ehr.controller";
+import { getPatientScans } from './imaging.viewer';
 import { getRelationships } from "./relationship.controller";
 import { authMiddleware } from "../../middleware/auth.middleware";
 import { writeAuditLog } from "../../../../shared/audit";
@@ -40,7 +41,7 @@ router.post("/pharmacy/generate-qr", authMiddleware, generateQR);
 // =============================================================================
 // 2. EHR & RELATIONSHIPS
 // =============================================================================
-
+router.get("/ehr/:patientId/scans", authMiddleware, getPatientScans);
 router.post("/ehr", authMiddleware, handleEhrAction);
 router.get("/relationships", authMiddleware, getRelationships);
 

@@ -46,6 +46,8 @@ jobs:
             port: 8083
           - service: communication-service
             port: 8084
+          - service: dicom-service
+            port: 8005
     steps:
       - uses: actions/checkout@v4
       - uses: azure/login@v1
@@ -111,20 +113,24 @@ jobs:
               -e "s|__AZURE_DOCTOR_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
               -e "s|__AZURE_BOOKING_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
               -e "s|__AZURE_COMM_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__AZURE_DICOM_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
               -e "s|__EKS_PATIENT_ROLE_ARN__|${{ secrets.EKS_PATIENT_ROLE_ARN }}|g" \
               -e "s|__EKS_DOCTOR_ROLE_ARN__|${{ secrets.EKS_DOCTOR_ROLE_ARN }}|g" \
               -e "s|__EKS_BOOKING_ROLE_ARN__|${{ secrets.EKS_BOOKING_ROLE_ARN }}|g" \
               -e "s|__EKS_COMM_ROLE_ARN__|${{ secrets.EKS_COMM_ROLE_ARN }}|g" \
+              -e "s|__EKS_DICOM_ROLE_ARN__|${{ secrets.EKS_DICOM_ROLE_ARN }}|g" \
               backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=aks.kubeconfig apply -f -
 
           sed -e "s|__AZURE_PATIENT_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
               -e "s|__AZURE_DOCTOR_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
               -e "s|__AZURE_BOOKING_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
               -e "s|__AZURE_COMM_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+              -e "s|__AZURE_DICOM_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
               -e "s|__EKS_PATIENT_ROLE_ARN__|${{ secrets.EKS_PATIENT_ROLE_ARN }}|g" \
               -e "s|__EKS_DOCTOR_ROLE_ARN__|${{ secrets.EKS_DOCTOR_ROLE_ARN }}|g" \
               -e "s|__EKS_BOOKING_ROLE_ARN__|${{ secrets.EKS_BOOKING_ROLE_ARN }}|g" \
               -e "s|__EKS_COMM_ROLE_ARN__|${{ secrets.EKS_COMM_ROLE_ARN }}|g" \
+              -e "s|__EKS_DICOM_ROLE_ARN__|${{ secrets.EKS_DICOM_ROLE_ARN }}|g" \
               backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=eks.kubeconfig apply -f -
           
           # 2. Setup Staging Gateway
@@ -150,6 +156,8 @@ jobs:
             port: 8083
           - service: communication-service
             port: 8084
+          - service: dicom-service
+            port: 8005
     steps:
       - uses: actions/checkout@v4
       - uses: azure/login@v1
@@ -182,6 +190,8 @@ jobs:
              ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
           elif [ "${{ matrix.service }}" == "communication-service" ]; then
              ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "dicom-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_DICOM_ROLE_ARN }}"
           fi
 
           PUBLIC_DOMAIN="staging-${{ vars.AKS_DOMAIN }}" 
@@ -211,6 +221,8 @@ jobs:
              ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
           elif [ "${{ matrix.service }}" == "communication-service" ]; then
              ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "dicom-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_DICOM_ROLE_ARN }}"
           fi
 
           PUBLIC_DOMAIN="staging-${{ vars.EKS_DOMAIN }}" 
@@ -253,6 +265,8 @@ jobs:
             port: 8083
           - service: communication-service
             port: 8084
+          - service: dicom-service
+            port: 8005
     steps:
       - uses: actions/checkout@v4
       - uses: azure/login@v1
@@ -289,6 +303,8 @@ jobs:
              ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
           elif [ "${{ matrix.service }}" == "communication-service" ]; then
              ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "dicom-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_DICOM_ROLE_ARN }}"
           fi
 
           PUBLIC_DOMAIN="${{ vars.AKS_DOMAIN }}"
@@ -319,6 +335,8 @@ jobs:
              ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
           elif [ "${{ matrix.service }}" == "communication-service" ]; then
              ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "dicom-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_DICOM_ROLE_ARN }}"
           fi
 
           PUBLIC_DOMAIN="${{ vars.EKS_DOMAIN }}"
@@ -353,6 +371,8 @@ jobs:
              ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
           elif [ "${{ matrix.service }}" == "communication-service" ]; then
              ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "dicom-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_DICOM_ROLE_ARN }}"
           fi
 
           # 🟢 FIXED: Added missing \ after env-vars
@@ -376,6 +396,8 @@ jobs:
              ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
           elif [ "${{ matrix.service }}" == "communication-service" ]; then
              ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
+          elif [ "${{ matrix.service }}" == "dicom-service" ]; then
+             ROLE_ARN="${{ secrets.EKS_DICOM_ROLE_ARN }}"
           fi
 
           # 🟢 FIXED: Added missing \ after env-vars

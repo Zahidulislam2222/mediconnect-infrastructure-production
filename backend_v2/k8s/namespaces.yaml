@@ -115,3 +115,29 @@ metadata:
     azure.workload.identity/client-id: "__AZURE_COMM_CLIENT_ID__"
   labels:
     azure.workload.identity/use: "true"
+
+# ==========================================
+# 🟢 5. DICOM SERVICE IDENTITY
+# ==========================================
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dicom-sa
+  namespace: mediconnect-prod
+  annotations:
+    eks.amazonaws.com/role-arn: "__EKS_DICOM_ROLE_ARN__"
+    azure.workload.identity/client-id: "__AZURE_DICOM_CLIENT_ID__"
+  labels:
+    azure.workload.identity/use: "true"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dicom-sa
+  namespace: mediconnect-staging
+  annotations:
+    eks.amazonaws.com/role-arn: "__EKS_DICOM_ROLE_ARN__"
+    azure.workload.identity/client-id: "__AZURE_DICOM_CLIENT_ID__"
+  labels:
+    azure.workload.identity/use: "true"
