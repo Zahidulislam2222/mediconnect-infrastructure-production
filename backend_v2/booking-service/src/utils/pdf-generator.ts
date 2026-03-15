@@ -22,8 +22,8 @@ export class BookingPDFGenerator {
         // Ensure EU users use the EU bucket
         const isEU = region.toUpperCase() === 'EU' || region === 'eu-central-1';
         const bucketName = isEU 
-            ? (process.env.S3_BUCKET_UPLOADS_EU || "mediconnect-doctor-data-eu")
-            : (process.env.S3_BUCKET_UPLOADS || "mediconnect-doctor-data");
+            ? (process.env.S3_BUCKET_UPLOADS_EU || "mediconnect-patient-data-eu")
+            : (process.env.S3_BUCKET_UPLOADS || "mediconnect-patient-data");
 
         const pdfBuffer = await this.createPDFBuffer(data);
         const s3Key = `receipts/${data.billId}.pdf`;
