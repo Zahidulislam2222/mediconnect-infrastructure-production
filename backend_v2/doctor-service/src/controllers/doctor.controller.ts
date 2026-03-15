@@ -7,7 +7,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { TextractClient, AnalyzeDocumentCommand } from "@aws-sdk/client-textract";
 import { PublishCommand } from "@aws-sdk/client-sns";
 import { google } from 'googleapis';
-import { PutCommand, GetCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import { PutCommand, GetCommand, UpdateCommand, ScanCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient, getRegionalSNSClient, getRegionalSESClient, getRegionalCognitoClient } from '../../../shared/aws-config';
 import { writeAuditLog } from '../../../shared/audit';
 import jwt from 'jsonwebtoken';
@@ -648,6 +648,45 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
     }));
 
     if (!userCheck.Item) return res.status(404).json({ error: "Doctor not found" });
+
+    try {
+        const apptQuery = await docClient.send(new QueryCommand({
+            TableName: process.env.TABLE_APPOINTMENTS || "mediconnect-appointments",
+            IndexName: "DoctorIndex",
+            KeyConditionExpression: "doctorId = :did",
+            ExpressionAttributeValues: { ":did": id }
+        }));
+
+        const doctorAppointments = apptQuery.Items || [];
+        for (const apt of doctorAppointments) {
+            // Anonymize the FHIR resource participant name
+            let fhirResource = apt.resource || {};
+            if (Array.isArray(fhirResource.participant)) {
+                fhirResource.participant.forEach((p: any) => {
+                    if (p.actor?.reference === `Practitioner/${id}`) {
+                        p.actor.display = "ANONYMIZED_PRACTITIONER";
+                    }
+                });
+            }
+
+            await docClient.send(new UpdateCommand({
+                TableName: process.env.TABLE_APPOINTMENTS || "mediconnect-appointments",
+                Key: { appointmentId: apt.appointmentId },
+                UpdateExpression: "SET doctorName = :anon, doctorAvatar = :null, #res = :resource, lastUpdated = :now",
+                ExpressionAttributeNames: { "#res": "resource" },
+                ExpressionAttributeValues: { 
+                    ":anon": "ANONYMIZED_PRACTITIONER", 
+                    ":null": null,
+                    ":resource": fhirResource, 
+                    ":now": new Date().toISOString()
+                }
+            }));
+        }
+        console.log(`[GDPR] Scrubbed Doctor Identity from ${doctorAppointments.length} appointment records.`);
+    } catch (sweepErr) {
+        console.error("Doctor Appointment Sweep Failed:", sweepErr);
+        // We continue because we don't want to block the primary deletion if one record fails
+    }
 
     if (userCheck.Item.closureStatus !== "PENDING_CLOSURE") {
         await writeAuditLog(authUser.id, id, "ILLEGAL_DELETE_ATTEMPT", "Doctor tried to bypass closure review via API", { region, ipAddress: req.ip });

@@ -66,6 +66,11 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
     }
 
     const normalizedTime = normalizeTimeSlot(timeSlot);
+
+    if (new Date(normalizedTime).getTime() <= Date.now()) {
+        return res.status(400).json({ message: "Security Block: Cannot book appointments in the past." });
+    }
+    
     lockKey = `${doctorId}#${normalizedTime}`;
     const transactionId = randomUUID();
     const appointmentId = randomUUID();
@@ -417,8 +422,14 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
 
     // 🟢 SECURITY FIX 2: Prevent Time-Travel Refunds
     const aptTime = new Date(apt.timeSlot).getTime();
+    const hoursUntilApt = (aptTime - Date.now()) / (1000 * 60 * 60);
+
     if (aptTime <= Date.now()) {
         return res.status(400).json({ message: "Cannot cancel past appointments." });
+    }
+    if (hoursUntilApt < 24) {
+        await writeAuditLog(patientId, patientId, "LATE_CANCELLATION_ATTEMPT", "Tried to cancel within 24 hours", { region, ipAddress: req.ip });
+        return res.status(400).json({ message: "Policy Block: Cancellations are not permitted less than 24 hours before the appointment time. Please contact support." });
     }
 
     // 1. Refund Logic

@@ -1,14 +1,16 @@
 import { Request, Response, NextFunction } from 'express';
 
 // AWS SDK v3
-import { GetCommand, PutCommand, UpdateCommand, ScanCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, PutCommand, UpdateCommand, ScanCommand, QueryCommand, DeleteCommand } from "@aws-sdk/lib-dynamodb";
 import { PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { CompareFacesCommand } from "@aws-sdk/client-rekognition";
 import { PublishCommand } from "@aws-sdk/client-sns";
 import { SendEmailCommand } from "@aws-sdk/client-ses";
-import { getRegionalSESClient, getRegionalCognitoClient } from '../../../shared/aws-config';
+import { getRegionalSESClient, getRegionalCognitoClient, getSSMParameter } from '../../../shared/aws-config';
 import { AdminDeleteUserCommand } from "@aws-sdk/client-cognito-identity-provider";
+import Stripe from "stripe";
+import { randomUUID } from "crypto";
 
 // Shared Utilities
 import { safeError } from '../../../shared/logger';
@@ -380,7 +382,101 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
     if (!userCheck.Item) return res.status(404).json({ error: "Patient not found" });
 
     // 🟢 HIPAA Data Retention vs GDPR Erasure: 
-    // We soft-delete and anonymize PII immediately, but keep a hashed record for 30 days.
+    try {
+        const stripeKey = await getSSMParameter("/mediconnect/stripe/keys", region, true);
+        const stripe = stripeKey ? new Stripe(stripeKey) : null;
+        
+        const apptQuery = await dynamicDb.send(new QueryCommand({
+            TableName: process.env.TABLE_APPOINTMENTS || "mediconnect-appointments",
+            IndexName: "PatientIndex",
+            KeyConditionExpression: "patientId = :pid",
+            ExpressionAttributeValues: { ":pid": userId }
+        }));
+        
+        const appointments = apptQuery.Items ||[];
+        const nowMs = Date.now();
+
+        for (const apt of appointments) {
+            const aptTimeMs = new Date(apt.timeSlot).getTime();
+            const isFuture = aptTimeMs > nowMs;
+            const isNotCancelled = apt.status !== "CANCELLED" && apt.status !== "CANCELLED_NO_SHOW";
+
+            // GDPR Anonymization for FHIR Resource
+            let fhirResource = apt.resource || {};
+            fhirResource.name = [{ use: "official", text: "ANONYMIZED_GDPR" }];
+            if (Array.isArray(fhirResource.participant)) {
+                fhirResource.participant.forEach((p: any) => {
+                    if (p.actor?.reference === `Patient/${userId}`) {
+                        p.actor.display = "ANONYMIZED_GDPR";
+                    }
+                });
+            }
+
+            if (isFuture && isNotCancelled) {
+                // 1. Refund the future appointment
+                let refundId = "NOT_APPLICABLE";
+                if (stripe && apt.paymentId && apt.paymentId !== "TEST_MODE" && apt.paymentStatus === 'paid') {
+                    try {
+                        const refund = await stripe.refunds.create({ payment_intent: apt.paymentId });
+                        refundId = refund.id;
+                        
+                        // Ledger Entry for Refund
+                        await dynamicDb.send(new PutCommand({
+                            TableName: process.env.TABLE_TRANSACTIONS || "mediconnect-transactions",
+                            Item: {
+                                billId: randomUUID(), referenceId: apt.appointmentId,
+                                patientId: userId, doctorId: apt.doctorId || "UNKNOWN",
+                                type: "REFUND", amount: -(apt.amountPaid || 0),
+                                currency: "USD", status: "PROCESSED",
+                                createdAt: new Date().toISOString(), description: "GDPR Account Deletion Auto-Refund"
+                            }
+                        }));
+                    } catch (stripeErr: any) {
+                        console.error("GDPR Stripe Refund Failed:", stripeErr.message);
+                        refundId = "REFUND_FAILED_MANUAL_REQUIRED";
+                    }
+                }
+
+                // 2. Cancel the appointment & anonymize
+                fhirResource.status = "cancelled";
+                fhirResource.participant.forEach((p: any) => p.status = "declined");
+
+                await dynamicDb.send(new UpdateCommand({
+                    TableName: process.env.TABLE_APPOINTMENTS || "mediconnect-appointments",
+                    Key: { appointmentId: apt.appointmentId },
+                    UpdateExpression: "SET #s = :s, refundId = :r, patientName = :anon, patientAvatar = :null, #res = :resource, lastUpdated = :now",
+                    ExpressionAttributeNames: { "#s": "status", "#res": "resource" },
+                    ExpressionAttributeValues: { 
+                        ":s": "CANCELLED", ":r": refundId, ":anon": "ANONYMIZED_GDPR", ":null": null, ":resource": fhirResource, ":now": new Date().toISOString()
+                    }
+                }));
+
+                // 3. Remove Doctor Lock so another patient can book this slot
+                if (apt.doctorId && apt.timeSlot) {
+                    try {
+                        const lockKey = `${apt.doctorId}#${apt.timeSlot}`;
+                        await dynamicDb.send(new DeleteCommand({ 
+                            TableName: process.env.TABLE_LOCKS || "mediconnect-booking-locks", 
+                            Key: { lockId: lockKey } 
+                        }));
+                    } catch (e) {}
+                }
+            } else {
+                // Just Anonymize past/completed appointments (Don't refund, just strip PII for GDPR)
+                await dynamicDb.send(new UpdateCommand({
+                    TableName: process.env.TABLE_APPOINTMENTS || "mediconnect-appointments",
+                    Key: { appointmentId: apt.appointmentId },
+                    UpdateExpression: "SET patientName = :anon, patientAvatar = :null, #res = :resource, lastUpdated = :now",
+                    ExpressionAttributeNames: { "#res": "resource" },
+                    ExpressionAttributeValues: { 
+                        ":anon": "ANONYMIZED_GDPR", ":null": null, ":resource": fhirResource, ":now": new Date().toISOString()
+                    }
+                }));
+            }
+        }
+    } catch (orphanErr) {
+        console.error("Failed to sweep orphaned appointments during deletion:", orphanErr);
+    }
     const ttl = Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60);
 
     await dynamicDb.send(new UpdateCommand({
