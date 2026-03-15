@@ -37,7 +37,7 @@ router.post('/doctors/:id/verify-identity', authMiddleware, DoctorController.ver
 // =============================================================================
 
 // HIPAA PRIVACY: Sanitized Directory
-router.get('/doctors', authMiddleware, requireDoctorVerification, DoctorController.getDoctors);
+router.get('/doctors', authMiddleware, DoctorController.getDoctors);
 
 // GDPR FIX: Right to Rectification (Updating profile)
 router.put('/doctors/:id', authMiddleware, requireDoctorVerification, DoctorController.updateDoctor);
