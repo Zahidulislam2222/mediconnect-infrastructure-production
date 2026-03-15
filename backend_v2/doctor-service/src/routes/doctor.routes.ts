@@ -48,7 +48,7 @@ router.delete('/doctors/:id', authMiddleware, requireDoctorVerification, DoctorC
 router.post('/upload-scan', authMiddleware, requireDoctorVerification, upload.single('dicom'), uploadDicom);
 
 // SCHEDULE ROUTES
-router.get('/doctors/:id/schedule', authMiddleware, requireDoctorVerification, DoctorController.getSchedule);
+router.get('/doctors/:id/schedule', authMiddleware, DoctorController.getSchedule);
 router.put('/doctors/:id/schedule', authMiddleware, requireDoctorVerification, DoctorController.updateSchedule);
 
 // GOOGLE CALENDAR ROUTES
