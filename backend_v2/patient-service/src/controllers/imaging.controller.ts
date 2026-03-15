@@ -30,7 +30,7 @@ export const uploadDicom = async (req: Request, res: Response) => {
         });
 
         if (!response.ok) throw new Error("DICOM Engine Error");
-        const data = await response.json();
+        const data = await response.json() as any;
 
         // Save FHIR resource into your EHR DynamoDB table
         const db = getRegionalClient(user.region);
