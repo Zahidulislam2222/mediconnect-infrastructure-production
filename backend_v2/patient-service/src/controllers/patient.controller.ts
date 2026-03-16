@@ -11,6 +11,7 @@ import { getRegionalSESClient, getRegionalCognitoClient, getSSMParameter } from 
 import { AdminDeleteUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import Stripe from "stripe";
 import { randomUUID } from "crypto";
+import { GoogleAuth } from "google-auth-library";
 
 // Shared Utilities
 import { safeError } from '../../../shared/logger';
@@ -367,6 +368,9 @@ export const verifyIdentity = catchAsync(async (req: Request, res: Response) => 
 /**
  * 5. DELETE PROFILE (GDPR Right to be Forgotten)
  */
+/**
+ * 5. DELETE PROFILE (GDPR Right to be Forgotten)
+ */
 export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req);
     const dynamicDb = getRegionalClient(region);
@@ -403,7 +407,7 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
 
             // GDPR Anonymization for FHIR Resource
             let fhirResource = apt.resource || {};
-            fhirResource.name = [{ use: "official", text: "ANONYMIZED_GDPR" }];
+            fhirResource.name =[{ use: "official", text: "ANONYMIZED_GDPR" }];
             if (Array.isArray(fhirResource.participant)) {
                 fhirResource.participant.forEach((p: any) => {
                     if (p.actor?.reference === `Patient/${userId}`) {
@@ -473,10 +477,36 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
                     }
                 }));
             }
+            
+            // 🟢 BIGQUERY PUSH (Runs for every appointment after DB is updated)
+            try {
+                const auth = new GoogleAuth({ scopes:['https://www.googleapis.com/auth/cloud-platform'] });
+                const client = await auth.getClient();
+                const accessToken = (await client.getAccessToken()).token;
+                const projectId = await auth.getProjectId();
+                const dataset = region.toUpperCase() === 'EU' ? "mediconnect_analytics_eu" : "mediconnect_analytics";
+                
+                await fetch(`https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/datasets/${dataset}/tables/appointments_stream/insertAll`, {
+                    method: "POST",
+                    headers: { "Authorization": `Bearer ${accessToken}`, "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        kind: "bigquery#tableDataInsertAllRequest",
+                        rows:[{ json: {
+                            appointment_id: apt.appointmentId,
+                            doctor_id: apt.doctorId,
+                            patient_id: "ANONYMIZED_GDPR", 
+                            status: "ANONYMIZED",
+                            timestamp: new Date().toISOString()
+                        }}]
+                    })
+                });
+            } catch (bqErr) { console.error("BQ Anonymization Failed", bqErr); }
+                
         }
     } catch (orphanErr) {
         console.error("Failed to sweep orphaned appointments during deletion:", orphanErr);
     }
+
     const ttl = Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60);
 
     await dynamicDb.send(new UpdateCommand({
@@ -503,11 +533,11 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
 
     try {
         const regionalS3 = getRegionalS3Client(region);
-        const baseBucket = CONFIG.BUCKET_NAME; // Loads from SSM
+        const baseBucket = CONFIG.BUCKET_NAME; 
         const isEU = region.toUpperCase() === 'EU';
         const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
         
-        const filesToDelete = [
+        const filesToDelete =[
             `patient/${userId}/selfie_verified.jpg`,
             `patient/${userId}/selfie_verified.png`,
             `patient/${userId}/profile_picture.jpg`,
@@ -535,17 +565,15 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
         const regionalSes = getRegionalSESClient(region);
         const topicArn = region.toUpperCase() === 'EU' ? process.env.SNS_TOPIC_ARN_EU : process.env.SNS_TOPIC_ARN_US;
 
-        // 1. Send Security Alert to Admins via SNS
         await regionalSns.send(new PublishCommand({
             TopicArn: topicArn,
             Subject: "⚠️ SECURITY ALERT: Patient Identity Purged",
             Message: `CRITICAL: Patient account ${userId} has been anonymized. Biometric photos deleted. \nRegion: ${region}\nIP: ${req.ip}`
         }));
 
-        // 2. Send Formal Deletion Notice to Patient via SES
         if (userCheck.Item?.email) {
             await regionalSes.send(new SendEmailCommand({
-                Source: process.env.SYSTEM_EMAIL || "noreply@yourdomain.com", // 🟢 Must be verified in AWS SES
+                Source: process.env.SYSTEM_EMAIL || "noreply@yourdomain.com", 
                 Destination: { ToAddresses: [userCheck.Item.email] },
                 Message: {
                     Subject: { Data: "MediConnect - Account Deleted Successfully" },
@@ -560,6 +588,7 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
     } catch (err) {
         console.error("Failed to send deletion alerts/emails", err);
     }
+    
     try {
         const cognitoClient = getRegionalCognitoClient(region);
         const userPoolId = region.toUpperCase() === 'EU' ? process.env.COGNITO_USER_POOL_ID_EU : process.env.COGNITO_USER_POOL_ID_US;

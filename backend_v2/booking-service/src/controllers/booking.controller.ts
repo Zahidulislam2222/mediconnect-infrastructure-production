@@ -8,6 +8,7 @@ import { logger } from '../../../shared/logger';
 import { writeAuditLog } from '../../../shared/audit';
 import { BookingPDFGenerator } from "../utils/pdf-generator";
 import { google } from 'googleapis';
+import { pushAppointmentToBigQuery } from './billing.controller';
 
 // 🛡️ ARCHITECTURAL PURGE: 'pg' and 'db.ts' have been completely removed.
 // All data (including pricing and tokens) now securely flows through Regional DynamoDB.
@@ -232,6 +233,14 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         await writeAuditLog(patientId, patientId, "CREATE_BOOKING", `Appointment ${appointmentId} booked`, { 
             doctorId, timeSlot: normalizedTime, region, ipAddress: req.ip 
         });
+        pushAppointmentToBigQuery({
+            appointmentId,
+            doctorId,
+            patientId,
+            status: "CONFIRMED",
+            specialization: doctorRes.Item?.specialization
+        }, region).catch(e => console.error(e));
+        
 
         if (stripeInstance && paymentIntentId) {
             try {
@@ -491,6 +500,13 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
         await writeAuditLog(patientId, patientId, "CANCEL_BOOKING", `Appointment ${appointmentId} cancelled`, { 
             reason: "User requested", region, ipAddress: req.ip 
         });
+        pushAppointmentToBigQuery({
+            appointmentId,
+            doctorId: apt.doctorId,
+            patientId,
+            status: "CANCELLED",
+            specialization: apt.specialization
+        }, region).catch(e => console.error(e));
     } catch (e) { console.warn("Audit log failed..."); }
 
     // 5. Ledger Entry
@@ -606,6 +622,15 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
     }
 
     await writeAuditLog(requesterId || "SYSTEM", existing.Item.patientId, actionType, actionDesc, { region, ipAddress: req.ip, appointmentId });
+    if (status) {
+        pushAppointmentToBigQuery({
+            appointmentId,
+            doctorId: existing.Item.doctorId,
+            patientId: existing.Item.patientId,
+            status: status,
+            specialization: existing.Item.specialization
+        }, region).catch(e => console.error(e));
+    }
 
     res.status(200).json({ message: "Appointment updated successfully" });
 });
@@ -647,6 +672,13 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
             deleteFromGoogleCalendar(apt.doctorId, apt.googleEventId, region).catch(e => 
                 console.error("[Cleanup] Calendar delete failed:", e.message)
             );
+            pushAppointmentToBigQuery({
+            appointmentId: apt.appointmentId,
+            doctorId: apt.doctorId,
+            patientId: apt.patientId,
+            status: newStatus,
+            specialization: apt.specialization
+        }, region).catch(e => console.error(e));
         }
 
     } catch (e) { console.error("Cancel update failed", e); }

@@ -681,6 +681,55 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
                     ":now": new Date().toISOString()
                 }
             }));
+            const doctorAppointments = apptQuery.Items ||[];
+        for (const apt of doctorAppointments) {
+            // Anonymize the FHIR resource participant name
+            let fhirResource = apt.resource || {};
+            if (Array.isArray(fhirResource.participant)) {
+                fhirResource.participant.forEach((p: any) => {
+                    if (p.actor?.reference === `Practitioner/${id}`) {
+                        p.actor.display = "ANONYMIZED_PRACTITIONER";
+                    }
+                });
+            }
+
+            await docClient.send(new UpdateCommand({
+                TableName: process.env.TABLE_APPOINTMENTS || "mediconnect-appointments",
+                Key: { appointmentId: apt.appointmentId },
+                UpdateExpression: "SET doctorName = :anon, doctorAvatar = :null, #res = :resource, lastUpdated = :now",
+                ExpressionAttributeNames: { "#res": "resource" },
+                ExpressionAttributeValues: { 
+                    ":anon": "ANONYMIZED_PRACTITIONER", 
+                    ":null": null,
+                    ":resource": fhirResource, 
+                    ":now": new Date().toISOString()
+                }
+            }));
+
+            // 🟢 PASTE IT HERE (Inside the loop)
+            try {
+                const auth = new GoogleAuth({ scopes:['https://www.googleapis.com/auth/cloud-platform'] });
+                const client = await auth.getClient();
+                const accessToken = (await client.getAccessToken()).token;
+                const projectId = await auth.getProjectId();
+                const dataset = region.toUpperCase() === 'EU' ? "mediconnect_analytics_eu" : "mediconnect_analytics";
+                
+                await fetch(`https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/datasets/${dataset}/tables/appointments_stream/insertAll`, {
+                    method: "POST",
+                    headers: { "Authorization": `Bearer ${accessToken}`, "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        kind: "bigquery#tableDataInsertAllRequest",
+                        rows:[{ json: {
+                            appointment_id: apt.appointmentId,
+                            doctor_id: "ANONYMIZED_PRACTITIONER", 
+                            patient_id: apt.patientId, 
+                            status: "DOCTOR_DELETED",
+                            timestamp: new Date().toISOString()
+                        }}]
+                    })
+                });
+            } catch (bqErr) { console.error("BQ Doctor Anonymization Failed", bqErr); }
+            }
         }
         console.log(`[GDPR] Scrubbed Doctor Identity from ${doctorAppointments.length} appointment records.`);
     } catch (sweepErr) {
@@ -850,6 +899,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
             phone: userCheck.Item.phone || "N/A" 
         }
     });
+    logDoctorOnboarding(id, "ACCOUNT_DELETION", "DELETED", region).catch(console.error);
 
     res.status(200).json({ message: "Identity erased. Credentials tagged for legal audit." });
 });
@@ -916,6 +966,7 @@ export const approveDoctorByOfficer = catchAsync(async (req: Request, res: Respo
         region, 
         ipAddress: req.ip 
     });
+    logDoctorOnboarding(id, "OFFICER_APPROVAL", "APPROVED", region).catch(console.error);
 
     res.json({ message: "Doctor officially board-certified and approved for practice." });
 });

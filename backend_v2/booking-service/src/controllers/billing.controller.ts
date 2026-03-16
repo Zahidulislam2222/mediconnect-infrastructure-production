@@ -4,6 +4,7 @@ import { QueryCommand, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import Stripe from "stripe";
 import { writeAuditLog } from '../../../shared/audit';
 import { GoogleAuth } from "google-auth-library";
+import { createHash } from 'crypto';
 
 const TABLE_TRANSACTIONS = process.env.TABLE_TRANSACTIONS || "mediconnect-transactions";
 
@@ -250,4 +251,38 @@ export const pushRevenueToBigQuery = async (txData: any, region: string) => {
     } catch (e: any) { 
         console.error("BigQuery Revenue Sync Failed", e.message); 
     }
+};
+
+export const pushAppointmentToBigQuery = async (aptData: any, region: string) => {
+    try {
+        const auth = new GoogleAuth({ scopes:['https://www.googleapis.com/auth/cloud-platform'] });
+        const client = await auth.getClient();
+        const accessToken = (await client.getAccessToken()).token;
+        const projectId = await auth.getProjectId();
+
+        const dataset = region.toUpperCase() === 'EU' ? "mediconnect_analytics_eu" : "mediconnect_analytics";
+        const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/datasets/${dataset}/tables/appointments_stream/insertAll`;
+
+        const safePatientId = aptData.patientId === "ANONYMIZED_GDPR" 
+            ? "ANONYMIZED_GDPR" 
+            : createHash('sha256').update(aptData.patientId + (process.env.HIPAA_SALT || 'mediconnect_salt')).digest('hex');
+
+        await fetch(url, {
+            method: "POST",
+            headers: { "Authorization": `Bearer ${accessToken}`, "Content-Type": "application/json" }, 
+            body: JSON.stringify({
+                kind: "bigquery#tableDataInsertAllRequest",
+                rows:[{
+                    json: {
+                        appointment_id: aptData.appointmentId,
+                        doctor_id: aptData.doctorId,
+                        patient_id: safePatientId, // 🛡️ SECURE
+                        specialization: aptData.specialization || "General",
+                        status: aptData.status,
+                        timestamp: new Date().toISOString()
+                    }
+                }]
+            })
+        });
+    } catch (e: any) { console.error("BigQuery Appointment Stream Failed", e.message); }
 };
