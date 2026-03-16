@@ -286,20 +286,20 @@ export const getAppointments = catchAsync(async (req: Request, res: Response) =>
     }
 
     if (patientId) {
-    if (patientId !== requesterId) {
-        if (!isDoctor) return res.status(403).json({ error: "Unauthorized" });
+        if (patientId !== requesterId) {
+            if (!isDoctor) return res.status(403).json({ error: "Unauthorized" });
 
-        const graphCommand = new GetCommand({
-            TableName: TABLE_GRAPH,
-            Key: { PK: `DOCTOR#${requesterId}`, SK: `PATIENT#${patientId}` }
-        });
-        const graphRes = await docClient.send(graphCommand);
-        
-        if (!graphRes.Item) {
-            await writeAuditLog(requesterId as string, patientId as string, "HIPAA_VIOLATION_ATTEMPT", "Attempted to view ePHI of an unaffiliated patient", { region, ipAddress: req.ip });
-            return res.status(403).json({ error: "HIPAA Block: No active treatment relationship with this patient." });
+            const graphCommand = new GetCommand({
+                TableName: TABLE_GRAPH,
+                Key: { PK: `DOCTOR#${requesterId}`, SK: `PATIENT#${patientId}` }
+            });
+            const graphRes = await docClient.send(graphCommand);
+            
+            if (!graphRes.Item) {
+                await writeAuditLog(requesterId as string, patientId as string, "HIPAA_VIOLATION_ATTEMPT", "Attempted to view ePHI of an unaffiliated patient", { region, ipAddress: req.ip });
+                return res.status(403).json({ error: "HIPAA Block: No active treatment relationship with this patient." });
+            }
         }
-    }
 
         const command = new QueryCommand({
             TableName: TABLE_APPOINTMENTS, IndexName: "PatientIndex",
@@ -308,6 +308,9 @@ export const getAppointments = catchAsync(async (req: Request, res: Response) =>
             ScanIndexForward: false, Limit: 50, ExclusiveStartKey: exclusiveStartKey 
         });
         const response = await docClient.send(command);
+
+        await writeAuditLog(requesterId || "SYSTEM", String(patientId), "READ_APPOINTMENTS", "Viewed patient appointment history", { region, ipAddress: req.ip });
+
         return res.status(200).json({ existingBookings: response.Items ||[], lastEvaluatedKey: response.LastEvaluatedKey });
     }
 
@@ -327,9 +330,11 @@ export const getAppointments = catchAsync(async (req: Request, res: Response) =>
                 doctorId: b.doctorId,
                 timeSlot: b.timeSlot,
                 resource: { start: b.resource?.start },
-                status: b.status // Only show taken/cancelled status, hide name/reason!
+                status: b.status 
             }));
         }
+
+        await writeAuditLog(requesterId || "SYSTEM", String(doctorId), "READ_SCHEDULE", "Viewed doctor appointment schedule", { region, ipAddress: req.ip });
 
         return res.status(200).json({ existingBookings: bookings, lastEvaluatedKey: bookingRes.LastEvaluatedKey });
     }
@@ -516,14 +521,13 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
     const { appointmentId, patientArrived, status } = req.body;
     const authReq = req as AuthRequest;
     const requesterId = authReq.user?.sub || authReq.user?.id;
-    const isDoctor = (req as any).user?.isDoctor; // 🟢 Ensure this is defined here!
+    const isDoctor = (req as any).user?.isDoctor; 
 
     if (!appointmentId) return res.status(400).json({ message: "Missing appointmentId" });
 
     const existing = await docClient.send(new GetCommand({ TableName: TABLE_APPOINTMENTS, Key: { appointmentId } }));
     if (!existing.Item) return res.status(404).json({ message: "Not found" });
 
-    // 🟢 Verify Ownership Before Updating
     if (existing.Item.patientId !== requesterId && existing.Item.doctorId !== requesterId) {
         await writeAuditLog(requesterId || "SYSTEM", existing.Item.patientId, "HIJACK_ATTEMPT", "User tried to modify another user's appointment", { region, ipAddress: req.ip });
         return res.status(403).json({ message: "Unauthorized to modify this appointment" });
@@ -563,6 +567,9 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
         }
 
         await cancelAppointment(existing.Item, status, refundId, region);
+
+        await writeAuditLog(requesterId || "SYSTEM", existing.Item.patientId, "CANCEL_APPOINTMENT_DOCTOR", `Doctor cancelled appointment ${appointmentId}`, { region, ipAddress: req.ip });
+        
         return res.status(200).json({ message: "Appointment cancelled, refunded, and schedule unlocked." });
     }
 
@@ -588,10 +595,20 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
         ExpressionAttributeValues: expressionAttributeValues
     }));
 
+    let actionType = "UPDATE_APPOINTMENT";
+    let actionDesc = `Updated appointment ${appointmentId}`;
+    if (patientArrived !== undefined) {
+        actionType = "PATIENT_CHECK_IN";
+        actionDesc = `Patient entered the virtual waiting room.`;
+    } else if (status) {
+        actionType = "APPOINTMENT_STATUS_CHANGE";
+        actionDesc = `Appointment status changed to ${status}`;
+    }
+
+    await writeAuditLog(requesterId || "SYSTEM", existing.Item.patientId, actionType, actionDesc, { region, ipAddress: req.ip, appointmentId });
+
     res.status(200).json({ message: "Appointment updated successfully" });
 });
-
-// Helper Function
 // Helper Function
 async function cancelAppointment(apt: any, newStatus: string, refundId: string, region: string) {
     const docClient = getRegionalClient(region);
