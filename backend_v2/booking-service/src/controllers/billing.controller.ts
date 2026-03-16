@@ -250,9 +250,9 @@ export const pushRevenueToBigQuery = async (txData: any, region: string) => {
         });
         if (!response.ok) {
             const errText = await response.text();
-            console.error(`❌ BQ REJECTED APPOINTMENT [${response.status}]:`, errText);
+            console.error(`❌ BQ REJECTED REVENUE [${response.status}]:`, errText);
         } else {
-            console.log(`✅ BQ APPOINTMENT STREAM SUCCESS!`);
+            console.log(`✅ BQ REVENUE STREAM SUCCESS!`); 
         }
     } catch (e: any) { 
         console.error("BigQuery Revenue Sync Failed", e.message); 

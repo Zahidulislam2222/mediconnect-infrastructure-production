@@ -8,7 +8,7 @@ import { logger } from '../../../shared/logger';
 import { writeAuditLog } from '../../../shared/audit';
 import { BookingPDFGenerator } from "../utils/pdf-generator";
 import { google } from 'googleapis';
-import { pushAppointmentToBigQuery } from './billing.controller';
+import { pushAppointmentToBigQuery, pushRevenueToBigQuery } from './billing.controller';
 
 // 🛡️ ARCHITECTURAL PURGE: 'pg' and 'db.ts' have been completely removed.
 // All data (including pricing and tokens) now securely flows through Regional DynamoDB.
@@ -246,6 +246,14 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
             try {
                 await stripeInstance.paymentIntents.capture(paymentIntentId);
                 logger.info(`Payment captured for ${appointmentId}`);
+
+                pushRevenueToBigQuery({
+                    billId: transactionId,
+                    patientId: patientId, // The function will hash this automatically
+                    doctorId: doctorId,
+                    amount: amountToCharge / 100,
+                    status: "PAID"
+                }, region).catch((e: any) => console.error("Revenue Stream Fail:", e));
                 
                 // 🟢 FIX: Get the ID and update DynamoDB
                 const googleEventId = await syncToGoogleCalendar(doctorId, normalizedTime, patientName, reason, region);
