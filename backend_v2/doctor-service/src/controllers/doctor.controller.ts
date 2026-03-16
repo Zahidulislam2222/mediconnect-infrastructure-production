@@ -918,7 +918,7 @@ const logDoctorOnboarding = async (doctorId: string, eventType: string, status: 
         const dataset = region.toUpperCase() === 'EU' ? "mediconnect_analytics_eu" : "mediconnect_analytics";
         const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/datasets/${dataset}/tables/doctor_onboarding_logs/insertAll`;
 
-        await fetch(url, {
+        const response = await fetch(url, {
             method: "POST",
             headers: {
                 "Authorization": `Bearer ${accessToken}`,
@@ -936,6 +936,12 @@ const logDoctorOnboarding = async (doctorId: string, eventType: string, status: 
                 }]
             })
         });
+        if (!response.ok) {
+            const errText = await response.text();
+            console.error(`❌ BQ REJECTED APPOINTMENT [${response.status}]:`, errText);
+        } else {
+            console.log(`✅ BQ APPOINTMENT STREAM SUCCESS!`);
+        }
     } catch (e: any) { 
         console.error("BigQuery Onboarding Log Failed", e.message); 
     }

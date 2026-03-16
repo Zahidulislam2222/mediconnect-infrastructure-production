@@ -227,7 +227,7 @@ export const pushRevenueToBigQuery = async (txData: any, region: string) => {
         
         const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/datasets/${dataset}/tables/analytics_revenue/insertAll`;
 
-        await fetch(url, {
+        const response = await fetch(url, {
             method: "POST",
             headers: { 
                 "Authorization": `Bearer ${accessToken}`,
@@ -248,6 +248,12 @@ export const pushRevenueToBigQuery = async (txData: any, region: string) => {
                 }]
             })
         });
+        if (!response.ok) {
+            const errText = await response.text();
+            console.error(`❌ BQ REJECTED APPOINTMENT [${response.status}]:`, errText);
+        } else {
+            console.log(`✅ BQ APPOINTMENT STREAM SUCCESS!`);
+        }
     } catch (e: any) { 
         console.error("BigQuery Revenue Sync Failed", e.message); 
     }
