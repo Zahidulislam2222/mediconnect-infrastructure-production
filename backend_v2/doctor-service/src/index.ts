@@ -3,7 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 
 import { GetParametersCommand } from "@aws-sdk/client-ssm";
 import { safeLog, safeError } from '../../shared/logger';
@@ -35,7 +35,13 @@ app.use(globalLimiter);
 const directoryLimiter = rateLimit({
     windowMs: 1 * 60 * 1000, 
     max: 20, 
-    keyGenerator: (req: any) => req.user?.sub || req.ip, 
+    keyGenerator: (req: any, res: any) => {
+        if (req.user?.sub) {
+            return req.user.sub;
+        }
+
+        return ipKeyGenerator(req, res);
+    }, 
     message: { error: "Security Alert: High-frequency directory scraping detected." },
     standardHeaders: true,
     legacyHeaders: false,

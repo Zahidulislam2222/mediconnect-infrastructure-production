@@ -3,7 +3,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { GetParametersCommand } from "@aws-sdk/client-ssm";
 
 import bookingRoutes from './routes/booking.routes';
@@ -34,7 +34,13 @@ app.use(globalLimiter);
 const bookingLimiter = rateLimit({
     windowMs: 1 * 60 * 1000,
     max: 5, 
-    keyGenerator: (req: any) => req.user?.id || req.ip, 
+    keyGenerator: (req: any, res: any) => {
+        if (req.user?.id) {
+            return req.user.id;
+        }
+
+        return ipKeyGenerator(req, res);
+    }, 
     message: { error: "Fraud Prevention: Too many transactional attempts." },
     standardHeaders: true,
     legacyHeaders: false,

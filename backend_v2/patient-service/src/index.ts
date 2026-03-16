@@ -16,7 +16,7 @@ import { getRegionalSSMClient } from '../../shared/aws-config';
 import { getSignedIoTUrl } from './utils/iot-signer'; 
 
 import { handleEmergencyDetection } from './modules/iot/emergency';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 
 import { pushVitalToBigQuery } from './modules/iot/vitals';
 
@@ -46,7 +46,13 @@ app.use(globalLimiter);
 const sensitiveDataLimiter = rateLimit({
     windowMs: 1 * 60 * 1000,
     max: 15, 
-    keyGenerator: (req: any) => req.user?.id || req.ip, 
+
+    keyGenerator: (req: any, res: any) => {
+        if (req.user?.id) {
+            return req.user.id;
+        }
+        return ipKeyGenerator(req, res);
+    }, 
     message: { error: "Security Throttling: Too many requests for medical records." },
     standardHeaders: true,
     legacyHeaders: false,
