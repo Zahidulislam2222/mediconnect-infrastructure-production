@@ -688,6 +688,37 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
         // We continue because we don't want to block the primary deletion if one record fails
     }
 
+    try {
+        const txQuery = await docClient.send(new QueryCommand({
+            TableName: process.env.TABLE_TRANSACTIONS || "mediconnect-transactions",
+            IndexName: "DoctorIndex",
+            KeyConditionExpression: "doctorId = :did",
+            ExpressionAttributeValues: { ":did": id }
+        }));
+
+        const transactions = txQuery.Items || [];
+        for (const tx of transactions) {
+            let newDesc = tx.description || "";
+            // Replace the doctor's name if it exists in the description
+            if (newDesc.includes("Consultation with")) {
+                newDesc = "Consultation (Provider Anonymized)";
+            }
+
+            await docClient.send(new UpdateCommand({
+                TableName: process.env.TABLE_TRANSACTIONS || "mediconnect-transactions",
+                Key: { billId: tx.billId },
+                UpdateExpression: "SET description = :desc, lastUpdated = :now",
+                ExpressionAttributeValues: { 
+                    ":desc": newDesc,
+                    ":now": new Date().toISOString()
+                }
+            }));
+        }
+        console.log(`[GDPR] Anonymized ${transactions.length} financial transaction records.`);
+    } catch (txErr) {
+        console.error("Transaction Anonymization Failed:", txErr);
+    }
+
     if (userCheck.Item.closureStatus !== "PENDING_CLOSURE") {
         await writeAuditLog(authUser.id, id, "ILLEGAL_DELETE_ATTEMPT", "Doctor tried to bypass closure review via API", { region, ipAddress: req.ip });
         return res.status(403).json({ 
