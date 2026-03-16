@@ -25,11 +25,20 @@ app.get('/ready', (req, res) => {
 });
 
 const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, 
-    max: 100, 
-    message: { error: "Too many requests. Please try again later." }
+    windowMs: 15 * 60 * 1000,
+    max: 500,
+    message: { error: "System Busy: Please try again later." }
 });
 app.use(globalLimiter);
+
+const bookingLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000,
+    max: 5, 
+    keyGenerator: (req: any) => req.user?.id || req.ip, 
+    message: { error: "Fraud Prevention: Too many transactional attempts." },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
 
 const PORT = process.env.PORT || 8083;
 let isAppReady = false;
@@ -96,6 +105,9 @@ app.use(morgan((tokens, req, res) => {
         tokens['verified-user'](req, res), `IP:${req.ip}`
     ].join(' ');
 }, { skip: (req) => req.url === '/health' || req.method === 'OPTIONS' }));
+
+app.use('/appointments', bookingLimiter);
+app.use('/billing', bookingLimiter);
 app.use('/', bookingRoutes);
 
 // --- 4. 100% COMPLIANT VAULT SYNC ---

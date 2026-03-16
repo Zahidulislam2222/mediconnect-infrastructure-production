@@ -37,11 +37,20 @@ app.get('/ready', (req, res) => {
 
 // 🟢 2. DDoS Protection
 const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, 
-    max: 100, 
-    message: { error: "Too many requests. Please try again later." }
+    windowMs: 15 * 60 * 1000,
+    max: 500,
+    message: { error: "System Busy: Please try again later." }
 });
 app.use(globalLimiter);
+
+const sensitiveDataLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000,
+    max: 15, 
+    keyGenerator: (req: any) => req.user?.id || req.ip, 
+    message: { error: "Security Throttling: Too many requests for medical records." },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
 
 const httpServer = createServer(app);
 const PORT = process.env.PORT || 8081;
@@ -257,6 +266,9 @@ const startServer = async () => {
         const { default: iotRoutes } = await import('./modules/iot/iot.routes');
         
         // 🟢 3. Attach routes
+        app.use('/stats', sensitiveDataLimiter);
+        app.use('/search', sensitiveDataLimiter);
+        app.use('/vitals', sensitiveDataLimiter); 
         app.use('/', patientRoutes);
         app.use('/', iotRoutes);
 

@@ -26,11 +26,20 @@ app.get('/ready', (req, res) => {
 
 // 🟢 2. DDoS Protection
 const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, 
-    max: 100, 
-    message: { error: "Too many requests. Please try again later." }
+    windowMs: 15 * 60 * 1000,
+    max: 500, // Higher limit for general assets
+    message: { error: "System Busy: Please try again later." }
 });
 app.use(globalLimiter);
+
+const directoryLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, 
+    max: 20, 
+    keyGenerator: (req: any) => req.user?.sub || req.ip, 
+    message: { error: "Security Alert: High-frequency directory scraping detected." },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
 
 const PORT = process.env.PORT || 8082;
 let isAppReady = false;
@@ -156,6 +165,7 @@ const startServer = async () => {
         const { default: clinicalRoutes } = await import('./modules/clinical/clinical.routes');
 
         // 🟢 3. Attach the routes to Express
+        app.use('/doctors', directoryLimiter);
         app.use('/', doctorRoutes);
         app.use('/', clinicalRoutes);
 
