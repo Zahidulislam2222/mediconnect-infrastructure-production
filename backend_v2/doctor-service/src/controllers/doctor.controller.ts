@@ -583,7 +583,10 @@ export const googleCallback = catchAsync(async (req: Request, res: Response) => 
             UpdateExpression: "SET googleRefreshToken = :token", ExpressionAttributeValues: { ":token": tokens.refresh_token }
         }));
     }
-    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:8080'}/settings?calendar=connected`);
+    const origins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : ['http://localhost:8080'];
+    const redirectBase = origins[0].trim(); 
+    
+    res.redirect(`${redirectBase}/settings?calendar=connected`);
 });
 
 export const disconnectGoogleCalendar = catchAsync(async (req: Request, res: Response) => {

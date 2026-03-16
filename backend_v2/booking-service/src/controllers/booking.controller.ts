@@ -233,7 +233,7 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         await writeAuditLog(patientId, patientId, "CREATE_BOOKING", `Appointment ${appointmentId} booked`, { 
             doctorId, timeSlot: normalizedTime, region, ipAddress: req.ip 
         });
-        pushAppointmentToBigQuery({
+        await pushAppointmentToBigQuery({
             appointmentId,
             doctorId,
             patientId,
@@ -247,7 +247,7 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
                 await stripeInstance.paymentIntents.capture(paymentIntentId);
                 logger.info(`Payment captured for ${appointmentId}`);
 
-                pushRevenueToBigQuery({
+                await pushRevenueToBigQuery({
                     billId: transactionId,
                     patientId: patientId, // The function will hash this automatically
                     doctorId: doctorId,
@@ -508,7 +508,7 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
         await writeAuditLog(patientId, patientId, "CANCEL_BOOKING", `Appointment ${appointmentId} cancelled`, { 
             reason: "User requested", region, ipAddress: req.ip 
         });
-        pushAppointmentToBigQuery({
+        await pushAppointmentToBigQuery({
             appointmentId,
             doctorId: apt.doctorId,
             patientId,
@@ -631,7 +631,7 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
 
     await writeAuditLog(requesterId || "SYSTEM", existing.Item.patientId, actionType, actionDesc, { region, ipAddress: req.ip, appointmentId });
     if (status) {
-        pushAppointmentToBigQuery({
+        await pushAppointmentToBigQuery({
             appointmentId,
             doctorId: existing.Item.doctorId,
             patientId: existing.Item.patientId,
@@ -680,7 +680,7 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
             deleteFromGoogleCalendar(apt.doctorId, apt.googleEventId, region).catch(e => 
                 console.error("[Cleanup] Calendar delete failed:", e.message)
             );
-            pushAppointmentToBigQuery({
+            await pushAppointmentToBigQuery({
             appointmentId: apt.appointmentId,
             doctorId: apt.doctorId,
             patientId: apt.patientId,
