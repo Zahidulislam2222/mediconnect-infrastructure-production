@@ -267,7 +267,7 @@ export const pushAppointmentToBigQuery = async (aptData: any, region: string) =>
             ? "ANONYMIZED_GDPR" 
             : createHash('sha256').update(aptData.patientId + (process.env.HIPAA_SALT || 'mediconnect_salt')).digest('hex');
 
-        await fetch(url, {
+        const response = await fetch(url, {
             method: "POST",
             headers: { "Authorization": `Bearer ${accessToken}`, "Content-Type": "application/json" }, 
             body: JSON.stringify({
@@ -276,7 +276,7 @@ export const pushAppointmentToBigQuery = async (aptData: any, region: string) =>
                     json: {
                         appointment_id: aptData.appointmentId,
                         doctor_id: aptData.doctorId,
-                        patient_id: safePatientId, // 🛡️ SECURE
+                        patient_id: safePatientId,
                         specialization: aptData.specialization || "General",
                         status: aptData.status,
                         timestamp: new Date().toISOString()
@@ -284,5 +284,12 @@ export const pushAppointmentToBigQuery = async (aptData: any, region: string) =>
                 }]
             })
         });
+
+        if (!response.ok) {
+            const errText = await response.text();
+            console.error(`❌ BQ REJECTED APPOINTMENT [${response.status}]:`, errText);
+        } else {
+            console.log(`✅ BQ APPOINTMENT STREAM SUCCESS!`);
+        }
     } catch (e: any) { console.error("BigQuery Appointment Stream Failed", e.message); }
 };
