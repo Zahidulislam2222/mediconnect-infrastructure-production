@@ -247,13 +247,17 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
                 await stripeInstance.paymentIntents.capture(paymentIntentId);
                 logger.info(`Payment captured for ${appointmentId}`);
 
-                await pushRevenueToBigQuery({
+                const generator = new BookingPDFGenerator();
+                await generator.generateReceipt({
+                    appointmentId,
                     billId: transactionId,
-                    patientId: patientId, // The function will hash this automatically
-                    doctorId: doctorId,
+                    patientName: actualPatientName,
+                    doctorName: actualDoctorName,
                     amount: amountToCharge / 100,
-                    status: "PAID"
-                }, region).catch((e: any) => console.error("Revenue Stream Fail:", e));
+                    date: normalizedTime,
+                    status: "PAID",
+                    type: "BOOKING"
+                }, region).catch(e => console.error("Auto-PDF Generation Failed:", e));
                 
                 // 🟢 FIX: Get the ID and update DynamoDB
                 const googleEventId = await syncToGoogleCalendar(doctorId, normalizedTime, patientName, reason, region);
@@ -508,13 +512,17 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
         await writeAuditLog(patientId, patientId, "CANCEL_BOOKING", `Appointment ${appointmentId} cancelled`, { 
             reason: "User requested", region, ipAddress: req.ip 
         });
-        await pushAppointmentToBigQuery({
+        const generator = new BookingPDFGenerator();
+        await generator.generateReceipt({
             appointmentId,
-            doctorId: apt.doctorId,
-            patientId,
-            status: "CANCELLED",
-            specialization: apt.specialization
-        }, region).catch(e => console.error(e));
+            billId: apt.paymentId || appointmentId,
+            patientName: apt.patientName,
+            doctorName: apt.doctorName,
+            amount: apt.amountPaid || 0,
+            date: new Date().toISOString(),
+            status: "REFUNDED",
+            type: "REFUND"
+        }, region).catch(e => console.error("Auto-Refund PDF Failed:", e));
     } catch (e) { console.warn("Audit log failed..."); }
 
     // 5. Ledger Entry
@@ -646,7 +654,7 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
 async function cancelAppointment(apt: any, newStatus: string, refundId: string, region: string) {
     const docClient = getRegionalClient(region);
     try {
-        // 🟢 FHIR & DYNAMODB CRASH FIX (Applied to Helper)
+        // 1. FHIR & DYNAMODB CRASH FIX
         let fhirResource = apt.resource;
         if (fhirResource) {
             fhirResource.status = "cancelled"; 
@@ -676,18 +684,35 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
             await docClient.send(new DeleteCommand({ TableName: TABLE_LOCKS, Key: { lockId: lockKey } }));
         }
 
+        // 2. Google Calendar Cleanup (If connected)
         if (apt.googleEventId && apt.doctorId) {
-            deleteFromGoogleCalendar(apt.doctorId, apt.googleEventId, region).catch(e => 
+            await deleteFromGoogleCalendar(apt.doctorId, apt.googleEventId, region).catch(e => 
                 console.error("[Cleanup] Calendar delete failed:", e.message)
             );
-            await pushAppointmentToBigQuery({
+        }
+
+        // 🟢 FIX: These must be OUTSIDE the google check to work for everyone!
+        // 3. AUTOMATIC SYSTEM RECEIPT
+        const generator = new BookingPDFGenerator();
+        await generator.generateReceipt({
+            appointmentId: apt.appointmentId,
+            billId: apt.paymentId || apt.appointmentId,
+            patientName: apt.patientName,
+            doctorName: apt.doctorName,
+            amount: apt.amountPaid || 0,
+            date: new Date().toISOString(),
+            status: refundId.includes("REFUND") || refundId !== "FAILED" ? "REFUNDED" : "CANCELLED",
+            type: "REFUND"
+        }, region).catch(e => console.error("Auto-System PDF Failed:", e));
+
+        // 4. BIGQUERY TELEMETRY
+        await pushAppointmentToBigQuery({
             appointmentId: apt.appointmentId,
             doctorId: apt.doctorId,
             patientId: apt.patientId,
             status: newStatus,
             specialization: apt.specialization
         }, region).catch(e => console.error(e));
-        }
 
     } catch (e) { console.error("Cancel update failed", e); }
 }
