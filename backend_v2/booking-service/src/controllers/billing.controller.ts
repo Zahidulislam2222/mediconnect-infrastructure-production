@@ -283,9 +283,11 @@ export const pushAppointmentToBigQuery = async (aptData: any, region: string) =>
                         appointment_id: aptData.appointmentId,
                         doctor_id: aptData.doctorId,
                         patient_id: safePatientId,
-                        specialization: aptData.specialization || "General",
-                        status: aptData.status,
-                        timestamp: new Date().toISOString()
+                        timestamp: new Date().toISOString(),
+                        specialization: aptData.specialization || "General", 
+                        status: aptData.status || "CONFIRMED",             
+                        notes: aptData.reason || "N/A",                  
+                        cost: aptData.amountPaid || 50.0 
                     }
                 }]
             })
