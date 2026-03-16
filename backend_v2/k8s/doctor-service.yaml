@@ -45,6 +45,10 @@ spec:
               value: "production"
             - name: PORT
               value: "8082"
+            - name: GOOGLE_CLIENT_ID
+              value: "__GOOGLE_CLIENT_ID__"
+            - name: GOOGLE_CLIENT_SECRET
+              value: "__GOOGLE_CLIENT_SECRET__"
             - name: ALLOWED_ORIGINS
               value: "__ALLOWED_ORIGINS__"
             - name: API_PUBLIC_URL

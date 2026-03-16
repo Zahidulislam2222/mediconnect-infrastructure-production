@@ -526,11 +526,8 @@ export const getCalendarStatus = catchAsync(async (req: Request, res: Response) 
 export const connectGoogleCalendar = catchAsync(async (req: Request, res: Response) => {
     const { id } = req.query; 
 
-    const protocol = (req.headers['x-forwarded-proto'] as string) || 'https';
-    const host = req.get('host'); 
-    
-    // 🟢 2. Construct the Redirect URI dynamically
-    const redirectUri = `${protocol}://${host}/doctors/auth/google/callback`;
+    const doctorBase = process.env.API_PUBLIC_URL || "http://localhost:8082";
+    const redirectUri = `${doctorBase.replace(/\/$/, '')}/doctors/auth/google/callback`;
 
     const secret = process.env.GOOGLE_CLIENT_SECRET || 'fallback_secret';
     const secureState = jwt.sign({ doctorId: id }, secret, { expiresIn: '15m' });
@@ -557,9 +554,8 @@ export const googleCallback = catchAsync(async (req: Request, res: Response) => 
     if (!code || !state) return res.status(400).json({ error: "Invalid callback data" });
 
     // 🟢 1. Re-construct the EXACT same dynamic URI (Google requires a perfect match)
-    const protocol = (req.headers['x-forwarded-proto'] as string) || 'https';
-    const host = req.get('host');
-    const redirectUri = `${protocol}://${host}/doctors/auth/google/callback`;
+    const doctorBase = process.env.API_PUBLIC_URL || "http://localhost:8082";
+    const redirectUri = `${doctorBase.replace(/\/$/, '')}/doctors/auth/google/callback`;
 
     let targetDoctorId = "";
     try {
@@ -941,7 +937,7 @@ const logDoctorOnboarding = async (doctorId: string, eventType: string, status: 
         });
         if (!response.ok) {
             const errText = await response.text();
-            console.error(`❌ BQ REJECTED APPOINTMENT [${response.status}]:`, errText);
+            console.error(`❌ BQ REJECTED ONBOARDING LOG [${response.status}]:`, errText);
         } else {
             console.log(`✅ BQ APPOINTMENT STREAM SUCCESS!`);
         }

@@ -744,10 +744,15 @@ async function syncToGoogleCalendar(doctorId: string, timeSlot: string, patientN
         const refreshToken = res.Item?.googleRefreshToken;
         if (!refreshToken) return null; // Return null if no token
 
+        const doctorBase = process.env.DOCTOR_SERVICE_URL; 
+        if (!doctorBase) throw new Error("Critical Config Error: DOCTOR_SERVICE_URL is missing.");
+
+        const redirectUri = `${doctorBase.replace(/\/$/, '')}/doctors/auth/google/callback`;
+
         const oauth2Client = new google.auth.OAuth2(
             process.env.GOOGLE_CLIENT_ID,
             process.env.GOOGLE_CLIENT_SECRET,
-            `${process.env.API_PUBLIC_URL}/doctors/auth/google/callback`
+            redirectUri
         );
         oauth2Client.setCredentials({ refresh_token: refreshToken });
         const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
@@ -790,9 +795,15 @@ async function deleteFromGoogleCalendar(doctorId: string, googleEventId: string,
         if (!refreshToken) return;
 
         // 2. Auth with Google
+        const doctorBase = process.env.DOCTOR_SERVICE_URL; 
+        if (!doctorBase) throw new Error("Critical Config Error: DOCTOR_SERVICE_URL is missing.");
+
+        const redirectUri = `${doctorBase.replace(/\/$/, '')}/doctors/auth/google/callback`;
+
         const oauth2Client = new google.auth.OAuth2(
             process.env.GOOGLE_CLIENT_ID,
-            process.env.GOOGLE_CLIENT_SECRET
+            process.env.GOOGLE_CLIENT_SECRET,
+            redirectUri
         );
         oauth2Client.setCredentials({ refresh_token: refreshToken });
         const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
