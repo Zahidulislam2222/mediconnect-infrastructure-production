@@ -6,6 +6,7 @@ import Stripe from "stripe";
 import { randomUUID } from "crypto";
 import { logger } from '../../../shared/logger';
 import { writeAuditLog } from '../../../shared/audit';
+import { decryptToken } from '../../../shared/kms-crypto';
 import { BookingPDFGenerator } from "../utils/pdf-generator";
 import { google } from 'googleapis';
 import { pushAppointmentToBigQuery, pushRevenueToBigQuery } from './billing.controller';
@@ -107,6 +108,21 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
     amountToCharge = Math.round(fee * 100);
 
     // 2. Atomic Locking (Condition: attribute_not_exists)
+    // ─── LOCK TTL FIX ──────────────────────────────────────────────────────
+    // ORIGINAL: expiresAt was set to now + 15 minutes for ALL locks.
+    // BUG: DynamoDB TTL would delete the lock 15 min after creation, even
+    // for appointments days away. After TTL deletion, the slot could be
+    // double-booked by another patient.
+    //
+    // FIX: Initial LOCKED state uses 15-min TTL (reservation window while
+    // payment processes). The BOOKED promotion (in TransactWrite below)
+    // extends expiresAt to appointment end time + 1 hour buffer.
+    // ─────────────────────────────────────────────────────────────────────────
+    const LOCK_RESERVATION_TTL_SECONDS = 15 * 60; // 15 min for payment processing
+    const LOCK_BOOKED_BUFFER_SECONDS = 60 * 60;   // 1 hour after appointment ends
+    const appointmentEndTimeMs = new Date(normalizedTime).getTime() + (30 * 60 * 1000); // 30-min consultation
+    const bookedLockExpiresAt = Math.floor(appointmentEndTimeMs / 1000) + LOCK_BOOKED_BUFFER_SECONDS;
+
     try {
         await docClient.send(new PutCommand({
             TableName: TABLE_LOCKS,
@@ -115,7 +131,7 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
                 reservedBy: patientId,
                 status: "LOCKED",
                 createdAt: new Date().toISOString(),
-                expiresAt: Math.floor(Date.now() / 1000) + (15 * 60)
+                expiresAt: Math.floor(Date.now() / 1000) + LOCK_RESERVATION_TTL_SECONDS
             },
             ConditionExpression: "attribute_not_exists(lockId)"
         }));
@@ -146,7 +162,7 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         });
         paymentIntentId = paymentIntent.id;
     } catch (paymentError: any) {
-        console.error("Payment Failed:", paymentError.message);
+        logger.error("[BOOKING] Payment authorization failed", { error: paymentError.message });
         await docClient.send(new DeleteCommand({ TableName: TABLE_LOCKS, Key: { lockId: lockKey } }));
         return res.status(402).json({ error: "Payment Failed", details: paymentError.message });
     }
@@ -165,10 +181,43 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
             { actor: { reference: `Patient/${patientId}`, display: actualPatientName }, status: "accepted" },
             { actor: { reference: `Practitioner/${doctorId}`, display: actualDoctorName }, status: "accepted" }
         ],
-        serviceType: [{ coding: [{ code: "general", display: "General Practice" }] }]
+        serviceType: [{ coding: [{ system: "http://terminology.hl7.org/CodeSystem/service-type", code: "general", display: "General Practice" }] }],
+        minutesDuration: 30,
+        priority: priority === "High" ? 1 : priority === "Medium" ? 5 : 10,
+        meta: { lastUpdated: timestamp, versionId: "1" }
     };
 
-    // 4. TransactWriteItems (Atomic Commit to Regional DB)
+    // ─── PAYMENT CAPTURE ORDERING FIX ─────────────────────────────────────
+    // ORIGINAL FLOW (broken):
+    //   1. TransactWrite → DB says "PAID" and "CONFIRMED"
+    //   2. stripe.capture() → actually take money
+    //   3. If capture fails: DB committed but money never taken ❌
+    //
+    // FIXED FLOW:
+    //   1. stripe.capture() → actually take money FIRST
+    //   2. TransactWrite → DB says "PAID" and "CONFIRMED"
+    //   3. If DB fails: refund the captured payment (safe rollback)
+    //
+    // This ensures money is never marked as "PAID" unless Stripe confirms it.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    // Step 1: Capture payment BEFORE committing to database
+    if (stripeInstance && paymentIntentId) {
+        try {
+            await stripeInstance.paymentIntents.capture(paymentIntentId);
+            logger.info(`Payment captured for ${appointmentId}`);
+        } catch (captureError: any) {
+            // Capture failed — release lock, do NOT write to DB
+            logger.error("Payment capture failed. Releasing lock.", { appointmentId, paymentIntentId, error: captureError.message });
+            try { await stripeInstance.paymentIntents.cancel(paymentIntentId); } catch (e) { }
+            if (lockKey) {
+                try { await docClient.send(new DeleteCommand({ TableName: TABLE_LOCKS, Key: { lockId: lockKey } })); } catch (e) { }
+            }
+            return res.status(402).json({ error: "Payment capture failed. Your card was not charged.", details: captureError.message });
+        }
+    }
+
+    // Step 2: TransactWriteItems (Atomic Commit to Regional DB) — only after payment confirmed
     try {
         await docClient.send(new TransactWriteCommand({
         TransactItems: [
@@ -179,8 +228,8 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
                         appointmentId, patientId, patientName: actualPatientName, doctorId, doctorName: actualDoctorName,
                         timeSlot: normalizedTime, status: "CONFIRMED",
                         paymentStatus: "paid", paymentId: paymentIntentId,
-                        createdAt: timestamp, amountPaid: amountToCharge / 100, 
-                        coverageType: "NONE", priority, reason, patientAvatar, patientAge, 
+                        createdAt: timestamp, amountPaid: amountToCharge / 100,
+                        coverageType: "NONE", priority, reason, patientAvatar, patientAge,
                         triageStatus: "WAITING", resource: fhirResource
                     }
                 }
@@ -198,12 +247,17 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
                 }
             },
             {
+                // ─── LOCK TTL FIX: Extend expiry when promoting to BOOKED ───
+                // ORIGINAL: Only updated status and appointmentId, leaving
+                // expiresAt at the initial 15-min TTL. DynamoDB would delete
+                // the lock before the appointment even started.
+                // FIX: Set expiresAt to appointment end + 1 hour buffer.
                 Update: {
                     TableName: TABLE_LOCKS,
                     Key: { lockId: lockKey },
-                    UpdateExpression: "SET #s = :s, appointmentId = :aid",
+                    UpdateExpression: "SET #s = :s, appointmentId = :aid, expiresAt = :exp",
                     ExpressionAttributeNames: { "#s": "status" },
-                    ExpressionAttributeValues: { ":s": "BOOKED", ":aid": appointmentId }
+                    ExpressionAttributeValues: { ":s": "BOOKED", ":aid": appointmentId, ":exp": bookedLockExpiresAt }
                 }
             },
             {
@@ -230,8 +284,8 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         }));
 
         // 🟢 HIPAA AUDIT: Log with Region and IP Tracking
-        await writeAuditLog(patientId, patientId, "CREATE_BOOKING", `Appointment ${appointmentId} booked`, { 
-            doctorId, timeSlot: normalizedTime, region, ipAddress: req.ip 
+        await writeAuditLog(patientId, patientId, "CREATE_BOOKING", `Appointment ${appointmentId} booked`, {
+            doctorId, timeSlot: normalizedTime, region, ipAddress: req.ip
         });
         await pushAppointmentToBigQuery({
             appointmentId,
@@ -239,40 +293,36 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
             patientId,
             status: "CONFIRMED",
             specialization: doctorRes.Item?.specialization
-        }, region).catch(e => console.error(e));
-        
+        }, region).catch(e => logger.error("[BOOKING] BigQuery appointment sync failed", { error: e.message }));
 
-        if (stripeInstance && paymentIntentId) {
-            try {
-                await stripeInstance.paymentIntents.capture(paymentIntentId);
-                logger.info(`Payment captured for ${appointmentId}`);
+        // Step 3: Post-commit side effects (PDF receipt, calendar sync)
+        // These are non-critical — failures are logged but don't affect the booking
+        try {
+            const generator = new BookingPDFGenerator();
+            await generator.generateReceipt({
+                appointmentId,
+                billId: transactionId,
+                patientName: actualPatientName,
+                doctorName: actualDoctorName,
+                amount: amountToCharge / 100,
+                date: normalizedTime,
+                status: "PAID",
+                type: "BOOKING"
+            }, region).catch(e => logger.error("[BOOKING] Auto-PDF generation failed", { error: e.message }));
 
-                const generator = new BookingPDFGenerator();
-                await generator.generateReceipt({
-                    appointmentId,
-                    billId: transactionId,
-                    patientName: actualPatientName,
-                    doctorName: actualDoctorName,
-                    amount: amountToCharge / 100,
-                    date: normalizedTime,
-                    status: "PAID",
-                    type: "BOOKING"
-                }, region).catch(e => console.error("Auto-PDF Generation Failed:", e));
-                
-                // 🟢 FIX: Get the ID and update DynamoDB
-                const googleEventId = await syncToGoogleCalendar(doctorId, normalizedTime, patientName, reason, region);
-                
-                if (googleEventId) {
-                    await docClient.send(new UpdateCommand({
-                        TableName: TABLE_APPOINTMENTS,
-                        Key: { appointmentId },
-                        UpdateExpression: "SET googleEventId = :gid",
-                        ExpressionAttributeValues: { ":gid": googleEventId }
-                    }));
-                }
-            } catch (captureError) {
-                logger.error("CRITICAL: DB Write Success but Payment Capture or Calendar Sync Failed", { appointmentId, paymentIntentId });
+            // 🟢 FIX: Get the ID and update DynamoDB
+            const googleEventId = await syncToGoogleCalendar(doctorId, normalizedTime, patientName, reason, region);
+
+            if (googleEventId) {
+                await docClient.send(new UpdateCommand({
+                    TableName: TABLE_APPOINTMENTS,
+                    Key: { appointmentId },
+                    UpdateExpression: "SET googleEventId = :gid",
+                    ExpressionAttributeValues: { ":gid": googleEventId }
+                }));
             }
+        } catch (sideEffectError) {
+            logger.error("Non-critical post-booking side effect failed", { appointmentId, error: sideEffectError });
         }
 
         res.status(200).json({
@@ -281,22 +331,54 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         });
 
     } catch (dbError: any) {
-        console.error("Transaction Failed. Releasing Payment Hold.", dbError);
+        // ─── DB FAIL AFTER CAPTURE: Issue refund (money was already taken) ───
+        // ORIGINAL: Cancelled the payment hold (which hadn't been captured yet).
+        // FIX: Now that capture happens first, we must REFUND (not cancel).
+        logger.error("[BOOKING] CRITICAL: DB transaction failed after payment capture. Issuing refund.", { error: dbError.message });
         if (stripeInstance && paymentIntentId) {
-            try { await stripeInstance.paymentIntents.cancel(paymentIntentId); } catch (e) { }
+            try {
+                await stripeInstance.refunds.create({ payment_intent: paymentIntentId });
+                logger.info(`Refund issued for failed booking: ${paymentIntentId}`);
+            } catch (refundError) {
+                // CRITICAL: Money taken but DB and refund both failed
+                // This requires manual intervention
+                logger.error("CRITICAL ESCALATION: Payment captured but both DB write and refund failed. Manual intervention required.", {
+                    appointmentId, paymentIntentId, patientId, amount: amountToCharge
+                });
+            }
         }
         if (lockKey) {
             try { await docClient.send(new DeleteCommand({ TableName: TABLE_LOCKS, Key: { lockId: lockKey } })); } catch (e) { }
         }
-        res.status(500).json({ error: "System Error. Payment hold released." });
+        res.status(500).json({ error: "System Error. Your payment has been refunded." });
     }
 });
+
+// FHIR R4 Status Mapping: Internal DB statuses → FHIR AppointmentStatus valueset
+const FHIR_STATUS_MAP: Record<string, string> = {
+    CONFIRMED: "booked",
+    IN_PROGRESS: "arrived",
+    COMPLETED: "fulfilled",
+    CANCELLED: "cancelled",
+    CANCELLED_NO_SHOW: "noshow",
+    CANCELLED_DOCTOR_FAULT: "cancelled",
+};
+
+function syncFhirStatus(appointment: any): any {
+    if (appointment.resource && appointment.status) {
+        appointment.resource.status = FHIR_STATUS_MAP[appointment.status] || appointment.resource.status;
+    }
+    return appointment;
+}
 
 export const getAppointments = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req);
     const docClient = getRegionalClient(region);
-    
-    const { doctorId, patientId, startKey } = req.query;
+
+    // FHIR search aliases: patient → patientId, practitioner → doctorId
+    const doctorId = req.query.doctorId || req.query.practitioner;
+    const patientId = req.query.patientId || req.query.patient;
+    const { startKey } = req.query;
     const authReq = req as AuthRequest;
     const requesterId = authReq.user?.sub || authReq.user?.id;
     const isDoctor = (req as any).user?.isDoctor;
@@ -332,7 +414,12 @@ export const getAppointments = catchAsync(async (req: Request, res: Response) =>
 
         await writeAuditLog(requesterId || "SYSTEM", String(patientId), "READ_APPOINTMENTS", "Viewed patient appointment history", { region, ipAddress: req.ip });
 
-        return res.status(200).json({ existingBookings: response.Items ||[], lastEvaluatedKey: response.LastEvaluatedKey });
+        const items = (response.Items || []).map(syncFhirStatus);
+        return res.status(200).json({
+            resourceType: "Bundle", type: "searchset", total: items.length,
+            entry: items.map((a: any) => ({ resource: a.resource || a })),
+            existingBookings: items, lastEvaluatedKey: response.LastEvaluatedKey
+        });
     }
 
     if (doctorId) {
@@ -357,7 +444,12 @@ export const getAppointments = catchAsync(async (req: Request, res: Response) =>
 
         await writeAuditLog(requesterId || "SYSTEM", String(doctorId), "READ_SCHEDULE", "Viewed doctor appointment schedule", { region, ipAddress: req.ip });
 
-        return res.status(200).json({ existingBookings: bookings, lastEvaluatedKey: bookingRes.LastEvaluatedKey });
+        const syncedBookings = bookings.map(syncFhirStatus);
+        return res.status(200).json({
+            resourceType: "Bundle", type: "searchset", total: syncedBookings.length,
+            entry: syncedBookings.map((a: any) => ({ resource: a.resource || a })),
+            existingBookings: syncedBookings, lastEvaluatedKey: bookingRes.LastEvaluatedKey
+        });
     }
 
     res.status(400).json({ error: "Missing doctorId or patientId" });
@@ -412,7 +504,7 @@ export const cleanupAppointments = catchAsync(async (req: Request, res: Response
                     try {
                         const refund = await stripe.refunds.create({ payment_intent: apt.paymentId });
                         refundId = refund.id;
-                    } catch (e) { console.error("Refund failed", e); }
+                    } catch (e: any) { logger.error("[BOOKING] Refund failed during cleanup", { error: e.message }); }
                 }
                 await cancelAppointment(apt, "CANCELLED_DOCTOR_FAULT", refundId, region);
                 processed++;
@@ -469,7 +561,7 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
                 refundId = refund.id;
             }
         } catch (e: any) {
-            console.error("Stripe Refund Failed:", e.message);
+            logger.error("[BOOKING] Stripe refund failed for user cancellation", { error: e.message });
             refundId = "REFUND_FAILED_MANUAL_REQUIRED";
         }
     }
@@ -477,10 +569,10 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
     // 2. Update Appointment Status
     let fhirResource = apt.resource;
     if (fhirResource) {
-        fhirResource.status = "cancelled"; // Root status
+        fhirResource.status = "cancelled";
+        fhirResource.cancelationReason = { coding: [{ system: "http://terminology.hl7.org/CodeSystem/appointment-cancellation-reason", code: "pat", display: "Patient" }], text: "Cancelled by patient" };
         if (Array.isArray(fhirResource.participant)) {
-            // FHIR Spec: Participants decline, they do not "cancel"
-            fhirResource.participant.forEach((p: any) => p.status = "declined"); 
+            fhirResource.participant.forEach((p: any) => p.status = "declined");
         }
     }
 
@@ -500,11 +592,11 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
         try {
             const lockKey = `${apt.doctorId}#${normalizeTimeSlot(apt.timeSlot)}`;
             await docClient.send(new DeleteCommand({ TableName: TABLE_LOCKS, Key: { lockId: lockKey } }));
-        } catch (lockError) { console.error("Failed to release lock:", lockError); }
+        } catch (lockError: any) { logger.error("[BOOKING] Failed to release lock", { error: lockError.message }); }
     }
 
     if (apt.googleEventId && apt.doctorId) {
-        deleteFromGoogleCalendar(apt.doctorId, apt.googleEventId, region).catch(console.error);
+        deleteFromGoogleCalendar(apt.doctorId, apt.googleEventId, region).catch(e => logger.error("[BOOKING] Calendar delete failed on user cancel", { error: e.message }));
     }
 
     // 4. Audit Log
@@ -522,7 +614,7 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
             date: new Date().toISOString(),
             status: "REFUNDED",
             type: "REFUND"
-        }, region).catch(e => console.error("Auto-Refund PDF Failed:", e));
+        }, region).catch(e => logger.error("[BOOKING] Auto-refund PDF generation failed", { error: e.message }));
     } catch (e) { console.warn("Audit log failed..."); }
 
     // 5. Ledger Entry
@@ -594,7 +686,7 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
                     }));
                 }
             } catch (e: any) {
-                console.error("Stripe Refund Failed during Doctor Cancel:", e.message);
+                logger.error("[BOOKING] Stripe refund failed during doctor cancellation", { error: e.message });
             }
         }
 
@@ -645,7 +737,7 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
             patientId: existing.Item.patientId,
             status: status,
             specialization: existing.Item.specialization
-        }, region).catch(e => console.error(e));
+        }, region).catch(e => logger.error("[BOOKING] BigQuery appointment update sync failed", { error: e.message }));
     }
 
     res.status(200).json({ message: "Appointment updated successfully" });
@@ -686,8 +778,8 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
 
         // 2. Google Calendar Cleanup (If connected)
         if (apt.googleEventId && apt.doctorId) {
-            await deleteFromGoogleCalendar(apt.doctorId, apt.googleEventId, region).catch(e => 
-                console.error("[Cleanup] Calendar delete failed:", e.message)
+            await deleteFromGoogleCalendar(apt.doctorId, apt.googleEventId, region).catch(e =>
+                logger.error("[BOOKING] Cleanup calendar delete failed", { error: e.message })
             );
         }
 
@@ -703,7 +795,7 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
             date: new Date().toISOString(),
             status: refundId.includes("REFUND") || refundId !== "FAILED" ? "REFUNDED" : "CANCELLED",
             type: "REFUND"
-        }, region).catch(e => console.error("Auto-System PDF Failed:", e));
+        }, region).catch(e => logger.error("[BOOKING] Auto-system PDF generation failed", { error: e.message }));
 
         // 4. BIGQUERY TELEMETRY
         await pushAppointmentToBigQuery({
@@ -712,9 +804,9 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
             patientId: apt.patientId,
             status: newStatus,
             specialization: apt.specialization
-        }, region).catch(e => console.error(e));
+        }, region).catch(e => logger.error("[BOOKING] BigQuery cancellation sync failed", { error: e.message }));
 
-    } catch (e) { console.error("Cancel update failed", e); }
+    } catch (e: any) { logger.error("[BOOKING] Cancel appointment update failed", { error: e.message }); }
 }
 
 export const getReceipt = catchAsync(async (req: Request, res: Response) => {
@@ -750,7 +842,7 @@ export const getReceipt = catchAsync(async (req: Request, res: Response) => {
 
         res.status(200).json({ downloadUrl: url });
     } catch (pdfError: any) {
-        console.error("PDF Generation Error:", pdfError);
+        logger.error("[BOOKING] PDF receipt generation failed", { error: pdfError.message });
         res.status(500).json({ message: "Receipt generation failed on the server." });
     }
 });
@@ -759,15 +851,18 @@ export const getReceipt = catchAsync(async (req: Request, res: Response) => {
 async function syncToGoogleCalendar(doctorId: string, timeSlot: string, patientName: string, reason: string, region: string): Promise<string | null> {
     try {
         const docClient = getRegionalClient(region);
-        
-        const res = await docClient.send(new GetCommand({ 
-            TableName: TABLE_DOCTORS, 
+
+        const res = await docClient.send(new GetCommand({
+            TableName: TABLE_DOCTORS,
             Key: { doctorId },
             ProjectionExpression: "googleRefreshToken"
         }));
-        
-        const refreshToken = res.Item?.googleRefreshToken;
-        if (!refreshToken) return null; // Return null if no token
+
+        const storedToken = res.Item?.googleRefreshToken;
+        if (!storedToken) return null; // Return null if no token
+
+        // ─── KMS DECRYPTION FIX: Decrypt token before use ───
+        const refreshToken = await decryptToken(storedToken, region);
 
         const doctorBase = process.env.DOCTOR_SERVICE_URL; 
         if (!doctorBase) throw new Error("Critical Config Error: DOCTOR_SERVICE_URL is missing.");
@@ -796,11 +891,11 @@ async function syncToGoogleCalendar(doctorId: string, timeSlot: string, patientN
             }
         });
 
-        console.log(`[Calendar] Event created for ${doctorId}`);
+        logger.info("[BOOKING] Calendar event created successfully");
         return response.data.id || null; // 🟢 RETURN THE ID
 
     } catch (error: any) {
-        console.error("[Calendar Sync Failed]:", error.message);
+        logger.error("[BOOKING] Calendar sync failed", { error: error.message });
         return null;
     }
 }
@@ -808,16 +903,19 @@ async function syncToGoogleCalendar(doctorId: string, timeSlot: string, patientN
 async function deleteFromGoogleCalendar(doctorId: string, googleEventId: string, region: string) {
     try {
         const docClient = getRegionalClient(region);
-        
+
         // 1. Get Doctor's Refresh Token
-        const res = await docClient.send(new GetCommand({ 
-            TableName: TABLE_DOCTORS, 
+        const res = await docClient.send(new GetCommand({
+            TableName: TABLE_DOCTORS,
             Key: { doctorId },
             ProjectionExpression: "googleRefreshToken"
         }));
-        
-        const refreshToken = res.Item?.googleRefreshToken;
-        if (!refreshToken) return;
+
+        const storedToken = res.Item?.googleRefreshToken;
+        if (!storedToken) return;
+
+        // ─── KMS DECRYPTION FIX: Decrypt token before use ───
+        const refreshToken = await decryptToken(storedToken, region);
 
         // 2. Auth with Google
         const doctorBase = process.env.DOCTOR_SERVICE_URL; 
@@ -839,8 +937,8 @@ async function deleteFromGoogleCalendar(doctorId: string, googleEventId: string,
             eventId: googleEventId
         });
 
-        console.log(`[Calendar] Event ${googleEventId} deleted for doctor ${doctorId}`);
+        logger.info("[BOOKING] Calendar event deleted successfully");
     } catch (error: any) {
-        console.error("[Calendar Delete Failed]:", error.message);
+        logger.error("[BOOKING] Calendar event deletion failed", { error: error.message });
     }
 }

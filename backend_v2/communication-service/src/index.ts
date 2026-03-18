@@ -7,9 +7,10 @@ import rateLimit from "express-rate-limit";
 import { GetParametersCommand } from "@aws-sdk/client-ssm";
 
 import { communicationRoutes } from "./routes/communication.routes";
-import { aiRoutes } from "./routes/ai.routes"; 
+import { aiRoutes } from "./routes/ai.routes";
 import { authMiddleware } from './middleware/auth.middleware';
-import { getRegionalSSMClient } from '../../shared/aws-config'; 
+import { getRegionalSSMClient } from '../../shared/aws-config';
+import { createRateLimitStore } from '../../shared/rate-limit-store'; // 🟢 FIX #9: Redis distributed rate limiting 
 
 dotenv.config();
 
@@ -19,16 +20,18 @@ app.set('trust proxy', 1);
 app.get('/health', (req, res) => res.status(200).json({ status: 'UP', type: 'liveness' }));
 app.get('/ready', (req, res) => {
     if (isAppReady) {
-        res.status(200).json({ status: 'READY', type: 'readiness', service: 'booking-service' });
+        res.status(200).json({ status: 'READY', type: 'readiness', service: 'communication-service' });
     } else {
-        res.status(503).json({ status: 'BOOTING', type: 'readiness', service: 'booking-service' });
+        res.status(503).json({ status: 'BOOTING', type: 'readiness', service: 'communication-service' });
     }
 });
 
+// ─── FIX #9: Redis-backed distributed rate limiting ──────────────────────
 const globalLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, 
-    max: 100, 
-    message: { error: "Too many requests. Please try again later." }
+    windowMs: 15 * 60 * 1000,
+    max: 100,
+    message: { error: "Too many requests. Please try again later." },
+    store: createRateLimitStore('global:comm'),
 });
 app.use(globalLimiter);
 
@@ -56,7 +59,7 @@ const corsOptions = {
         if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
         if (mobileOrigins.indexOf(origin) !== -1) return callback(null, true);
 
-        console.error(`⛔ CORS Blocked: ${origin}`);
+        console.error("[CORS] Blocked request from unauthorized origin");
         callback(new Error('Strict CORS Policy: Origin not allowed'));
     },
     credentials: true,
@@ -80,8 +83,13 @@ app.use(helmet({
 app.use(cors(corsOptions)); // 🟢 Apply strict options
 app.options('*', cors(corsOptions));
 
-// High limit for clinical images/Base64
-app.use(express.json({ limit: '50mb' })); 
+// ─── BODY LIMIT FIX ─────────────────────────────────────────────────────
+// ORIGINAL: 50mb limit for base64 clinical images.
+// RISK: DoS attack via massive JSON payloads consuming memory/bandwidth.
+// FIX: Reduced to 10mb (covers ~7.5MB raw images after base64 encoding).
+// Full DICOM files should use the dedicated DICOM service, not this endpoint.
+// ─────────────────────────────────────────────────────────────────────────
+app.use(express.json({ limit: '10mb' }));
 
 // 🟢 HIPAA AUDIT FIX: Secure Identity Logging
 morgan.token('verified-user', (req: any) => {
@@ -96,8 +104,32 @@ app.use(morgan((tokens, req, res) => {
     ].join(' ');
 }, { skip: (req) => req.url === '/health' || req.method === 'OPTIONS' }));
 
+// ─── RATE LIMIT FIX: AI endpoint rate limiter ────────────────────────────
+// ORIGINAL: /ai/* endpoints had no per-user rate limiting, only the global
+// 100 req/15min limiter. AI calls are expensive (Bedrock/Vertex/Azure)
+// and could be abused to burn API credits or cause provider throttling.
+// FIX: 5 req/min per authenticated user on all /ai/* routes.
+// ─────────────────────────────────────────────────────────────────────────
+const aiLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 5,
+    keyGenerator: (req: any) => {
+        // Key by authenticated user ID for fair per-user limiting
+        if (req.user?.id || req.user?.sub) {
+            return `ai:${req.user.id || req.user.sub}`;
+        }
+        return `ai:${req.ip}`;
+    },
+    message: { error: "AI rate limit exceeded. Maximum 5 AI requests per minute." },
+    standardHeaders: true,
+    legacyHeaders: false,
+    store: createRateLimitStore('comm:ai'),
+});
+
 // Apply auth middleware to all clinical routes
 app.use("/", communicationRoutes);
+// Auth runs first so aiLimiter can key by req.user.id (not just IP)
+app.use("/ai", authMiddleware, aiLimiter);
 app.use("/ai", aiRoutes);
 
 // --- 4. 100% COMPLIANT VAULT SYNC ---

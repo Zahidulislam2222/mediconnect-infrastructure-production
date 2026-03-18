@@ -1,14 +1,30 @@
-name: "🚀 Enterprise Multi-Cloud Deploy (Mediconnect)"
+name: "Enterprise Multi-Cloud Deploy (Mediconnect)"
+
+# ─────────────────────────────────────────────────────────────────
+# Toggle AKS / EKS via GitHub repo variables (Settings > Variables):
+#   DEPLOY_AKS = "true" | (unset = off)
+#   DEPLOY_EKS = "true" | (unset = off)
+#
+# GCP Cloud Run deploys always (free-tier optimised).
+#
+# When re-enabling K8s, also create these secrets if missing:
+#   EKS_ADMIN_ROLE_ARN, EKS_STAFF_ROLE_ARN
+# ─────────────────────────────────────────────────────────────────
 
 on:
   push:
     branches: [ "main" ]
     paths:
       - 'backend_v2/**'
+  workflow_dispatch: {}
 
 permissions:
   id-token: write
   contents: read
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE22: true
@@ -20,6 +36,9 @@ env:
   EKS_CLUSTER: "mediconnect-eks-eu"
 
 jobs:
+  # ═══════════════════════════════════════════════════════════════
+  #  1. Test & Lint
+  # ═══════════════════════════════════════════════════════════════
   test-and-lint:
     runs-on: ubuntu-latest
     steps:
@@ -27,11 +46,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: 'npm'
+          cache: npm
           cache-dependency-path: backend_v2/package-lock.json
       - run: cd backend_v2 && npm ci
-      - run: cd backend_v2 && npm test
+      - run: cd backend_v2 && npm test --workspaces --if-present
 
+  # ═══════════════════════════════════════════════════════════════
+  #  2. Build & Push Container Images
+  # ═══════════════════════════════════════════════════════════════
   build-and-push:
     needs: [test-and-lint]
     runs-on: ubuntu-latest
@@ -46,212 +68,145 @@ jobs:
             port: 8083
           - service: communication-service
             port: 8084
+          - service: admin-service
+            port: 8085
+          - service: staff-service
+            port: 8086
           - service: dicom-service
             port: 8005
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/login@v1
+
+      # --- Azure ACR (only when AKS enabled) ---
+      - if: vars.DEPLOY_AKS == 'true'
+        uses: azure/login@v1
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - uses: aws-actions/configure-aws-credentials@v4
+      - if: vars.DEPLOY_AKS == 'true'
+        run: az acr login --name zahidmediconnectacr
+
+      # --- AWS ECR (only when EKS enabled) ---
+      - if: vars.DEPLOY_EKS == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: eu-central-1
+      - if: vars.DEPLOY_EKS == 'true'
+        run: aws ecr get-login-password --region eu-central-1 | docker login --username AWS --password-stdin ${{ env.AWS_ECR }}
+
+      # --- GCP GAR (always) ---
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
       - uses: google-github-actions/setup-gcloud@v2
-
-      - if: false
-        run: az acr login --name zahidmediconnectacr
-      - if: false
-        run: aws ecr get-login-password --region eu-central-1 | docker login --username AWS --password-stdin ${{ env.AWS_ECR }}
       - run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
-      - name: "🐳 Build and Push Immutable Artifact"
+      - name: "Build and push container image"
         run: |
-          IMAGE_TAG=${{ github.sha }}
+          TAG=${{ github.sha }}
           docker build -t local-img -f backend_v2/${{ matrix.service }}/Dockerfile .
-          # docker tag local-img ${{ env.AZURE_ACR }}/${{ matrix.service }}:$IMAGE_TAG
-          # docker push ${{ env.AZURE_ACR }}/${{ matrix.service }}:$IMAGE_TAG
-          # docker tag local-img ${{ env.AWS_ECR }}/${{ matrix.service }}:$IMAGE_TAG
-          # docker push ${{ env.AWS_ECR }}/${{ matrix.service }}:$IMAGE_TAG
-          docker tag local-img ${{ env.GCP_GAR }}/${{ matrix.service }}:$IMAGE_TAG
-          docker push ${{ env.GCP_GAR }}/${{ matrix.service }}:$IMAGE_TAG
 
-  prepare-infrastructure:
+          # GCP Artifact Registry (always)
+          docker tag local-img ${{ env.GCP_GAR }}/${{ matrix.service }}:$TAG
+          docker push ${{ env.GCP_GAR }}/${{ matrix.service }}:$TAG
+
+          # Azure ACR (when AKS enabled)
+          if [ "${{ vars.DEPLOY_AKS }}" == "true" ]; then
+            docker tag local-img ${{ env.AZURE_ACR }}/${{ matrix.service }}:$TAG
+            docker push ${{ env.AZURE_ACR }}/${{ matrix.service }}:$TAG
+          fi
+
+          # AWS ECR (when EKS enabled)
+          if [ "${{ vars.DEPLOY_EKS }}" == "true" ]; then
+            docker tag local-img ${{ env.AWS_ECR }}/${{ matrix.service }}:$TAG
+            docker push ${{ env.AWS_ECR }}/${{ matrix.service }}:$TAG
+          fi
+
+  # ═══════════════════════════════════════════════════════════════
+  #  3. Prepare K8s Infrastructure  (skipped when AKS+EKS are off)
+  # ═══════════════════════════════════════════════════════════════
+  prepare-k8s:
     needs: [build-and-push]
+    if: vars.DEPLOY_AKS == 'true' || vars.DEPLOY_EKS == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/login@v1
+
+      - if: vars.DEPLOY_AKS == 'true'
+        uses: azure/login@v1
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - uses: aws-actions/configure-aws-credentials@v4
+
+      - if: vars.DEPLOY_EKS == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: eu-central-1
-      
-      - name: "🔐 Fetch Kubeconfigs"
-        if: false
+
+      - name: "Fetch Kubeconfigs"
         run: |
-          az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
-          aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
+          if [ "${{ vars.DEPLOY_AKS }}" == "true" ]; then
+            az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
+          fi
+          if [ "${{ vars.DEPLOY_EKS }}" == "true" ]; then
+            aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
+          fi
 
-      - name: "🏗️ Setup Multi-Env Routing & Identity"
-        if: false
+      - name: "Setup namespaces and gateways"
         run: |
-          # 1. Apply Identities (Injecting 4 Separate Role ARNs)
-          # Note: We map specific AWS Roles. For Azure, we map the Client ID.
-          
-          sed -e "s|__AZURE_PATIENT_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
-              -e "s|__AZURE_DOCTOR_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
-              -e "s|__AZURE_BOOKING_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
-              -e "s|__AZURE_COMM_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
-              -e "s|__AZURE_DICOM_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
-              -e "s|__EKS_PATIENT_ROLE_ARN__|${{ secrets.EKS_PATIENT_ROLE_ARN }}|g" \
-              -e "s|__EKS_DOCTOR_ROLE_ARN__|${{ secrets.EKS_DOCTOR_ROLE_ARN }}|g" \
-              -e "s|__EKS_BOOKING_ROLE_ARN__|${{ secrets.EKS_BOOKING_ROLE_ARN }}|g" \
-              -e "s|__EKS_COMM_ROLE_ARN__|${{ secrets.EKS_COMM_ROLE_ARN }}|g" \
-              -e "s|__EKS_DICOM_ROLE_ARN__|${{ secrets.EKS_DICOM_ROLE_ARN }}|g" \
-              backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=aks.kubeconfig apply -f -
+          if [ "${{ vars.DEPLOY_AKS }}" == "true" ]; then
+            sed -e "s|__AZURE_PATIENT_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+                -e "s|__AZURE_DOCTOR_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+                -e "s|__AZURE_BOOKING_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+                -e "s|__AZURE_COMM_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+                -e "s|__AZURE_ADMIN_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+                -e "s|__AZURE_STAFF_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+                -e "s|__AZURE_DICOM_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+                -e "s|__EKS_PATIENT_ROLE_ARN__|${{ secrets.EKS_PATIENT_ROLE_ARN }}|g" \
+                -e "s|__EKS_DOCTOR_ROLE_ARN__|${{ secrets.EKS_DOCTOR_ROLE_ARN }}|g" \
+                -e "s|__EKS_BOOKING_ROLE_ARN__|${{ secrets.EKS_BOOKING_ROLE_ARN }}|g" \
+                -e "s|__EKS_COMM_ROLE_ARN__|${{ secrets.EKS_COMM_ROLE_ARN }}|g" \
+                -e "s|__EKS_ADMIN_ROLE_ARN__|${{ secrets.EKS_ADMIN_ROLE_ARN }}|g" \
+                -e "s|__EKS_STAFF_ROLE_ARN__|${{ secrets.EKS_STAFF_ROLE_ARN }}|g" \
+                -e "s|__EKS_DICOM_ROLE_ARN__|${{ secrets.EKS_DICOM_ROLE_ARN }}|g" \
+                backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=aks.kubeconfig apply -f -
 
-          sed -e "s|__AZURE_PATIENT_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
-              -e "s|__AZURE_DOCTOR_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
-              -e "s|__AZURE_BOOKING_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
-              -e "s|__AZURE_COMM_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
-              -e "s|__AZURE_DICOM_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
-              -e "s|__EKS_PATIENT_ROLE_ARN__|${{ secrets.EKS_PATIENT_ROLE_ARN }}|g" \
-              -e "s|__EKS_DOCTOR_ROLE_ARN__|${{ secrets.EKS_DOCTOR_ROLE_ARN }}|g" \
-              -e "s|__EKS_BOOKING_ROLE_ARN__|${{ secrets.EKS_BOOKING_ROLE_ARN }}|g" \
-              -e "s|__EKS_COMM_ROLE_ARN__|${{ secrets.EKS_COMM_ROLE_ARN }}|g" \
-              -e "s|__EKS_DICOM_ROLE_ARN__|${{ secrets.EKS_DICOM_ROLE_ARN }}|g" \
-              backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=eks.kubeconfig apply -f -
-          
-          # 2. Setup Staging Gateway
-          sed "s|__PREFIX__|staging/|g" backend_v2/k8s/api-gateway.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-staging -f -
-          sed "s|__PREFIX__|staging/|g" backend_v2/k8s/api-gateway.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-staging -f -
-          
-          # 3. Setup Production Gateway
-          sed "s|__PREFIX__||g" backend_v2/k8s/api-gateway.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-prod -f -
-          sed "s|__PREFIX__||g" backend_v2/k8s/api-gateway.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-prod -f -
+            sed "s|__PREFIX__|staging/|g" backend_v2/k8s/api-gateway.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-staging -f -
+            sed "s|__PREFIX__||g" backend_v2/k8s/api-gateway.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-prod -f -
+          fi
 
+          if [ "${{ vars.DEPLOY_EKS }}" == "true" ]; then
+            sed -e "s|__AZURE_PATIENT_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+                -e "s|__AZURE_DOCTOR_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+                -e "s|__AZURE_BOOKING_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+                -e "s|__AZURE_COMM_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+                -e "s|__AZURE_ADMIN_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+                -e "s|__AZURE_STAFF_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+                -e "s|__AZURE_DICOM_CLIENT_ID__|${{ secrets.AZURE_CLIENT_ID }}|g" \
+                -e "s|__EKS_PATIENT_ROLE_ARN__|${{ secrets.EKS_PATIENT_ROLE_ARN }}|g" \
+                -e "s|__EKS_DOCTOR_ROLE_ARN__|${{ secrets.EKS_DOCTOR_ROLE_ARN }}|g" \
+                -e "s|__EKS_BOOKING_ROLE_ARN__|${{ secrets.EKS_BOOKING_ROLE_ARN }}|g" \
+                -e "s|__EKS_COMM_ROLE_ARN__|${{ secrets.EKS_COMM_ROLE_ARN }}|g" \
+                -e "s|__EKS_ADMIN_ROLE_ARN__|${{ secrets.EKS_ADMIN_ROLE_ARN }}|g" \
+                -e "s|__EKS_STAFF_ROLE_ARN__|${{ secrets.EKS_STAFF_ROLE_ARN }}|g" \
+                -e "s|__EKS_DICOM_ROLE_ARN__|${{ secrets.EKS_DICOM_ROLE_ARN }}|g" \
+                backend_v2/k8s/namespaces.yaml | kubectl --kubeconfig=eks.kubeconfig apply -f -
+
+            sed "s|__PREFIX__|staging/|g" backend_v2/k8s/api-gateway.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-staging -f -
+            sed "s|__PREFIX__||g" backend_v2/k8s/api-gateway.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-prod -f -
+          fi
+
+  # ═══════════════════════════════════════════════════════════════
+  #  4. Deploy Staging – K8s  (skipped when AKS+EKS are off)
+  # ═══════════════════════════════════════════════════════════════
   deploy-staging:
-    needs: [prepare-infrastructure]
-    runs-on: ubuntu-latest
-    strategy:
-      max-parallel: 1   # 🟢 FIX 1: Prevents Cluster CPU Exhaustion during rollout
-      matrix:
-        include:
-          - service: patient-service
-            port: 8081
-          - service: doctor-service
-            port: 8082
-          - service: booking-service
-            port: 8083
-          - service: communication-service
-            port: 8084
-          - service: dicom-service
-            port: 8005
-    steps:
-      - uses: actions/checkout@v4
-      - uses: azure/login@v1
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
-          aws-region: eu-central-1
-      
-      - name: "🔐 Fetch Kubeconfigs"
-        if: false
-        run: |
-          az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
-          aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
-
-      - name: "🚀 Deploy Staging (AKS)"
-        if: false
-        run: |
-          IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
-          
-          # 🟢 LOGIC SWITCH ADDED
-          if [ "${{ matrix.service }}" == "patient-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_PATIENT_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "doctor-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_DOCTOR_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "booking-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "communication-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "dicom-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_DICOM_ROLE_ARN }}"
-          fi
-
-          PUBLIC_DOMAIN="staging-${{ vars.AKS_DOMAIN }}" 
-
-          sed -e "s|__IMAGE_URI__|$IMAGE|g" \
-              -e "s|__PUBLIC_DOMAIN__|$PUBLIC_DOMAIN|g" \
-              -e "s|__AWS_REGION__|us-east-1|g" \
-              -e "s|__MIN_REPLICAS__|1|g" \
-              -e "s|__MAX_REPLICAS__|1|g" \
-              -e "s|__AWS_ROLE_ARN__|$ROLE_ARN|g" \
-              -e "s|__TOKEN_FILE__|/var/run/secrets/azure/tokens/azure-identity-token|g" \
-              backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-staging -f -
-          
-          kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=900s
-
-      - name: "🚀 Deploy Staging (EKS)"
-        if: false
-        run: |
-          IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
-          
-          # 🟢 LOGIC SWITCH ADDED
-          if [ "${{ matrix.service }}" == "patient-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_PATIENT_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "doctor-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_DOCTOR_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "booking-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "communication-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "dicom-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_DICOM_ROLE_ARN }}"
-          fi
-
-          PUBLIC_DOMAIN="staging-${{ vars.EKS_DOMAIN }}" 
-
-          sed -e "s|__IMAGE_URI__|$IMAGE|g" \
-              -e "s|__PUBLIC_DOMAIN__|$PUBLIC_DOMAIN|g" \
-              -e "s|__AWS_REGION__|eu-central-1|g" \
-              -e "s|__MIN_REPLICAS__|1|g" \
-              -e "s|__MAX_REPLICAS__|1|g" \
-              -e "s|__AWS_ROLE_ARN__|$ROLE_ARN|g" \
-              -e "s|__TOKEN_FILE__|/var/run/secrets/eks.amazonaws.com/serviceaccount/token|g" \
-              backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-staging -f -
-              
-          kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=900s
-
-      - name: "🧪 Smoke Test (AKS)"
-        if: false
-        run: |
-          POD_NAME=$(kubectl --kubeconfig=aks.kubeconfig get pods -n mediconnect-staging -l app=${{ matrix.service }} --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
-          kubectl --kubeconfig=aks.kubeconfig exec $POD_NAME -n mediconnect-staging -- wget -qO- http://127.0.0.1:${{ matrix.port }}/ready
-
-      - name: "🧪 Smoke Test (EKS)"
-        if: false
-        run: |
-          POD_NAME=$(kubectl --kubeconfig=eks.kubeconfig get pods -n mediconnect-staging -l app=${{ matrix.service }} --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
-          kubectl --kubeconfig=eks.kubeconfig exec $POD_NAME -n mediconnect-staging -- wget -qO- http://127.0.0.1:${{ matrix.port }}/ready
-
-  deploy-production:
-    needs: [deploy-staging]
+    needs: [prepare-k8s]
+    if: vars.DEPLOY_AKS == 'true' || vars.DEPLOY_EKS == 'true'
     runs-on: ubuntu-latest
     strategy:
       max-parallel: 1
@@ -265,154 +220,294 @@ jobs:
             port: 8083
           - service: communication-service
             port: 8084
+          - service: admin-service
+            port: 8085
+          - service: staff-service
+            port: 8086
           - service: dicom-service
             port: 8005
     steps:
       - uses: actions/checkout@v4
-      - uses: azure/login@v1
+
+      - if: vars.DEPLOY_AKS == 'true'
+        uses: azure/login@v1
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-      - uses: aws-actions/configure-aws-credentials@v4
+
+      - if: vars.DEPLOY_EKS == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: eu-central-1
-      - uses: google-github-actions/auth@v2
-        with:
-          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
-      - uses: google-github-actions/setup-gcloud@v2
 
-      - name: "🔐 Fetch Kubeconfigs"
-        if: false
+      - name: "Fetch Kubeconfigs"
         run: |
-          az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
-          aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
-
-      - name: "🚀 Deploy Prod (AKS)"
-        if: false
-        run: |
-          IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
-
-          if [ "${{ matrix.service }}" == "patient-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_PATIENT_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "doctor-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_DOCTOR_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "booking-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "communication-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "dicom-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_DICOM_ROLE_ARN }}"
+          if [ "${{ vars.DEPLOY_AKS }}" == "true" ]; then
+            az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
+          fi
+          if [ "${{ vars.DEPLOY_EKS }}" == "true" ]; then
+            aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
           fi
 
-          PUBLIC_DOMAIN="${{ vars.AKS_DOMAIN }}"
+      - name: "Resolve service role ARN"
+        id: role
+        run: |
+          case "${{ matrix.service }}" in
+            patient-service)       echo "arn=${{ secrets.EKS_PATIENT_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            doctor-service)        echo "arn=${{ secrets.EKS_DOCTOR_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            booking-service)       echo "arn=${{ secrets.EKS_BOOKING_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            communication-service) echo "arn=${{ secrets.EKS_COMM_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            admin-service)         echo "arn=${{ secrets.EKS_ADMIN_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            staff-service)         echo "arn=${{ secrets.EKS_STAFF_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            dicom-service)         echo "arn=${{ secrets.EKS_DICOM_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+          esac
 
-          # 🟢 FIXED: Comments removed from line ends to prevent syntax error
+      - name: "Deploy to AKS Staging"
+        if: vars.DEPLOY_AKS == 'true'
+        run: |
+          IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
-              -e "s|__PUBLIC_DOMAIN__|$PUBLIC_DOMAIN|g" \
-              -e "s|__DOCTOR_SERVICE_URL__|$PUBLIC_DOMAIN|g" \
+              -e "s|__PUBLIC_DOMAIN__|staging-${{ vars.AKS_DOMAIN }}|g" \
+              -e "s|__AWS_REGION__|us-east-1|g" \
+              -e "s|__MIN_REPLICAS__|1|g" \
+              -e "s|__MAX_REPLICAS__|1|g" \
+              -e "s|__AWS_ROLE_ARN__|${{ steps.role.outputs.arn }}|g" \
+              -e "s|__TOKEN_FILE__|/var/run/secrets/azure/tokens/azure-identity-token|g" \
+              backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-staging -f -
+          kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=900s
+
+      - name: "Deploy to EKS Staging"
+        if: vars.DEPLOY_EKS == 'true'
+        run: |
+          IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" \
+              -e "s|__PUBLIC_DOMAIN__|staging-${{ vars.EKS_DOMAIN }}|g" \
+              -e "s|__AWS_REGION__|eu-central-1|g" \
+              -e "s|__MIN_REPLICAS__|1|g" \
+              -e "s|__MAX_REPLICAS__|1|g" \
+              -e "s|__AWS_ROLE_ARN__|${{ steps.role.outputs.arn }}|g" \
+              -e "s|__TOKEN_FILE__|/var/run/secrets/eks.amazonaws.com/serviceaccount/token|g" \
+              backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-staging -f -
+          kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-staging --timeout=900s
+
+      - name: "Smoke Test (AKS)"
+        if: vars.DEPLOY_AKS == 'true'
+        run: |
+          POD=$(kubectl --kubeconfig=aks.kubeconfig get pods -n mediconnect-staging -l app=${{ matrix.service }} --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+          kubectl --kubeconfig=aks.kubeconfig exec $POD -n mediconnect-staging -- wget -qO- http://127.0.0.1:${{ matrix.port }}/ready
+
+      - name: "Smoke Test (EKS)"
+        if: vars.DEPLOY_EKS == 'true'
+        run: |
+          POD=$(kubectl --kubeconfig=eks.kubeconfig get pods -n mediconnect-staging -l app=${{ matrix.service }} --field-selector=status.phase=Running -o jsonpath='{.items[0].metadata.name}')
+          kubectl --kubeconfig=eks.kubeconfig exec $POD -n mediconnect-staging -- wget -qO- http://127.0.0.1:${{ matrix.port }}/ready
+
+  # ═══════════════════════════════════════════════════════════════
+  #  5. Deploy Production – K8s  (skipped when AKS+EKS are off)
+  # ═══════════════════════════════════════════════════════════════
+  deploy-prod-k8s:
+    needs: [deploy-staging]
+    if: vars.DEPLOY_AKS == 'true' || vars.DEPLOY_EKS == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1
+      matrix:
+        include:
+          - service: patient-service
+            port: 8081
+          - service: doctor-service
+            port: 8082
+          - service: booking-service
+            port: 8083
+          - service: communication-service
+            port: 8084
+          - service: admin-service
+            port: 8085
+          - service: staff-service
+            port: 8086
+          - service: dicom-service
+            port: 8005
+    steps:
+      - uses: actions/checkout@v4
+
+      - if: vars.DEPLOY_AKS == 'true'
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - if: vars.DEPLOY_EKS == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: eu-central-1
+
+      - name: "Fetch Kubeconfigs"
+        run: |
+          if [ "${{ vars.DEPLOY_AKS }}" == "true" ]; then
+            az aks get-credentials --resource-group ${{ env.AKS_RESOURCE_GROUP }} --name ${{ env.AKS_CLUSTER }} --file aks.kubeconfig
+          fi
+          if [ "${{ vars.DEPLOY_EKS }}" == "true" ]; then
+            aws eks update-kubeconfig --region eu-central-1 --name ${{ env.EKS_CLUSTER }} --kubeconfig eks.kubeconfig
+          fi
+
+      - name: "Resolve service role ARN"
+        id: role
+        run: |
+          case "${{ matrix.service }}" in
+            patient-service)       echo "arn=${{ secrets.EKS_PATIENT_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            doctor-service)        echo "arn=${{ secrets.EKS_DOCTOR_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            booking-service)       echo "arn=${{ secrets.EKS_BOOKING_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            communication-service) echo "arn=${{ secrets.EKS_COMM_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            admin-service)         echo "arn=${{ secrets.EKS_ADMIN_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            staff-service)         echo "arn=${{ secrets.EKS_STAFF_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            dicom-service)         echo "arn=${{ secrets.EKS_DICOM_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+          esac
+
+      - name: "Deploy to AKS Production"
+        if: vars.DEPLOY_AKS == 'true'
+        run: |
+          IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
+          sed -e "s|__IMAGE_URI__|$IMAGE|g" \
+              -e "s|__PUBLIC_DOMAIN__|${{ vars.AKS_DOMAIN }}|g" \
+              -e "s|__DOCTOR_SERVICE_URL__|${{ vars.AKS_DOMAIN }}|g" \
               -e "s|__GOOGLE_CLIENT_ID__|${{ secrets.GCP_CLIENT_ID }}|g" \
               -e "s|__GOOGLE_CLIENT_SECRET__|${{ secrets.GCP_CLIENT_SECRET }}|g" \
               -e "s|__ALLOWED_ORIGINS__|${{ vars.ALLOWED_ORIGINS }}|g" \
               -e "s|__AWS_REGION__|us-east-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
               -e "s|__MAX_REPLICAS__|5|g" \
-              -e "s|__AWS_ROLE_ARN__|$ROLE_ARN|g" \
+              -e "s|__AWS_ROLE_ARN__|${{ steps.role.outputs.arn }}|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/azure/tokens/azure-identity-token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=aks.kubeconfig apply -n mediconnect-prod -f -
-          
           kubectl --kubeconfig=aks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=900s
 
-      - name: "🚀 Deploy Prod (EKS)"
-        if: false
+      - name: "Deploy to EKS Production"
+        if: vars.DEPLOY_EKS == 'true'
         run: |
           IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
-
-          if [ "${{ matrix.service }}" == "patient-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_PATIENT_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "doctor-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_DOCTOR_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "booking-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "communication-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "dicom-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_DICOM_ROLE_ARN }}"
-          fi
-
-          PUBLIC_DOMAIN="${{ vars.EKS_DOMAIN }}"
-
-          # 🟢 FIXED: No comments allowed after backslash
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
-              -e "s|__PUBLIC_DOMAIN__|$PUBLIC_DOMAIN|g" \
-              -e "s|__DOCTOR_SERVICE_URL__|$PUBLIC_DOMAIN|g" \
+              -e "s|__PUBLIC_DOMAIN__|${{ vars.EKS_DOMAIN }}|g" \
+              -e "s|__DOCTOR_SERVICE_URL__|${{ vars.EKS_DOMAIN }}|g" \
               -e "s|__GOOGLE_CLIENT_ID__|${{ secrets.GCP_CLIENT_ID }}|g" \
               -e "s|__GOOGLE_CLIENT_SECRET__|${{ secrets.GCP_CLIENT_SECRET }}|g" \
               -e "s|__ALLOWED_ORIGINS__|${{ vars.ALLOWED_ORIGINS }}|g" \
               -e "s|__AWS_REGION__|eu-central-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
               -e "s|__MAX_REPLICAS__|5|g" \
-              -e "s|__AWS_ROLE_ARN__|$ROLE_ARN|g" \
+              -e "s|__AWS_ROLE_ARN__|${{ steps.role.outputs.arn }}|g" \
               -e "s|__TOKEN_FILE__|/var/run/secrets/eks.amazonaws.com/serviceaccount/token|g" \
               backend_v2/k8s/${{ matrix.service }}.yaml | kubectl --kubeconfig=eks.kubeconfig apply -n mediconnect-prod -f -
-          
           kubectl --kubeconfig=eks.kubeconfig rollout status deployment/${{ matrix.service }} -n mediconnect-prod --timeout=900s
 
-      - name: "🔄 Auto Rollback If Failed"
-        if: false
-        # if: failure()
+      - name: "Auto-rollback on failure"
+        if: failure()
         run: |
-          kubectl --kubeconfig=aks.kubeconfig rollout undo deployment/${{ matrix.service }} -n mediconnect-prod || true
-          kubectl --kubeconfig=eks.kubeconfig rollout undo deployment/${{ matrix.service }} -n mediconnect-prod || true
-
-      - name: "🚀 Deploy Backup (GCP US)"
-        run: |
-          if [ "${{ matrix.service }}" == "patient-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_PATIENT_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "doctor-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_DOCTOR_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "booking-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "communication-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "dicom-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_DICOM_ROLE_ARN }}"
+          if [ "${{ vars.DEPLOY_AKS }}" == "true" ]; then
+            kubectl --kubeconfig=aks.kubeconfig rollout undo deployment/${{ matrix.service }} -n mediconnect-prod || true
+          fi
+          if [ "${{ vars.DEPLOY_EKS }}" == "true" ]; then
+            kubectl --kubeconfig=eks.kubeconfig rollout undo deployment/${{ matrix.service }} -n mediconnect-prod || true
           fi
 
-          # 🟢 FIXED: Added missing \ after env-vars
+  # ═══════════════════════════════════════════════════════════════
+  #  6. Deploy GCP Cloud Run  (free-tier optimised, always active)
+  # ═══════════════════════════════════════════════════════════════
+  #
+  #  Free-tier guardrails applied:
+  #    --min-instances 0      → scale to zero when idle (no charge)
+  #    --max-instances 1      → never scale out (prevents surprise bills)
+  #    --memory 256Mi/512Mi   → smallest practical allocation
+  #    --cpu 1                → minimum vCPU
+  #    --no-cpu-boost         → skip startup CPU burst (costs extra)
+  #    --concurrency 80       → pack requests into one instance
+  #
+  #  Free tier budget (monthly):
+  #    2M requests  |  360K GB-s memory  |  180K vCPU-s  |  1 GiB egress (NA)
+  #    14 services (7×2 regions) fit comfortably at low traffic with scale-to-zero.
+  #
+  deploy-gcp:
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - service: patient-service
+            port: 8081
+            memory: 256Mi
+          - service: doctor-service
+            port: 8082
+            memory: 256Mi
+          - service: booking-service
+            port: 8083
+            memory: 256Mi
+          - service: communication-service
+            port: 8084
+            memory: 256Mi
+          - service: admin-service
+            port: 8085
+            memory: 512Mi
+          - service: staff-service
+            port: 8086
+            memory: 256Mi
+          - service: dicom-service
+            port: 8005
+            memory: 512Mi
+    steps:
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: "Resolve service role ARN"
+        id: role
+        run: |
+          case "${{ matrix.service }}" in
+            patient-service)       echo "arn=${{ secrets.EKS_PATIENT_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            doctor-service)        echo "arn=${{ secrets.EKS_DOCTOR_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            booking-service)       echo "arn=${{ secrets.EKS_BOOKING_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            communication-service) echo "arn=${{ secrets.EKS_COMM_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            admin-service)         echo "arn=${{ secrets.EKS_ADMIN_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            staff-service)         echo "arn=${{ secrets.EKS_STAFF_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+            dicom-service)         echo "arn=${{ secrets.EKS_DICOM_ROLE_ARN }}" >> $GITHUB_OUTPUT ;;
+          esac
+
+      - name: "Deploy to Cloud Run (US – us-central1)"
+        run: |
           gcloud run deploy ${{ matrix.service }}-us-backup \
             --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region us-central1 \
             --service-account="${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}" \
             --port ${{ matrix.port }} \
+            --memory ${{ matrix.memory }} \
+            --cpu 1 \
             --min-instances 0 \
-            --set-env-vars "NODE_ENV=production,DOCTOR_SERVICE_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},GOOGLE_CLIENT_ID=${{ secrets.GCP_CLIENT_ID }},GOOGLE_CLIENT_SECRET=${{ secrets.GCP_CLIENT_SECRET }},API_PUBLIC_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},AWS_REGION=us-east-1,AWS_ROLE_ARN=$ROLE_ARN,AWS_EC2_METADATA_DISABLED=true,ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }}" \
+            --max-instances 1 \
+            --concurrency 80 \
+            --timeout 300 \
+            --no-cpu-boost \
+            --set-env-vars "NODE_ENV=production,AWS_REGION=us-east-1,AWS_ROLE_ARN=${{ steps.role.outputs.arn }},AWS_EC2_METADATA_DISABLED=true,DOCTOR_SERVICE_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},API_PUBLIC_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},GOOGLE_CLIENT_ID=${{ secrets.GCP_CLIENT_ID }},GOOGLE_CLIENT_SECRET=${{ secrets.GCP_CLIENT_SECRET }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }}" \
             --platform managed \
             --allow-unauthenticated
 
-      - name: "🚀 Deploy Backup (GCP EU)"
+      - name: "Deploy to Cloud Run (EU – europe-west3)"
         run: |
-          if [ "${{ matrix.service }}" == "patient-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_PATIENT_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "doctor-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_DOCTOR_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "booking-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_BOOKING_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "communication-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_COMM_ROLE_ARN }}"
-          elif [ "${{ matrix.service }}" == "dicom-service" ]; then
-             ROLE_ARN="${{ secrets.EKS_DICOM_ROLE_ARN }}"
-          fi
-
-          # 🟢 FIXED: Added missing \ after env-vars
           gcloud run deploy ${{ matrix.service }}-eu-backup \
             --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region europe-west3 \
             --service-account="${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}" \
             --port ${{ matrix.port }} \
+            --memory ${{ matrix.memory }} \
+            --cpu 1 \
             --min-instances 0 \
-            --set-env-vars "NODE_ENV=production,DOCTOR_SERVICE_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},GOOGLE_CLIENT_ID=${{ secrets.GCP_CLIENT_ID }},GOOGLE_CLIENT_SECRET=${{ secrets.GCP_CLIENT_SECRET }},API_PUBLIC_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},AWS_REGION=eu-central-1,AWS_ROLE_ARN=$ROLE_ARN,AWS_EC2_METADATA_DISABLED=true,ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }}" \
+            --max-instances 1 \
+            --concurrency 80 \
+            --timeout 300 \
+            --no-cpu-boost \
+            --set-env-vars "NODE_ENV=production,AWS_REGION=eu-central-1,AWS_ROLE_ARN=${{ steps.role.outputs.arn }},AWS_EC2_METADATA_DISABLED=true,DOCTOR_SERVICE_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},API_PUBLIC_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},GOOGLE_CLIENT_ID=${{ secrets.GCP_CLIENT_ID }},GOOGLE_CLIENT_SECRET=${{ secrets.GCP_CLIENT_SECRET }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }}" \
             --platform managed \
             --allow-unauthenticated

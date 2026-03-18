@@ -3,6 +3,7 @@ import { getRegionalClient, getSSMParameter } from '../../../shared/aws-config';
 import { QueryCommand, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import Stripe from "stripe";
 import { writeAuditLog } from '../../../shared/audit';
+import { logger } from '../../../shared/logger';
 import { GoogleAuth } from "google-auth-library";
 import { createHash } from 'crypto';
 
@@ -119,8 +120,8 @@ export const payBill = async (req: Request, res: Response) => {
         res.status(200).json({ success: true, status: paymentIntent.status });
 
     } catch (error: any) {
-        console.error("PayBill Error:", error.message);
-        res.status(500).json({ error: error.message });
+        logger.error("[BILLING] Payment processing failed", { error: error.message });
+        res.status(500).json({ error: "Payment processing failed. Please try again." });
     }
 };
 
@@ -207,8 +208,8 @@ export const getDoctorAnalytics = async (req: Request, res: Response) => {
         });
 
     } catch (error: any) {
-        console.error("Analytics Error:", error);
-        res.status(500).json({ error: error.message });
+        logger.error("[BILLING] Analytics query failed", { error: error.message });
+        res.status(500).json({ error: "Analytics unavailable. Please try again." });
     }
 };
 
@@ -249,13 +250,12 @@ export const pushRevenueToBigQuery = async (txData: any, region: string) => {
             })
         });
         if (!response.ok) {
-            const errText = await response.text();
-            console.error(`❌ BQ REJECTED REVENUE [${response.status}]:`, errText);
+            logger.error("[BILLING] BigQuery rejected revenue insert", { statusCode: response.status });
         } else {
-            console.log(`✅ BQ REVENUE STREAM SUCCESS!`); 
+            logger.info("[BILLING] BigQuery revenue stream insert succeeded");
         }
-    } catch (e: any) { 
-        console.error("BigQuery Revenue Sync Failed", e.message); 
+    } catch (e: any) {
+        logger.error("[BILLING] BigQuery revenue sync failed", { error: e.message });
     }
 };
 
@@ -294,10 +294,9 @@ export const pushAppointmentToBigQuery = async (aptData: any, region: string) =>
         });
 
         if (!response.ok) {
-            const errText = await response.text();
-            console.error(`❌ BQ REJECTED APPOINTMENT [${response.status}]:`, errText);
+            logger.error("[BILLING] BigQuery rejected appointment insert", { statusCode: response.status });
         } else {
-            console.log(`✅ BQ APPOINTMENT STREAM SUCCESS!`);
+            logger.info("[BILLING] BigQuery appointment stream insert succeeded");
         }
-    } catch (e: any) { console.error("BigQuery Appointment Stream Failed", e.message); }
+    } catch (e: any) { logger.error("[BILLING] BigQuery appointment stream failed", { error: e.message }); }
 };

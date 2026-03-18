@@ -6,7 +6,8 @@ import { writeAuditLog } from "../../../../shared/audit";
 
 export const getVitals = async (req: Request, res: Response) => {
     try {
-        const patientId = req.query.patientId as string;
+        // FHIR search alias: subject → patientId
+        const patientId = (req.query.patientId || req.query.subject || req.query.patient) as string;
         const limitParam = req.query.limit as string || "1";
         const limit = parseInt(limitParam, 10);
 
@@ -49,28 +50,44 @@ export const getVitals = async (req: Request, res: Response) => {
 
         const rawVitals = response.Items[0];
 
-        // FHIR R4 MAPPING (LOINC 8867-4 for Heart Rate)
+        // FHIR R4 MAPPING (Heart Rate, Temperature, SpO2, Blood Pressure)
+        const bundleId = `vitals-${patientId}-${Date.now()}`;
         const fhirBundle = {
             resourceType: "Bundle",
+            id: bundleId,
             type: "searchset",
+            timestamp: new Date().toISOString(),
             total: response.Items.length,
-            entry: response.Items.map((item: any) => ({
-                resource: {
-                    resourceType: "Observation",
-                    status: "final",
-                    code: {
-                        coding: [{ system: "http://loinc.org", code: "8867-4", display: "Heart rate" }]
-                    },
-                    subject: { reference: `Patient/${patientId}` },
-                    effectiveDateTime: item.timestamp || item.createdAt,
-                    valueQuantity: {
-                        value: item.heartRate,
-                        unit: "beats/minute",
-                        system: "http://unitsofmeasure.org",
-                        code: "/min"
-                    }
+            link: [{ relation: "self", url: `/vitals?patientId=${patientId}&limit=${limit}` }],
+            entry: response.Items.flatMap((item: any) => {
+                const ts = item.timestamp || item.createdAt;
+                const observations: any[] = [];
+                if (item.heartRate != null) {
+                    observations.push({
+                        fullUrl: `urn:uuid:hr-${item.vitalId || ts}`,
+                        resource: { resourceType: "Observation", status: "final", category: [{ coding: [{ system: "http://terminology.hl7.org/CodeSystem/observation-category", code: "vital-signs", display: "Vital Signs" }] }], code: { coding: [{ system: "http://loinc.org", code: "8867-4", display: "Heart rate" }] }, subject: { reference: `Patient/${patientId}` }, effectiveDateTime: ts, issued: ts, valueQuantity: { value: item.heartRate, unit: "beats/minute", system: "http://unitsofmeasure.org", code: "/min" } }
+                    });
                 }
-            }))
+                if (item.temperature != null) {
+                    observations.push({
+                        fullUrl: `urn:uuid:temp-${item.vitalId || ts}`,
+                        resource: { resourceType: "Observation", status: "final", category: [{ coding: [{ system: "http://terminology.hl7.org/CodeSystem/observation-category", code: "vital-signs", display: "Vital Signs" }] }], code: { coding: [{ system: "http://loinc.org", code: "8310-5", display: "Body temperature" }] }, subject: { reference: `Patient/${patientId}` }, effectiveDateTime: ts, issued: ts, valueQuantity: { value: item.temperature, unit: "degrees Celsius", system: "http://unitsofmeasure.org", code: "Cel" } }
+                    });
+                }
+                if (item.oxygenSaturation != null) {
+                    observations.push({
+                        fullUrl: `urn:uuid:spo2-${item.vitalId || ts}`,
+                        resource: { resourceType: "Observation", status: "final", category: [{ coding: [{ system: "http://terminology.hl7.org/CodeSystem/observation-category", code: "vital-signs", display: "Vital Signs" }] }], code: { coding: [{ system: "http://loinc.org", code: "2708-6", display: "Oxygen saturation" }] }, subject: { reference: `Patient/${patientId}` }, effectiveDateTime: ts, issued: ts, valueQuantity: { value: item.oxygenSaturation, unit: "%", system: "http://unitsofmeasure.org", code: "%" } }
+                    });
+                }
+                if (observations.length === 0) {
+                    observations.push({
+                        fullUrl: `urn:uuid:obs-${item.vitalId || ts}`,
+                        resource: { resourceType: "Observation", status: "final", category: [{ coding: [{ system: "http://terminology.hl7.org/CodeSystem/observation-category", code: "vital-signs", display: "Vital Signs" }] }], code: { coding: [{ system: "http://loinc.org", code: "8867-4", display: "Heart rate" }] }, subject: { reference: `Patient/${patientId}` }, effectiveDateTime: ts, issued: ts, valueQuantity: { value: item.heartRate || 0, unit: "beats/minute", system: "http://unitsofmeasure.org", code: "/min" } }
+                    });
+                }
+                return observations;
+            })
         };
 
         res.json({

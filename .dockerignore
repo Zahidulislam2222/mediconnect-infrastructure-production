@@ -1,9 +1,47 @@
-# Exclude the "heavy" stuff to make packing and uploading instant
+# Dependencies
 node_modules/
 **/node_modules/
 
+# Build output
+dist/
+**/dist/
 
+# Git
 .git/
+.gitignore
+
+# Environment & Secrets
 .env
 .env.*
+*.pem
+*.key
+gcp_key.json
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+env/
+.venv/
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+
+# Logs
+*.log
 npm-debug.log
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Docs
+*.md
+
+# Legacy
+legacy_lambdas/

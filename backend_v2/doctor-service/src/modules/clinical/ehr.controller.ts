@@ -150,10 +150,10 @@ export const handleEhrAction = async (req: Request, res: Response) => {
                 return res.json(processedItems);
 
             case "add_clinical_note":
-                const { note, title, fileName } = req.body;
+                const { note, title, fileName, icd10Code, icd10Display } = req.body;
                 const noteId = uuidv4();
 
-                const fhirImpression = {
+                const fhirImpression: any = {
                     resourceType: "ClinicalImpression",
                     id: noteId,
                     status: "completed",
@@ -170,6 +170,16 @@ export const handleEhrAction = async (req: Request, res: Response) => {
                         security: [{ system: "http://terminology.hl7.org/CodeSystem/v3-Confidentiality", code: "R", display: "restricted" }]
                     }
                 };
+
+                // ICD-10 Diagnosis Code support
+                if (icd10Code) {
+                    fhirImpression.finding = [{
+                        itemCodeableConcept: {
+                            coding: [{ system: "http://hl7.org/fhir/sid/icd-10-cm", code: icd10Code, display: icd10Display || icd10Code }],
+                            text: icd10Display || icd10Code
+                        }
+                    }];
+                }
 
                 await regionalDb.send(new PutCommand({
                     TableName: TABLE_EHR,

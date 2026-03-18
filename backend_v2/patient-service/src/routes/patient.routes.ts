@@ -10,7 +10,8 @@ import {
     deleteProfile,
     getPatientById,
     searchPatients,
-    extractRegion
+    extractRegion,
+    exportPatientData
 } from '../controllers/patient.controller';
 import { uploadDicom } from '../modules/clinical/imaging.controller';
 import multer from 'multer';
@@ -19,6 +20,16 @@ import multer from 'multer';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireIdentityVerification } from '../middleware/verification.middleware';
 import { writeAuditLog } from '../../../shared/audit';
+import { getConsent, updateConsent, withdrawConsent } from '../modules/gdpr/consent.controller';
+import { getCoverage } from '../modules/fhir/coverage.controller';
+
+// 🟢 FIX #10: Zod schema validation
+import {
+    validate,
+    CreatePatientBody,
+    UpdateProfileBody,
+    VerifyIdentityBody,
+} from '../../../shared/validation';
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
@@ -94,9 +105,20 @@ router.use(authMiddleware);
 // 🏥 3. LOBBY ROUTES (No ID Verification Needed)
 // Users need to access these so they CAN verify themselves
 // ==========================================
-router.post(['/register-patient', '/'], createPatient); 
-router.post('/patients/:id/verify-identity', verifyIdentity);
-router.get(['/register-patient', '/me'], getProfile); 
+// 🟢 FIX #10: Zod validation on mutation routes
+router.post(['/register-patient', '/'], validate({ body: CreatePatientBody }), createPatient);
+router.post('/patients/:id/verify-identity', validate({ body: VerifyIdentityBody }), verifyIdentity);
+router.get(['/register-patient', '/me'], getProfile);
+router.get('/me/export', requireIdentityVerification, exportPatientData);
+
+// GDPR Consent Management (Art. 7)
+router.get('/me/consent', getConsent);
+router.put('/me/consent', updateConsent);
+router.delete('/me/consent', withdrawConsent);
+
+// FHIR Coverage (Insurance)
+router.get('/me/coverage', getCoverage);
+
 router.get(['/patients/:id', '/:id'], getPatientById);
 
 // ==========================================
@@ -107,6 +129,6 @@ router.post('/upload-scan', requireIdentityVerification, upload.single('dicom'),
 router.get('/stats/demographics', getDemographics);
 router.get('/search', searchPatients); 
 router.delete('/me', requireIdentityVerification, deleteProfile);
-router.put(['/patients/:id', '/:id'], requireIdentityVerification, updateProfile);
+router.put(['/patients/:id', '/:id'], requireIdentityVerification, validate({ body: UpdateProfileBody }), updateProfile);
 
 export default router;

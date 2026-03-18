@@ -1,18 +1,37 @@
-# Exclude the "heavy" stuff to make packing and uploading instant
+# Dependencies
 node_modules/
 **/node_modules/
 
-.git/
-.env
-.env.*
-npm-debug.log
-
-.gcloudignore
-.git
-.gitignore
-node_modules/
-**/node_modules/
-.env
+# Build output
 dist/
 **/dist/
+
+# Git
+.git
+.gitignore
+
+# Environment & Secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+env/
+.venv/
+
+# Logs
+*.log
+npm-debug.log
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Docs
 *.md

@@ -5,11 +5,21 @@ import { predictRisk, summarizeConsultation } from "../controllers/predictive.co
 import { checkSymptoms } from "../controllers/symptom.controller";
 import { requireIdentityVerification } from '../middleware/verification.middleware';
 
+// 🟢 FIX #10: Zod schema validation
+import {
+    validate,
+    ClinicalImageBody,
+    PredictRiskBody,
+    SummarizeConsultationBody,
+    SymptomCheckBody,
+} from '../../../shared/validation';
+
 const router = Router();
 
-router.post("/imaging", authMiddleware, requireIdentityVerification, analyzeClinicalImage);
-router.post("/predict", authMiddleware, requireIdentityVerification, predictRisk);
-router.post("/summarize", authMiddleware, requireIdentityVerification, summarizeConsultation);
-router.post("/symptoms", authMiddleware, requireIdentityVerification, checkSymptoms);
+// 🟢 FIX #10: Validate request bodies before hitting expensive AI providers
+router.post("/imaging", authMiddleware, requireIdentityVerification, validate({ body: ClinicalImageBody }), analyzeClinicalImage);
+router.post("/predict", authMiddleware, requireIdentityVerification, validate({ body: PredictRiskBody }), predictRisk);
+router.post("/summarize", authMiddleware, requireIdentityVerification, validate({ body: SummarizeConsultationBody }), summarizeConsultation);
+router.post("/symptoms", authMiddleware, requireIdentityVerification, validate({ body: SymptomCheckBody }), checkSymptoms);
 
 export const aiRoutes = router;

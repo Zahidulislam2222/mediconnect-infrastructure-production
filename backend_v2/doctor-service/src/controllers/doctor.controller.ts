@@ -9,6 +9,7 @@ import { PublishCommand } from "@aws-sdk/client-sns";
 import { google } from 'googleapis';
 import { PutCommand, GetCommand, UpdateCommand, ScanCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient, getRegionalSNSClient, getRegionalSESClient, getRegionalCognitoClient } from '../../../shared/aws-config';
+import { encryptToken, decryptToken } from '../../../shared/kms-crypto';
 import { writeAuditLog } from '../../../shared/audit';
 import jwt from 'jsonwebtoken';
 import { GoogleAuth } from "google-auth-library";
@@ -69,7 +70,7 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
     }
     
     const finalId = authUser.sub; 
-    const { email, name, specialization, licenseNumber, role, consentDetails } = req.body;
+    const { email, name, specialization, licenseNumber, role, consentDetails, schedule } = req.body;
 
     if (!email) return res.status(400).json({ error: 'Missing email' });
 
@@ -87,26 +88,47 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
         resourceType: "Practitioner",
         id: finalId,
         active: true,
-        name: [{ text: name }],
-        qualification:[{ code: { text: specialization || 'General Practice' } }]
+        identifier: [
+            { use: "usual", system: "urn:mediconnect:practitioner-id", value: finalId },
+            ...(licenseNumber ? [{ use: "official", system: "urn:mediconnect:license", value: licenseNumber }] : []),
+        ],
+        name: [{ use: "official", text: name, family: name.split(' ').pop(), given: name.split(' ').slice(0, -1) }],
+        telecom: [{ system: "email", value: email, use: "work" }],
+        qualification: [{ code: { coding: [{ system: "http://terminology.hl7.org/CodeSystem/v2-0360", code: "MD", display: specialization || 'General Practice' }], text: specialization || 'General Practice' } }],
+        meta: { lastUpdated: new Date().toISOString(), versionId: "1" }
+    };
+
+    const practitionerRole = {
+        resourceType: "PractitionerRole",
+        id: `role-${finalId}`,
+        active: true,
+        practitioner: { reference: `Practitioner/${finalId}` },
+        code: [{ coding: [{ system: "http://terminology.hl7.org/CodeSystem/practitioner-role", code: "doctor", display: "Doctor" }] }],
+        specialty: [{ coding: [{ system: "http://snomed.info/sct", code: specialization || "394814009", display: specialization || "General practice" }] }],
+        availableTime: schedule ? schedule.map((s: any) => ({
+            daysOfWeek: [s.day?.toLowerCase()],
+            availableStartTime: s.startTime,
+            availableEndTime: s.endTime
+        })) : [],
     };
 
     const item = {
-        doctorId: finalId, 
-        email, 
+        doctorId: finalId,
+        email,
         name,
         specialization: specialization || 'General Practice',
-        licenseNumber: licenseNumber || 'PENDING_VERIFICATION',       
+        licenseNumber: licenseNumber || 'PENDING_VERIFICATION',
         verificationStatus: 'UNVERIFIED',
-        isEmailVerified: true,  
-        isIdentityVerified: false, 
+        isEmailVerified: true,
+        isIdentityVerified: false,
         identityStatus: 'IDLE',
         isDiplomaAutoVerified: false,
         isOfficerApproved: false,
         role: role === 'provider' ? 'doctor' : 'doctor',
         createdAt: new Date().toISOString(),
-        consultationFee: 50, 
+        consultationFee: 50,
         resource: fhirResource,
+        practitionerRole,
         consent: verifiedConsent
     };
 
@@ -237,11 +259,28 @@ export const getDoctor = catchAsync(async (req: Request, res: Response) => {
 
     doctor.avatar = await signAvatarUrl(doctor.avatar, region);
 
-    await writeAuditLog((req as any).user?.sub || "SYSTEM", String(id), "READ_DOCTOR", "Profile viewed", { 
-        region: region, 
-        ipAddress: req.ip 
+    // Include PractitionerRole FHIR resource in response
+    if (!doctor.practitionerRole && doctor.resource) {
+        doctor.practitionerRole = {
+            resourceType: "PractitionerRole",
+            id: `role-${doctor.doctorId}`,
+            active: true,
+            practitioner: { reference: `Practitioner/${doctor.doctorId}` },
+            code: [{ coding: [{ system: "http://terminology.hl7.org/CodeSystem/practitioner-role", code: "doctor", display: "Doctor" }] }],
+            specialty: [{ coding: [{ system: "http://snomed.info/sct", code: doctor.specialization || "394814009", display: doctor.specialization || "General practice" }] }],
+            availableTime: doctor.schedule ? Object.entries(doctor.schedule).map(([day, times]: [string, any]) => ({
+                daysOfWeek: [day.toLowerCase()],
+                availableStartTime: times.startTime,
+                availableEndTime: times.endTime
+            })) : [],
+        };
+    }
+
+    await writeAuditLog((req as any).user?.sub || "SYSTEM", String(id), "READ_DOCTOR", "Profile viewed", {
+        region: region,
+        ipAddress: req.ip
     });
-    
+
     res.status(200).json(doctor);
 });
 
@@ -573,10 +612,17 @@ export const googleCallback = catchAsync(async (req: Request, res: Response) => 
     const { tokens } = await oauth2Client.getToken(code as string);
 
     if (tokens.refresh_token) {
+        // ─── KMS ENCRYPTION FIX ─────────────────────────────────────────────
+        // ORIGINAL: Refresh token stored as plaintext in DynamoDB.
+        // RISK: Anyone with DB access could hijack doctors' Google Calendars.
+        // FIX: Encrypt with KMS before writing. Stored as "kms:<base64>".
+        // ─────────────────────────────────────────────────────────────────────
+        const region = extractRegion(req) as string;
+        const encryptedToken = await encryptToken(tokens.refresh_token, region);
         await docClient.send(new UpdateCommand({
             TableName: CONFIG.DYNAMO_TABLE,
             Key: { doctorId: targetDoctorId },
-            UpdateExpression: "SET googleRefreshToken = :token", ExpressionAttributeValues: { ":token": tokens.refresh_token }
+            UpdateExpression: "SET googleRefreshToken = :token", ExpressionAttributeValues: { ":token": encryptedToken }
         }));
     }
     const origins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : ['http://localhost:8080'];
@@ -979,19 +1025,22 @@ export const approveDoctorByOfficer = catchAsync(async (req: Request, res: Respo
 export async function syncToGoogleCalendar(doctorId: string, timeSlot: string, patientName: string, reason: string, region: string) {
     try {
         const docClient = getRegionalClient(region);
-        
-        const res = await docClient.send(new GetCommand({ 
-            TableName: CONFIG.DYNAMO_TABLE, 
+
+        const res = await docClient.send(new GetCommand({
+            TableName: CONFIG.DYNAMO_TABLE,
             Key: { doctorId },
             ProjectionExpression: "googleRefreshToken"
         }));
-        
-        const refreshToken = res.Item?.googleRefreshToken;
 
-        if (!refreshToken) {
+        const storedToken = res.Item?.googleRefreshToken;
+
+        if (!storedToken) {
             console.log(`[Calendar] No Google Token found for doctor ${doctorId}`);
             return;
         }
+
+        // ─── KMS DECRYPTION FIX: Decrypt token before use ───
+        const refreshToken = await decryptToken(storedToken, region);
 
         const oauth2Client = new google.auth.OAuth2(
             process.env.GOOGLE_CLIENT_ID,

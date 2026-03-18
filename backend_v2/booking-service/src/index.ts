@@ -8,7 +8,9 @@ import { GetParametersCommand } from "@aws-sdk/client-ssm";
 
 import bookingRoutes from './routes/booking.routes';
 import { handleStripeWebhook } from './controllers/webhook.controller';
+import { authMiddleware } from './middleware/auth.middleware';
 import { getRegionalSSMClient } from '../../shared/aws-config'; // 🟢 REGIONAL FACTORY
+import { createRateLimitStore } from '../../shared/rate-limit-store'; // 🟢 FIX #9: Redis distributed rate limiting
 
 dotenv.config();
 
@@ -24,26 +26,33 @@ app.get('/ready', (req, res) => {
     }
 });
 
+// ─── FIX #9: All rate limiters now use Redis store when available ─────────
+// This ensures rate limits are enforced across all ECS tasks / K8s pods,
+// preventing per-instance counter bypass during horizontal scaling.
+// Falls back to in-memory store if REDIS_URL is not configured.
+// ─────────────────────────────────────────────────────────────────────────
 const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 500,
-    message: { error: "System Busy: Please try again later." }
+    message: { error: "System Busy: Please try again later." },
+    store: createRateLimitStore('global:booking'),
 });
 app.use(globalLimiter);
 
 const bookingLimiter = rateLimit({
     windowMs: 1 * 60 * 1000,
-    max: 5, 
+    max: 5,
     keyGenerator: (req: any, res: any) => {
         if (req.user?.id) {
             return req.user.id;
         }
 
         return ipKeyGenerator(req, res);
-    }, 
+    },
     message: { error: "Fraud Prevention: Too many transactional attempts." },
     standardHeaders: true,
     legacyHeaders: false,
+    store: createRateLimitStore('booking:txn'),
 });
 
 const PORT = process.env.PORT || 8083;
@@ -114,6 +123,31 @@ app.use(morgan((tokens, req, res) => {
 
 app.use('/appointments', bookingLimiter);
 app.use('/billing', bookingLimiter);
+
+// ─── RATE LIMIT FIX: Stricter limiter for payment endpoint ──────────────
+// ORIGINAL: /billing/pay was only covered by bookingLimiter (5 req/min).
+// RISK: Brute-force payment attempts, card testing attacks.
+// FIX: Dedicated 2 req/min limiter on /billing/pay per authenticated user.
+// This stacks with bookingLimiter — the stricter limit wins.
+// ─────────────────────────────────────────────────────────────────────────
+const paymentLimiter = rateLimit({
+    windowMs: 1 * 60 * 1000, // 1 minute
+    max: 2,
+    keyGenerator: (req: any, res: any) => {
+        // Key by authenticated user ID (prevents shared IP issues in hospitals)
+        if (req.user?.id || req.user?.sub) {
+            return `pay:${req.user.id || req.user.sub}`;
+        }
+        return `pay:${ipKeyGenerator(req, res)}`;
+    },
+    message: { error: "Payment rate limit exceeded. Maximum 2 payment attempts per minute." },
+    standardHeaders: true,
+    legacyHeaders: false,
+    store: createRateLimitStore('booking:pay'),
+});
+// Auth runs first so paymentLimiter can key by req.user.id (not just IP)
+app.use('/billing/pay', authMiddleware, paymentLimiter);
+
 app.use('/', bookingRoutes);
 
 // --- 4. 100% COMPLIANT VAULT SYNC ---

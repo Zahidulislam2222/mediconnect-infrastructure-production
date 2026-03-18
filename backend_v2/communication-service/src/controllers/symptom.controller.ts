@@ -5,6 +5,7 @@ import { getRegionalDB } from "../utils/db-adapter";
 import { getSSMParameter } from '../../../shared/aws-config';
 import { mapToFHIRDiagnosticReport, scrubPII } from "../utils/fhir-mapper";
 import { writeAuditLog } from "../../../shared/audit";
+import { logger } from "../../../shared/logger";
 import { jsPDF } from "jspdf";
 import { v4 as uuidv4 } from "uuid";
 import { GoogleAuth } from "google-auth-library";
@@ -77,7 +78,7 @@ export const checkSymptoms = async (req: Request, res: Response) => {
                 region: userRegion
             });
         } catch (dbError: any) {
-            console.error(`📢 Database Save Failed [${userRegion}]:`, dbError.message);
+            logger.error("[SYMPTOM] Database save failed", { region: userRegion, error: dbError.message });
         }
 
         // --- 6. PROFESSIONAL CLINICAL PDF GENERATION ---
@@ -132,7 +133,7 @@ export const checkSymptoms = async (req: Request, res: Response) => {
         });
 
         // 8. BIGQUERY SYNC (Async)
-        pushToBigQuery(user.sub, symptoms as string[], analysis, aiResponse.provider, userRegion).catch(console.error);
+        pushToBigQuery(user.sub, symptoms as string[], analysis, aiResponse.provider, userRegion).catch(e => logger.error("[SYMPTOM] BigQuery sync failed", { error: e.message }));
 
         res.json({
             success: true,
@@ -142,7 +143,7 @@ export const checkSymptoms = async (req: Request, res: Response) => {
         });
 
     } catch (error: any) {
-        console.error("Symptom Error:", error);
+        logger.error("[SYMPTOM] Symptom check failed", { error: error.message });
         res.status(500).json({ error: "Internal Server Error" });
     }
 };
@@ -180,7 +181,7 @@ async function pushToBigQuery(userId: string, symptoms: string[], analysis: any,
                 }]
             })
         });
-    } catch (err) {
-        console.error("❌ BigQuery Sync Failed:", err);
+    } catch (err: any) {
+        logger.error("[SYMPTOM] BigQuery sync failed", { error: err.message });
     }
 }

@@ -1,8 +1,32 @@
+# Dependencies & Build
 node_modules
 dist
-npm-debug.log
+
+# Git
 .git
+.gitignore
+
+# Docker
+.dockerignore
+Dockerfile
+
+# Environment & Secrets
 .env
-cloud-sql-proxy.exe
+.env.*
+*.pem
+*.key
+
+# Logs
+*.log
+npm-debug.log
+error.log
 debug.log
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Docs
 *.md

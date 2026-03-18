@@ -16,6 +16,7 @@ import { GoogleAuth } from "google-auth-library";
 // Shared Utilities
 import { safeError } from '../../../shared/logger';
 import { writeAuditLog } from '../../../shared/audit';
+import { encryptPHI, decryptPHI } from '../../../shared/kms-crypto';
 
 // Shared Clients
 import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient, getRegionalSNSClient } from '../../../shared/aws-config';
@@ -117,31 +118,51 @@ export const createPatient = catchAsync(async (req: Request, res: Response) => {
         resourceType: "Patient",
         id: finalId,
         active: true,
-        name: [{ use: "official", text: name }],
-        telecom: [{ system: "email", value: email }, { system: "phone", value: phone }],
+        identifier: [{ use: "usual", system: "urn:mediconnect:patient-id", value: finalId }],
+        name: [{ use: "official", text: name, family: name.split(' ').pop(), given: name.split(' ').slice(0, -1) }],
+        telecom: [
+            { system: "email", value: email, use: "home" },
+            ...(phone ? [{ system: "phone", value: phone, use: "mobile" }] : []),
+        ],
         gender: gender?.toLowerCase(),
         birthDate: dob,
-        meta: { lastUpdated: timestamp }
+        address: req.body.address ? [{ use: "home", text: req.body.address }] : [],
+        communication: [{ language: { coding: [{ system: "urn:ietf:bcp:47", code: req.body.language || "en" }] }, preferred: true }],
+        meta: { lastUpdated: timestamp, versionId: "1" }
     };
+
+    // 🟢 HIPAA: Encrypt PHI fields at rest using KMS envelope encryption
+    let encryptedPHI: Record<string, string> = {};
+    try {
+        encryptedPHI = await encryptPHI(
+            { name, ...(dob ? { dob } : {}), ...(phone ? { phone } : {}) },
+            region
+        );
+    } catch (kmsErr: any) {
+        // KMS unavailable (dev/test) — store plaintext with warning
+        safeError('[PHI] KMS encryption unavailable, storing plaintext', kmsErr.message);
+        encryptedPHI = { name, ...(dob ? { dob } : {}), ...(phone ? { phone } : {}) };
+    }
 
     const item = {
         patientId: finalId,
         email,
-        name,
+        name: encryptedPHI.name || name,
         role,
         isEmailVerified: true,
         isIdentityVerified: false,
         createdAt: timestamp,
         avatar: null,
-        dob,
+        dob: encryptedPHI.dob || dob,
+        phone: encryptedPHI.phone || phone,
         resource: fhirResource,
         region: region,
         consent: verifiedConsent // 🟢 SAVED TO DYNAMODB FOREVER (Required for Audits)
     };
 
     try {
-        await dynamicDb.send(new PutCommand({ 
-            TableName: CONFIG.DYNAMO_TABLE, 
+        await dynamicDb.send(new PutCommand({
+            TableName: CONFIG.DYNAMO_TABLE,
             Item: item,
             ConditionExpression: "attribute_not_exists(patientId)"
         }));
@@ -185,6 +206,17 @@ export const getProfile = catchAsync(async (req: Request, res: Response) => {
     }));
 
     if (!response.Item) return res.status(404).json({ error: "Profile not found." });
+
+    // 🟢 HIPAA: Decrypt PHI fields before returning to client
+    try {
+        const decrypted = await decryptPHI(
+            { name: response.Item.name, dob: response.Item.dob, phone: response.Item.phone },
+            region
+        );
+        if (decrypted.name) response.Item.name = decrypted.name;
+        if (decrypted.dob) response.Item.dob = decrypted.dob;
+        if (decrypted.phone) response.Item.phone = decrypted.phone;
+    } catch { /* KMS unavailable — fields are already plaintext */ }
 
     response.Item.avatar = await signAvatarUrl(response.Item.avatar, region);
 
@@ -636,11 +668,12 @@ export const searchPatients = catchAsync(async (req: Request, res: Response) => 
         TableName: CONFIG.DYNAMO_TABLE,
         FilterExpression: "contains(#n, :name)",
         ExpressionAttributeNames: { "#n": "name" },
-        ExpressionAttributeValues: { ":name": name as string }
+        ExpressionAttributeValues: { ":name": name as string },
+        ProjectionExpression: "patientId, #n, email, avatar, gender, createdAt"
     });
 
     const result = await dynamicDb.send(command);
-    
+
     await writeAuditLog(user.id, "MULTIPLE", "SEARCH_PATIENT", "Database search performed", {
         region, ipAddress: req.ip
     });
@@ -769,9 +802,89 @@ export const getPatientById = catchAsync(async (req: Request, res: Response) => 
     }));
 
     if (!response.Item) return res.status(404).json({ error: "Patient not found." });
-    
+
+    // 🟢 HIPAA: Decrypt PHI fields before returning to client
+    try {
+        const decrypted = await decryptPHI(
+            { name: response.Item.name, dob: response.Item.dob, phone: response.Item.phone },
+            region
+        );
+        if (decrypted.name) response.Item.name = decrypted.name;
+        if (decrypted.dob) response.Item.dob = decrypted.dob;
+        if (decrypted.phone) response.Item.phone = decrypted.phone;
+    } catch { /* KMS unavailable — fields are already plaintext */ }
+
     response.Item.avatar = await signAvatarUrl(response.Item.avatar, region);
 
     await writeAuditLog(requesterId, requestedId, "READ_PATIENT_BY_ID", "Authorized medical record accessed", { region, role: isDoctor ? 'doctor' : 'patient' });
     res.json(response.Item);
+});
+
+/**
+ * 9. EXPORT PATIENT DATA (GDPR Right to Data Portability)
+ */
+export const exportPatientData = catchAsync(async (req: Request, res: Response) => {
+    const region = extractRegion(req);
+    const dynamicDb = getRegionalClient(region);
+    const userId = (req as any).user?.id;
+
+    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+
+    // Fetch patient's complete profile
+    const patientResponse = await dynamicDb.send(new GetCommand({
+        TableName: CONFIG.DYNAMO_TABLE,
+        Key: { patientId: userId }
+    }));
+
+    if (!patientResponse.Item) return res.status(404).json({ error: "Patient not found" });
+
+    const patientData = patientResponse.Item;
+
+    // 🟢 HIPAA: Decrypt PHI fields before export
+    try {
+        const decrypted = await decryptPHI(
+            { name: patientData.name, dob: patientData.dob, phone: patientData.phone },
+            region
+        );
+        if (decrypted.name) patientData.name = decrypted.name;
+        if (decrypted.dob) patientData.dob = decrypted.dob;
+        if (decrypted.phone) patientData.phone = decrypted.phone;
+    } catch { /* KMS unavailable — fields are already plaintext */ }
+
+    // Fetch patient's appointments
+    const appointmentsResponse = await dynamicDb.send(new ScanCommand({
+        TableName: process.env.APPOINTMENT_TABLE || "mediconnect-appointments",
+        FilterExpression: "patientId = :pid",
+        ExpressionAttributeValues: { ":pid": userId }
+    }));
+
+    const appointments = appointmentsResponse.Items || [];
+
+    // Fetch patient's vitals
+    const vitalsResponse = await dynamicDb.send(new ScanCommand({
+        TableName: process.env.VITALS_TABLE || "mediconnect-vitals",
+        FilterExpression: "patientId = :pid",
+        ExpressionAttributeValues: { ":pid": userId }
+    }));
+
+    const vitals = vitalsResponse.Items || [];
+
+    // Build FHIR Bundle for data portability
+    const totalEntries = 1 + appointments.length + vitals.length;
+
+    const exportBundle = {
+        resourceType: "Bundle",
+        type: "document",
+        timestamp: new Date().toISOString(),
+        total: totalEntries,
+        entry: [
+            { resource: { resourceType: "Patient", ...patientData } },
+            ...appointments.map(a => ({ resource: a })),
+            ...vitals.map(v => ({ resource: v })),
+        ]
+    };
+
+    await writeAuditLog(userId, userId, "GDPR_DATA_EXPORT", "Patient exported personal data", { region, ipAddress: req.ip });
+
+    res.json(exportBundle);
 });

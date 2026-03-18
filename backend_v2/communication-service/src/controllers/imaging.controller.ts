@@ -4,6 +4,7 @@ import { getRegionalDB } from "../utils/db-adapter";
 import { getSSMParameter } from '../../../shared/aws-config';
 import { scrubPII, mapToFHIRImagingReport } from "../utils/fhir-mapper";
 import { writeAuditLog } from "../../../shared/audit";
+import { logger } from "../../../shared/logger";
 import { v4 as uuidv4 } from "uuid";
 import { jsPDF } from "jspdf";
 import autoTable from 'jspdf-autotable';
@@ -103,7 +104,7 @@ export const analyzeClinicalImage = async (req: Request, res: Response) => {
                 timestamp: new Date().toISOString()
             });
         } catch (dbErr: any) {
-            console.error(`📢 Database Save Failed [${userRegion}]:`, dbErr.message);
+            logger.error("[IMAGING] Database save failed", { region: userRegion, error: dbErr.message });
         }
 
         // 🟢 HIPAA AUDIT LOG FIX: Added correct Patient ID, Region, and IP
@@ -115,7 +116,7 @@ export const analyzeClinicalImage = async (req: Request, res: Response) => {
         });
 
     } catch (error: any) {
-        console.error("Imaging AI Error:", error);
-        res.status(500).json({ error: "Image analysis failed", details: error.message });
+        logger.error("[IMAGING] Image analysis failed", { error: error.message });
+        res.status(500).json({ error: "Image analysis failed" });
     }
 };

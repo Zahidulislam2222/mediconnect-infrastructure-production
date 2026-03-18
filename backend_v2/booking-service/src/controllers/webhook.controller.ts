@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import Stripe from 'stripe';
 import { getRegionalClient, getSSMParameter } from '../../../shared/aws-config';
-import { TransactWriteCommand, GetCommand } from "@aws-sdk/lib-dynamodb";
+import { TransactWriteCommand, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { createHash } from 'crypto';
 import { pushRevenueToBigQuery } from './billing.controller';
 
@@ -12,6 +12,69 @@ const TABLE_TRANSACTIONS = process.env.TABLE_TRANSACTIONS || "mediconnect-transa
 const TABLE_PRESCRIPTIONS = process.env.TABLE_PRESCRIPTIONS || "mediconnect-prescriptions";
 const TABLE_APPOINTMENTS = process.env.TABLE_APPOINTMENTS || "mediconnect-appointments";
 const TABLE_INVENTORY = process.env.TABLE_INVENTORY || "mediconnect-pharmacy-inventory";
+
+// ─── IDEMPOTENCY FIX ───────────────────────────────────────────────────────
+// Stripe can retry webhooks up to 100x. The original code had a partial check
+// (billId status === 'PAID') but this was vulnerable to race conditions when
+// concurrent retries both see status !== 'PAID' simultaneously.
+//
+// FIX: Atomic event deduplication using DynamoDB conditional PutItem on
+// the Stripe event ID. Only the first delivery succeeds; retries get a
+// ConditionalCheckFailedException and are safely skipped.
+//
+// Table: mediconnect-webhook-events
+//   PK: eventId (Stripe event ID, e.g. "evt_1abc...")
+//   Attributes: type, processedAt, region
+//   TTL: expiresAt (30 days — Stripe retries stop after ~3 days)
+// ────────────────────────────────────────────────────────────────────────────
+const TABLE_WEBHOOK_EVENTS = process.env.TABLE_WEBHOOK_EVENTS || "mediconnect-webhook-events";
+const WEBHOOK_EVENT_TTL_DAYS = 30;
+
+/**
+ * Atomically mark a Stripe event as processed.
+ * Returns true if this is the FIRST time we've seen this event.
+ * Returns false if the event was already processed (duplicate/retry).
+ *
+ * Uses DynamoDB conditional PutItem:
+ *   - attribute_not_exists(eventId) ensures only one writer wins
+ *   - ConditionalCheckFailedException = duplicate = safe to skip
+ */
+async function claimWebhookEvent(
+    eventId: string,
+    eventType: string,
+    region: string,
+    regionalDb: any
+): Promise<boolean> {
+    const now = new Date().toISOString();
+    const ttl = Math.floor(Date.now() / 1000) + (WEBHOOK_EVENT_TTL_DAYS * 24 * 60 * 60);
+
+    try {
+        await regionalDb.send(new PutCommand({
+            TableName: TABLE_WEBHOOK_EVENTS,
+            Item: {
+                eventId,
+                eventType,
+                processedAt: now,
+                region,
+                expiresAt: ttl,  // DynamoDB TTL auto-cleanup
+            },
+            // ATOMIC GUARD: Fails if eventId already exists
+            ConditionExpression: "attribute_not_exists(eventId)",
+        }));
+
+        console.log(`🔒 Webhook event claimed: ${eventId} (${eventType})`);
+        return true;  // First time — proceed with processing
+
+    } catch (err: any) {
+        if (err.name === 'ConditionalCheckFailedException') {
+            console.log(`⚠️ Webhook duplicate skipped: ${eventId} (already processed)`);
+            return false;  // Duplicate — safe to skip
+        }
+        // Unexpected error — log but allow processing to prevent lost events
+        console.error(`⚠️ Webhook idempotency check error for ${eventId}:`, err.message);
+        return true;  // Fail-open: better to risk a duplicate than lose an event
+    }
+}
 
 export const handleStripeWebhook = async (req: Request, res: Response) => {
     let event: Stripe.Event;
@@ -44,6 +107,15 @@ export const handleStripeWebhook = async (req: Request, res: Response) => {
     } catch (err: any) {
         console.error(`⚠️ Webhook Signature Verification Failed: ${err.message}`);
         return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    // ─── IDEMPOTENCY GATE: Check if this Stripe event was already processed ───
+    // ORIGINAL: No event-level deduplication. Stripe retries could cause
+    // double-processing if concurrent deliveries raced past the billId check.
+    const isNewEvent = await claimWebhookEvent(event.id, event.type, region, regionalDb);
+    if (!isNewEvent) {
+        // Already processed — acknowledge to Stripe so it stops retrying
+        return res.json({ received: true, deduplicated: true });
     }
 
     if (event.type === 'payment_intent.succeeded') {

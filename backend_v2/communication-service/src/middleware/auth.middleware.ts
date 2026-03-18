@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import { COGNITO_CONFIG } from '../../../shared/aws-config';
 import { writeAuditLog } from "../../../shared/audit";
+import { logger } from "../../../shared/logger";
 
 const verifiers: Record<string, any> = {
     'us-east-1': null,
@@ -85,7 +86,7 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
     } catch (err: any) {
         const region = extractRegion(req);
         
-        console.warn(`🔒 Auth Failure [${region}]:`, err.message);
+        logger.warn("[AUTH] Authentication failed", { region });
 
         // Only log to Audit Log if it's a real attack (not just an expired token)
         if (!err.message.includes('expired')) {

@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import morgan from 'morgan';
 import dotenv from 'dotenv';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import { createRateLimitStore } from '../../shared/rate-limit-store'; // 🟢 FIX #9: Redis distributed rate limiting
 
 import { GetParametersCommand } from "@aws-sdk/client-ssm";
 import { safeLog, safeError } from '../../shared/logger';
@@ -25,26 +26,29 @@ app.get('/ready', (req, res) => {
 });
 
 // 🟢 2. DDoS Protection
+// ─── FIX #9: Redis-backed distributed rate limiting ──────────────────────
 const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
-    max: 500, // Higher limit for general assets
-    message: { error: "System Busy: Please try again later." }
+    max: 500,
+    message: { error: "System Busy: Please try again later." },
+    store: createRateLimitStore('global:doctor'),
 });
 app.use(globalLimiter);
 
 const directoryLimiter = rateLimit({
-    windowMs: 1 * 60 * 1000, 
-    max: 20, 
+    windowMs: 1 * 60 * 1000,
+    max: 20,
     keyGenerator: (req: any, res: any) => {
         if (req.user?.sub) {
             return req.user.sub;
         }
 
         return ipKeyGenerator(req, res);
-    }, 
+    },
     message: { error: "Security Alert: High-frequency directory scraping detected." },
     standardHeaders: true,
     legacyHeaders: false,
+    store: createRateLimitStore('doctor:directory'),
 });
 
 const PORT = process.env.PORT || 8082;

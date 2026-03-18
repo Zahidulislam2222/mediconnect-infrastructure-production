@@ -1,0 +1,127 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admin-service
+  labels:
+    app: admin-service
+spec:
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: "50%"
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: admin-service
+  template:
+    metadata:
+      labels:
+        app: admin-service
+        azure.workload.identity/use: "true"
+    spec:
+      serviceAccountName: admin-sa
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 3000
+        fsGroup: 2000
+
+      containers:
+        - name: admin-service
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+
+          image: __IMAGE_URI__
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8085
+
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "8085"
+            - name: ALLOWED_ORIGINS
+              value: "__ALLOWED_ORIGINS__"
+            - name: AWS_REGION
+              value: "__AWS_REGION__"
+            - name: AWS_ROLE_ARN
+              value: "__AWS_ROLE_ARN__"
+            - name: AWS_WEB_IDENTITY_TOKEN_FILE
+              value: "__TOKEN_FILE__"
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: "/var/run/secrets/gcp/gcp-wif-config.json"
+
+          volumeMounts:
+            - name: gcp-wif-volume
+              mountPath: "/var/run/secrets/gcp"
+              readOnly: true
+
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "64Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8085
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8085
+            initialDelaySeconds: 10
+            periodSeconds: 10
+      volumes:
+        - name: gcp-wif-volume
+          configMap:
+            name: gcp-wif-config
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin-service
+spec:
+  type: ClusterIP
+  selector:
+    app: admin-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8085
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: admin-service-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: admin-service
+  minReplicas: __MIN_REPLICAS__
+  maxReplicas: __MAX_REPLICAS__
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: admin-service-pdb
+spec:
+  minAvailable: 50%
+  selector:
+    matchLabels:
+      app: admin-service

@@ -5,7 +5,8 @@ import {
     getPrescriptions,
     updatePrescription,
     requestRefill,
-    generateQR
+    generateQR,
+    fulfillPrescription
 } from "./prescription.controller";
 import { handleEhrAction } from "./ehr.controller";
 import { getPatientScans, uploadDicom } from './imaging.controller';
@@ -37,6 +38,7 @@ router.put("/prescriptions", authMiddleware, updatePrescription);
 // 🟢 Pharmacy Actions
 router.post("/pharmacy/request-refill", authMiddleware, requestRefill);
 router.post("/pharmacy/generate-qr", authMiddleware, generateQR);
+router.post("/pharmacy/fulfill", authMiddleware, fulfillPrescription);
 
 // =============================================================================
 // 2. EHR & RELATIONSHIPS

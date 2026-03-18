@@ -3,6 +3,7 @@ import { AICircuitBreaker } from "../utils/ai-circuit-breaker";
 import { getRegionalDB } from "../utils/db-adapter";
 import { getSSMParameter } from '../../../shared/aws-config';
 import { writeAuditLog } from "../../../shared/audit";
+import { logger } from "../../../shared/logger";
 import { v4 as uuidv4 } from "uuid";
 import axios from 'axios';
 
@@ -63,7 +64,7 @@ export const predictRisk = async (req: Request, res: Response) => {
                 timestamp: new Date().toISOString()
             });
         } catch (dbError: any) { 
-            console.error(`📢 Database Save Failed [${userRegion}]:`, dbError.message); 
+            logger.error("[PREDICTIVE] Database save failed", { region: userRegion, error: dbError.message });
         }
 
         await writeAuditLog(doctor.sub, patientId, "CLINICAL_AI_PREDICTION", `Model: ${modelType}`, { region: userRegion, ipAddress: req.ip });
@@ -71,8 +72,8 @@ export const predictRisk = async (req: Request, res: Response) => {
         res.json({ success: true, predictionId, analysis, fhirResource: fhirRiskAssessment, provider: aiResponse.provider });
 
     } catch (error: any) {
-        console.error("Predictive Error:", error);
-        res.status(500).json({ error: "Predictive analysis failed", details: error.message });
+        logger.error("[PREDICTIVE] Predictive analysis failed", { error: error.message });
+        res.status(500).json({ error: "Predictive analysis failed" });
     }
 };
 
@@ -102,7 +103,7 @@ export const summarizeConsultation = async (req: Request, res: Response) => {
                     timeout: 5000 // 🟢 Prevent indefinite hanging
                 });
             } catch (axiosError) {
-                console.warn("⚠️ EHR Sync Failed, but Summary Generated.");
+                logger.warn("[PREDICTIVE] EHR sync failed, but summary was generated");
             }
         }
 
@@ -110,7 +111,7 @@ export const summarizeConsultation = async (req: Request, res: Response) => {
 
         res.json({ success: true, summary: soapNote });
     } catch (error: any) {
-        console.error("Summarization Error:", error);
+        logger.error("[PREDICTIVE] Summarization failed", { error: error.message });
         res.status(500).json({ error: "Failed to generate summary" });
     }
 };

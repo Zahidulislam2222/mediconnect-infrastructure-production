@@ -17,6 +17,7 @@ import { getSignedIoTUrl } from './utils/iot-signer';
 
 import { handleEmergencyDetection } from './modules/iot/emergency';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
+import { createRateLimitStore } from '../../shared/rate-limit-store'; // 🟢 FIX #9: Redis distributed rate limiting
 
 import { pushVitalToBigQuery } from './modules/iot/vitals';
 
@@ -36,26 +37,29 @@ app.get('/ready', (req, res) => {
 });
 
 // 🟢 2. DDoS Protection
+// ─── FIX #9: Redis-backed distributed rate limiting ──────────────────────
 const globalLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 500,
-    message: { error: "System Busy: Please try again later." }
+    message: { error: "System Busy: Please try again later." },
+    store: createRateLimitStore('global:patient'),
 });
 app.use(globalLimiter);
 
 const sensitiveDataLimiter = rateLimit({
     windowMs: 1 * 60 * 1000,
-    max: 15, 
+    max: 15,
 
     keyGenerator: (req: any, res: any) => {
         if (req.user?.id) {
             return req.user.id;
         }
         return ipKeyGenerator(req, res);
-    }, 
+    },
     message: { error: "Security Throttling: Too many requests for medical records." },
     standardHeaders: true,
     legacyHeaders: false,
+    store: createRateLimitStore('patient:sensitive'),
 });
 
 const httpServer = createServer(app);

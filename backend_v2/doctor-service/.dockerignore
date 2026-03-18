@@ -1,9 +1,32 @@
+# Dependencies & Build
 node_modules
 dist
+
+# Git
+.git
+.gitignore
+
+# Docker
+.dockerignore
+Dockerfile
+
+# Environment & Secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Logs
+*.log
 npm-debug.log
 error.log
-.git
-.env
-cloud-sql-proxy.exe
 debug.log
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Docs
 *.md

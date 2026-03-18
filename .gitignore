@@ -12,6 +12,8 @@ build/
 *.json
 !tsconfig.json
 !app.json
+!package.json
+!package-lock.json
 !gcp_key.json.example
 
 # --- Terraform (CRITICAL) ---

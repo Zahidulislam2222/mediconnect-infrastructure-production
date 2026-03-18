@@ -98,13 +98,14 @@ export const mapToFHIRImagingReport = (
     patientId: string,
     doctorId: string,
     analysis: string,
-    provider: string
+    provider: string,
+    imageUrl?: string
 ) => {
-    return {
+    const report: any = {
         resourceType: "DiagnosticReport",
         status: "final",
         category: [{
-            coding: [{ system: "http://terminology.hl7.org/CodeSystem/v2-0074", code: "IMG" }]
+            coding: [{ system: "http://terminology.hl7.org/CodeSystem/v2-0074", code: "IMG", display: "Diagnostic Imaging" }]
         }],
         code: {
             coding: [{ system: "http://loinc.org", code: "18748-4", display: "Diagnostic imaging study" }],
@@ -112,10 +113,16 @@ export const mapToFHIRImagingReport = (
         },
         subject: { reference: `Patient/${patientId}` },
         resultsInterpreter: [{ reference: `Practitioner/${doctorId}` }],
+        effectiveDateTime: new Date().toISOString(),
         issued: new Date().toISOString(),
         performer: [{ display: provider }],
-        conclusion: scrubPII(analysis)
+        conclusion: scrubPII(analysis),
+        conclusionCode: [{ coding: [{ system: "http://snomed.info/sct", code: "118247008", display: "Radiologic finding" }] }],
     };
+    if (imageUrl) {
+        report.media = [{ comment: "AI-analyzed medical image", link: { display: "Source image", reference: imageUrl } }];
+    }
+    return report;
 };
 
 /**

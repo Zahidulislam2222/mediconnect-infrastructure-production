@@ -70,7 +70,18 @@ export const createPrescription = async (req: Request, res: Response) => {
         const timestamp = new Date().toISOString();
         const rxData = { prescriptionId, patientName, doctorName, medication, dosage, instructions, timestamp, price: realPrice, refillsRemaining: Number(req.body.refills) || 2, paymentStatus: "UNPAID" };
         const { pdfUrl, signature } = await pdfGen.generatePrescriptionPDF(rxData, userRegion);
-        const fhirResource = { resourceType: "MedicationRequest", id: prescriptionId, status: "active", medicationCodeableConcept: { coding: [{ system: "http://www.nlm.nih.gov/research/umls/rxnorm", code: medication, display: medicationRaw }] }, subject: { reference: `Patient/${patientId}` }, requester: { reference: `Practitioner/${doctorId}` }, authoredOn: timestamp };
+        const fhirResource = {
+            resourceType: "MedicationRequest",
+            id: prescriptionId,
+            status: "active",
+            intent: "order",
+            medicationCodeableConcept: { coding: [{ system: "http://www.nlm.nih.gov/research/umls/rxnorm", code: medication, display: medicationRaw }] },
+            subject: { reference: `Patient/${patientId}` },
+            requester: { reference: `Practitioner/${doctorId}` },
+            authoredOn: timestamp,
+            dosageInstruction: [{ text: `${dosage} - ${instructions}`, timing: { code: { text: dosage } }, doseAndRate: [{ type: { text: "ordered" } }] }],
+            dispenseRequest: { numberOfRepeatsAllowed: Number(req.body.refills) || 2 },
+        };
 
         // 🟢 ATOMIC TRANSACTION: Solves Data Integrity Violation
         await docClient.send(new TransactWriteCommand({
@@ -92,7 +103,8 @@ export const createPrescription = async (req: Request, res: Response) => {
 
 export const getPrescriptions = async (req: Request, res: Response) => {
     const docClient = getRegionalClient(extractRegion(req));
-    const { patientId, doctorId } = req.query as { patientId?: string, doctorId?: string };
+    const patientId = (req.query.patientId || req.query.patient || req.query.subject) as string | undefined;
+    const doctorId = (req.query.doctorId || req.query.requester) as string | undefined;
     if (!patientId && !doctorId) return res.status(400).json({ error: "ID required" });
 
     try {
@@ -105,7 +117,13 @@ export const getPrescriptions = async (req: Request, res: Response) => {
                 return { ...rx, liveStock: inv.Item?.stock ?? 0, livePrice: inv.Item?.price ?? rx.price };
             } catch (e) { return { ...rx, liveStock: 0, livePrice: rx.price }; }
         }));
-        res.json({ prescriptions: enhancedPrescriptions });
+        res.json({
+            resourceType: "Bundle",
+            type: "searchset",
+            total: enhancedPrescriptions.length,
+            entry: enhancedPrescriptions.map((rx: any) => ({ resource: rx.resource || rx })),
+            prescriptions: enhancedPrescriptions
+        });
     } catch (err: any) { res.status(500).json({ error: err.message }); }
 };
 
@@ -167,6 +185,54 @@ export const generateQR = async (req: Request, res: Response) => {
     } catch (e: any) {
         console.error("QR Generation Error:", e);
         res.status(500).json({ error: e.message });
+    }
+};
+
+export const fulfillPrescription = async (req: Request, res: Response) => {
+    const docClient = getRegionalClient(extractRegion(req));
+    const authUser = (req as any).user;
+    const { token } = req.body;
+
+    if (!token || !token.startsWith('PICKUP-')) {
+        return res.status(400).json({ error: "Invalid prescription token format" });
+    }
+
+    const prescriptionId = token.replace('PICKUP-', '');
+
+    try {
+        const rxRes = await docClient.send(new GetCommand({ TableName: TABLE_RX, Key: { prescriptionId } }));
+        const rx = rxRes.Item;
+
+        if (!rx) return res.status(404).json({ error: "Prescription not found" });
+        if (rx.status !== 'READY_FOR_PICKUP') {
+            return res.status(400).json({ error: `Cannot fulfill: current status is ${rx.status}` });
+        }
+
+        const now = new Date().toISOString();
+        await docClient.send(new UpdateCommand({
+            TableName: TABLE_RX,
+            Key: { prescriptionId },
+            UpdateExpression: "SET #s = :s, dispensedAt = :now, dispensedBy = :by",
+            ExpressionAttributeNames: { "#s": "status" },
+            ExpressionAttributeValues: { ":s": "DISPENSED", ":now": now, ":by": authUser.sub }
+        }));
+
+        await writeAuditLog(authUser.sub, rx.patientId, "DISPENSE_PRESCRIPTION", `Prescription ${prescriptionId} dispensed`, { region: extractRegion(req), ipAddress: req.ip });
+
+        res.json({
+            message: "Prescription fulfilled successfully",
+            prescription: {
+                prescriptionId,
+                medication: rx.medication,
+                patientName: rx.patientName,
+                doctorName: rx.doctorName,
+                dosage: rx.dosage,
+                dispensedAt: now,
+                status: "DISPENSED"
+            }
+        });
+    } catch (error: any) {
+        res.status(500).json({ error: error.message });
     }
 };
 

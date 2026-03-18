@@ -7,6 +7,7 @@ import { PutCommand, QueryCommand, GetCommand, DeleteCommand } from "@aws-sdk/li
 import { getRegionalClient } from '../../../shared/aws-config';
 import { mapToFHIRCommunication, scrubPII } from "../utils/fhir-mapper";
 import { writeAuditLog } from "../../../shared/audit";
+import { logger } from "../../../shared/logger";
 
 const catchAsync = (fn: any) => (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(fn(req, res, next)).catch(next);
@@ -95,7 +96,7 @@ export const getChatHistory = catchAsync(async (req: Request, res: Response) => 
         res.json((history.Items || []).reverse());
 
     } catch (error: any) {
-        console.error("History Error:", error.message);
+        logger.error("[CHAT] Failed to fetch chat history", { error: error.message });
         res.status(500).json({ error: "Failed to fetch history" });
     }
 });
@@ -108,7 +109,7 @@ export const handleWsEventHttp = catchAsync(async (req: Request, res: Response) 
         const result = await handleWebSocketEvent(event);
         res.status(result.statusCode).json(result.body);
     } catch (error: any) {
-        console.error("WS Error:", error.message);
+        logger.error("[CHAT] WebSocket event handling failed", { error: error.message });
         res.status(500).json({ error: "Internal Server Error" });
     }
 });
@@ -125,7 +126,7 @@ export const handleWebSocketEvent = async (event: any) => {
         : process.env.AWS_WS_GATEWAY_ENDPOINT_US;
 
     if (!endpoint) {
-        console.error(`CRITICAL: WebSocket Gateway Endpoint missing for region: ${awsRegionTarget}`);
+        logger.error("[CHAT] CRITICAL: WebSocket Gateway Endpoint missing for region", { region: awsRegionTarget });
     }
 
     const apigw = new ApiGatewayManagementApi({ endpoint, region: awsRegionTarget });
