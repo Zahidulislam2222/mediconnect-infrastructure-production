@@ -511,3 +511,139 @@ jobs:
             --set-env-vars "NODE_ENV=production,AWS_REGION=eu-central-1,AWS_ROLE_ARN=${{ steps.role.outputs.arn }},AWS_EC2_METADATA_DISABLED=true,DOCTOR_SERVICE_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},API_PUBLIC_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},GOOGLE_CLIENT_ID=${{ secrets.GCP_CLIENT_ID }},GOOGLE_CLIENT_SECRET=${{ secrets.GCP_CLIENT_SECRET }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }}" \
             --platform managed \
             --allow-unauthenticated
+
+  # ═══════════════════════════════════════════════════════════════
+  #  7. Deploy AWS Lambda Functions (both US + EU regions)
+  # ═══════════════════════════════════════════════════════════════
+  #
+  #  Deploys 4 Lambda functions to both regions:
+  #    - cognito-triggers   (Cognito Post-Confirmation → group assignment)
+  #    - ws-authorizer      (API Gateway WebSocket → JWT verification)
+  #    - cleanup-recordings (EventBridge → Chime pipeline teardown)
+  #    - failover-proxy     (API Gateway WebSocket → communication-service
+  #                          /chat/ws-event failover: EKS/AKS primary,
+  #                          Cloud Run backup)
+  #
+  #  Lambda functions in AWS must already exist (created via Terraform/Console).
+  #  Expected function names: mediconnect-{lambda-name} in each region.
+  #
+  #  Required IAM permissions on AWS_OIDC_ROLE_ARN:
+  #    lambda:UpdateFunctionCode, lambda:UpdateFunctionConfiguration,
+  #    lambda:PublishVersion
+  #
+  #  Required GitHub Secrets:
+  #    COGNITO_USER_POOL_ID_US, COGNITO_USER_POOL_ID_EU
+  #    COGNITO_CLIENT_ID_US_PATIENT, COGNITO_CLIENT_ID_EU_PATIENT
+  #    COGNITO_CLIENT_ID_US_DOCTOR, COGNITO_CLIENT_ID_EU_DOCTOR
+  #    WS_PRIMARY_URL_US, WS_BACKUP_URL_US   (communication-service /chat/ws-event)
+  #    WS_PRIMARY_URL_EU, WS_BACKUP_URL_EU   (communication-service /chat/ws-event)
+  #
+  deploy-lambdas:
+    needs: [test-and-lint]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
+          aws-region: us-east-1
+
+      # ── Package all Lambdas ──────────────────────────────────
+      - name: "Package Lambda functions"
+        run: |
+          LAMBDAS="cognito-triggers ws-authorizer cleanup-recordings failover-proxy"
+
+          for fn in $LAMBDAS; do
+            echo "📦 Packaging ${fn}..."
+            cd backend_v2/${fn}
+
+            # Install deps if package.json exists
+            if [ -f package.json ]; then
+              npm install --omit=dev
+            fi
+
+            # Zip everything (code + node_modules)
+            zip -r ../../${fn}.zip .
+            cd ../..
+          done
+
+      # ── Deploy code to US ────────────────────────────────────
+      - name: "Deploy Lambda code (US — us-east-1)"
+        run: |
+          for fn in cognito-triggers ws-authorizer cleanup-recordings failover-proxy; do
+            echo "🚀 Deploying mediconnect-${fn} to us-east-1..."
+            aws lambda update-function-code \
+              --function-name "mediconnect-${fn}" \
+              --zip-file "fileb://${fn}.zip" \
+              --region us-east-1 \
+              --publish
+          done
+
+      # ── Deploy code to EU ────────────────────────────────────
+      - name: "Deploy Lambda code (EU — eu-central-1)"
+        run: |
+          for fn in cognito-triggers ws-authorizer cleanup-recordings failover-proxy; do
+            echo "🚀 Deploying mediconnect-${fn} to eu-central-1..."
+            aws lambda update-function-code \
+              --function-name "mediconnect-${fn}" \
+              --zip-file "fileb://${fn}.zip" \
+              --region eu-central-1 \
+              --publish
+          done
+
+      # ── Configure env vars per region ────────────────────────
+      - name: "Configure Lambda env vars (US — us-east-1)"
+        run: |
+          # cognito-triggers
+          aws lambda update-function-configuration \
+            --function-name mediconnect-cognito-triggers \
+            --region us-east-1 \
+            --environment "Variables={COGNITO_CLIENT_ID_US_DOCTOR=${{ secrets.COGNITO_CLIENT_ID_US_DOCTOR }}}"
+
+          # ws-authorizer
+          aws lambda update-function-configuration \
+            --function-name mediconnect-ws-authorizer \
+            --region us-east-1 \
+            --environment "Variables={COGNITO_USER_POOL_ID_US=${{ secrets.COGNITO_USER_POOL_ID_US }},COGNITO_CLIENT_ID_US_PATIENT=${{ secrets.COGNITO_CLIENT_ID_US_PATIENT }},COGNITO_CLIENT_ID_US_DOCTOR=${{ secrets.COGNITO_CLIENT_ID_US_DOCTOR }}}"
+
+          # cleanup-recordings
+          aws lambda update-function-configuration \
+            --function-name mediconnect-cleanup-recordings \
+            --region us-east-1 \
+            --environment "Variables={TABLE_SESSIONS=mediconnect-video-sessions}"
+
+          # failover-proxy (communication-service WebSocket events)
+          aws lambda update-function-configuration \
+            --function-name mediconnect-failover-proxy \
+            --region us-east-1 \
+            --environment "Variables={PRIMARY_BACKEND_URL=${{ secrets.WS_PRIMARY_URL_US }},BACKUP_BACKEND_URL=${{ secrets.WS_BACKUP_URL_US }}}"
+
+      - name: "Configure Lambda env vars (EU — eu-central-1)"
+        run: |
+          # cognito-triggers
+          aws lambda update-function-configuration \
+            --function-name mediconnect-cognito-triggers \
+            --region eu-central-1 \
+            --environment "Variables={COGNITO_CLIENT_ID_EU_DOCTOR=${{ secrets.COGNITO_CLIENT_ID_EU_DOCTOR }}}"
+
+          # ws-authorizer
+          aws lambda update-function-configuration \
+            --function-name mediconnect-ws-authorizer \
+            --region eu-central-1 \
+            --environment "Variables={COGNITO_USER_POOL_ID_EU=${{ secrets.COGNITO_USER_POOL_ID_EU }},COGNITO_CLIENT_ID_EU_PATIENT=${{ secrets.COGNITO_CLIENT_ID_EU_PATIENT }},COGNITO_CLIENT_ID_EU_DOCTOR=${{ secrets.COGNITO_CLIENT_ID_EU_DOCTOR }}}"
+
+          # cleanup-recordings
+          aws lambda update-function-configuration \
+            --function-name mediconnect-cleanup-recordings \
+            --region eu-central-1 \
+            --environment "Variables={TABLE_SESSIONS=mediconnect-video-sessions}"
+
+          # failover-proxy (communication-service WebSocket events)
+          aws lambda update-function-configuration \
+            --function-name mediconnect-failover-proxy \
+            --region eu-central-1 \
+            --environment "Variables={PRIMARY_BACKEND_URL=${{ secrets.WS_PRIMARY_URL_EU }},BACKUP_BACKEND_URL=${{ secrets.WS_BACKUP_URL_EU }}}"

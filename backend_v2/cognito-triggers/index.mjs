@@ -1,34 +1,41 @@
 // backend_v2/cognito-triggers/index.mjs
+// Cognito Post-Confirmation Trigger — Auto-assigns user to doctor/patient group
+// Deployed per-region: US (us-east-1) and EU (eu-central-1)
+
 import { CognitoIdentityProviderClient, AdminAddUserToGroupCommand } from "@aws-sdk/client-cognito-identity-provider";
 
-const client = new CognitoIdentityProviderClient({});
+// AWS_REGION is set automatically by Lambda runtime
+const REGION = process.env.AWS_REGION || "us-east-1";
+const IS_EU = REGION.includes("eu");
+
+// Regional Cognito client (matches shared/aws-config.ts factory pattern)
+const client = new CognitoIdentityProviderClient({ region: REGION });
 
 export const handler = async (event) => {
-    console.log("Triggered Event:", JSON.stringify(event));
+    console.log(`[cognito-triggers][${REGION}] Post-confirmation event received`);
 
-    const clientId = event.callerContext.clientId;
-    
-    // 🟢 Pull from Environment Variables (Set in AWS Console)
-    const DOCTOR_CLIENT_ID = process.env.DOCTOR_CLIENT_ID;
+    // Resolve regional doctor client ID (new per-region env var pattern, with legacy fallback)
+    const DOCTOR_CLIENT_ID = IS_EU
+        ? (process.env.COGNITO_CLIENT_ID_EU_DOCTOR || process.env.DOCTOR_CLIENT_ID)
+        : (process.env.COGNITO_CLIENT_ID_US_DOCTOR || process.env.DOCTOR_CLIENT_ID);
 
     if (!DOCTOR_CLIENT_ID) {
-        console.error("CRITICAL SYSTEM ERROR: DOCTOR_CLIENT_ID environment variable is missing.");
-        return event; 
+        console.error(`[cognito-triggers][${REGION}] CRITICAL: Doctor client ID env var is missing`);
+        return event;
     }
 
+    const clientId = event.callerContext.clientId;
     const targetGroup = (clientId === DOCTOR_CLIENT_ID) ? "doctor" : "patient";
 
-    const command = new AdminAddUserToGroupCommand({
-        UserPoolId: event.userPoolId,
-        Username: event.userName,
-        GroupName: targetGroup
-    });
-
     try {
-        await client.send(command);
-        console.log(`Success: Assigned user ${event.userName} to [${targetGroup}] group.`);
+        await client.send(new AdminAddUserToGroupCommand({
+            UserPoolId: event.userPoolId,
+            Username: event.userName,
+            GroupName: targetGroup,
+        }));
+        console.log(`[cognito-triggers][${REGION}] Assigned ${event.userName} -> [${targetGroup}]`);
     } catch (error) {
-        console.error(`Error assigning user to ${targetGroup} group:`, error);
+        console.error(`[cognito-triggers][${REGION}] Failed to assign ${event.userName} -> [${targetGroup}]:`, error.message);
     }
 
     return event;

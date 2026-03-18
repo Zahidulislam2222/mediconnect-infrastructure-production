@@ -1,0 +1,9 @@
+{
+  "name": "mediconnect-cleanup-recordings",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Chime recording cleanup Lambda — stops billing when meetings end",
+  "dependencies": {
+    "@aws-sdk/client-chime-sdk-media-pipelines": "^3.750.0"
+  }
+}

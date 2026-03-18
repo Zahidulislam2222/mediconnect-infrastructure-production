@@ -1,14 +1,8 @@
 {
-  "name": "ws-authorizer",
+  "name": "mediconnect-ws-authorizer",
   "version": "1.0.0",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
+  "type": "module",
+  "description": "WebSocket authorizer Lambda — Cognito JWT verification for API Gateway",
   "dependencies": {
     "aws-jwt-verify": "^5.1.1"
   }
