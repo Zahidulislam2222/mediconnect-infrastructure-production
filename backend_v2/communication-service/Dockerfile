@@ -10,6 +10,7 @@ COPY backend_v2/doctor-service/package.json ./doctor-service/
 COPY backend_v2/patient-service/package.json ./patient-service/
 COPY backend_v2/booking-service/package.json ./booking-service/
 COPY backend_v2/communication-service/package.json ./communication-service/
+COPY backend_v2/staff-service/package.json ./staff-service/
 
 # 2. THE WORKING FIX: IGNORE LOCKFILES & FLAT INSTALL
 RUN rm -f package-lock.json

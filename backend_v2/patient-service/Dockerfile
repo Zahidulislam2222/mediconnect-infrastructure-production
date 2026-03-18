@@ -11,6 +11,7 @@ COPY backend_v2/doctor-service/package.json ./doctor-service/
 COPY backend_v2/patient-service/package.json ./patient-service/
 COPY backend_v2/booking-service/package.json ./booking-service/
 COPY backend_v2/communication-service/package.json ./communication-service/
+COPY backend_v2/staff-service/package.json ./staff-service/
 
 # 2. THE HOISTING FIX: Force Root node_modules
 RUN rm -f patient-service/package-lock.json
