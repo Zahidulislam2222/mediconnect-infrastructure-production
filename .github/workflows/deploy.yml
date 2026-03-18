@@ -524,14 +524,16 @@ jobs:
   #                          /chat/ws-event failover: EKS/AKS primary,
   #                          Cloud Run backup)
   #
-  #  Lambda functions in AWS must already exist (created via Terraform/Console).
+  #  Auto-creates functions if they don't exist yet; updates code if they do.
   #  Expected function names: mediconnect-{lambda-name} in each region.
   #
   #  Required IAM permissions on AWS_OIDC_ROLE_ARN:
+  #    lambda:GetFunction, lambda:CreateFunction,
   #    lambda:UpdateFunctionCode, lambda:UpdateFunctionConfiguration,
-  #    lambda:PublishVersion
+  #    lambda:PublishVersion, iam:PassRole
   #
   #  Required GitHub Secrets:
+  #    LAMBDA_EXECUTION_ROLE_ARN  (IAM role for Lambda runtime, NOT the GH Actions role)
   #    COGNITO_USER_POOL_ID_US, COGNITO_USER_POOL_ID_EU
   #    COGNITO_CLIENT_ID_US_PATIENT, COGNITO_CLIENT_ID_EU_PATIENT
   #    COGNITO_CLIENT_ID_US_DOCTOR, COGNITO_CLIENT_ID_EU_DOCTOR
@@ -575,24 +577,59 @@ jobs:
       - name: "Deploy Lambda code (US — us-east-1)"
         run: |
           for fn in cognito-triggers ws-authorizer cleanup-recordings failover-proxy; do
-            echo "🚀 Deploying mediconnect-${fn} to us-east-1..."
-            aws lambda update-function-code \
-              --function-name "mediconnect-${fn}" \
-              --zip-file "fileb://${fn}.zip" \
-              --region us-east-1 \
-              --publish
+            FUNC_NAME="mediconnect-${fn}"
+            REGION="us-east-1"
+
+            # Check if function exists
+            if aws lambda get-function --function-name "$FUNC_NAME" --region "$REGION" 2>/dev/null; then
+              echo "🔄 Updating ${FUNC_NAME} in ${REGION}..."
+              aws lambda update-function-code \
+                --function-name "$FUNC_NAME" \
+                --zip-file "fileb://${fn}.zip" \
+                --region "$REGION" \
+                --publish
+            else
+              echo "🆕 Creating ${FUNC_NAME} in ${REGION}..."
+              aws lambda create-function \
+                --function-name "$FUNC_NAME" \
+                --runtime nodejs22.x \
+                --handler index.handler \
+                --role "${{ secrets.LAMBDA_EXECUTION_ROLE_ARN }}" \
+                --zip-file "fileb://${fn}.zip" \
+                --region "$REGION" \
+                --timeout 30 \
+                --memory-size 128 \
+                --publish
+            fi
           done
 
       # ── Deploy code to EU ────────────────────────────────────
       - name: "Deploy Lambda code (EU — eu-central-1)"
         run: |
           for fn in cognito-triggers ws-authorizer cleanup-recordings failover-proxy; do
-            echo "🚀 Deploying mediconnect-${fn} to eu-central-1..."
-            aws lambda update-function-code \
-              --function-name "mediconnect-${fn}" \
-              --zip-file "fileb://${fn}.zip" \
-              --region eu-central-1 \
-              --publish
+            FUNC_NAME="mediconnect-${fn}"
+            REGION="eu-central-1"
+
+            if aws lambda get-function --function-name "$FUNC_NAME" --region "$REGION" 2>/dev/null; then
+              echo "🔄 Updating ${FUNC_NAME} in ${REGION}..."
+              aws lambda update-function-code \
+                --function-name "$FUNC_NAME" \
+                --zip-file "fileb://${fn}.zip" \
+                --region "$REGION" \
+                --publish
+            else
+              echo "🆕 Creating ${FUNC_NAME} in ${REGION}..."
+              aws lambda create-function \
+                --function-name "$FUNC_NAME" \
+                --runtime nodejs22.x \
+                --handler index.handler \
+                --role "${{ secrets.LAMBDA_EXECUTION_ROLE_ARN }}" \
+                --zip-file "fileb://${fn}.zip" \
+                --region "$REGION" \
+                --timeout 30 \
+                --memory-size 128 \
+                --publish
+            fi
           done
 
       # ── Configure env vars per region ────────────────────────
