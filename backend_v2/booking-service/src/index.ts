@@ -47,7 +47,7 @@ const bookingLimiter = rateLimit({
             return req.user.id;
         }
 
-        return ipKeyGenerator(req, res);
+        return ipKeyGenerator(req.ip);
     },
     message: { error: "Fraud Prevention: Too many transactional attempts." },
     standardHeaders: true,
@@ -138,7 +138,7 @@ const paymentLimiter = rateLimit({
         if (req.user?.id || req.user?.sub) {
             return `pay:${req.user.id || req.user.sub}`;
         }
-        return `pay:${ipKeyGenerator(req, res)}`;
+        return `pay:${ipKeyGenerator(req.ip)}`;
     },
     message: { error: "Payment rate limit exceeded. Maximum 2 payment attempts per minute." },
     standardHeaders: true,

@@ -43,7 +43,7 @@ const directoryLimiter = rateLimit({
             return req.user.sub;
         }
 
-        return ipKeyGenerator(req, res);
+        return ipKeyGenerator(req.ip);
     },
     message: { error: "Security Alert: High-frequency directory scraping detected." },
     standardHeaders: true,

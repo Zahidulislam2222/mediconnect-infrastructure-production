@@ -54,7 +54,7 @@ const sensitiveDataLimiter = rateLimit({
         if (req.user?.id) {
             return req.user.id;
         }
-        return ipKeyGenerator(req, res);
+        return ipKeyGenerator(req.ip);
     },
     message: { error: "Security Throttling: Too many requests for medical records." },
     standardHeaders: true,
