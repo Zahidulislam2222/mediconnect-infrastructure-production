@@ -311,7 +311,7 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
             }, region).catch(e => logger.error("[BOOKING] Auto-PDF generation failed", { error: e.message }));
 
             // 🟢 FIX: Get the ID and update DynamoDB
-            const googleEventId = await syncToGoogleCalendar(doctorId, normalizedTime, patientName, reason, region);
+            const googleEventId = await syncToGoogleCalendar(doctorId, normalizedTime, actualPatientName, reason, region);
 
             if (googleEventId) {
                 await docClient.send(new UpdateCommand({
