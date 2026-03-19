@@ -14,10 +14,18 @@ const client = new CognitoIdentityProviderClient({ region: REGION });
 export const handler = async (event) => {
     console.log(`[cognito-triggers][${REGION}] Post-confirmation event received`);
 
-    // Resolve regional doctor client ID (new per-region env var pattern, with legacy fallback)
+    // Resolve regional client IDs (new per-region env var pattern, with legacy fallback)
     const DOCTOR_CLIENT_ID = IS_EU
         ? (process.env.COGNITO_CLIENT_ID_EU_DOCTOR || process.env.DOCTOR_CLIENT_ID)
         : (process.env.COGNITO_CLIENT_ID_US_DOCTOR || process.env.DOCTOR_CLIENT_ID);
+
+    const ADMIN_CLIENT_ID = IS_EU
+        ? process.env.COGNITO_CLIENT_ID_EU_ADMIN
+        : process.env.COGNITO_CLIENT_ID_US_ADMIN;
+
+    const STAFF_CLIENT_ID = IS_EU
+        ? process.env.COGNITO_CLIENT_ID_EU_STAFF
+        : process.env.COGNITO_CLIENT_ID_US_STAFF;
 
     if (!DOCTOR_CLIENT_ID) {
         console.error(`[cognito-triggers][${REGION}] CRITICAL: Doctor client ID env var is missing`);
@@ -25,7 +33,18 @@ export const handler = async (event) => {
     }
 
     const clientId = event.callerContext.clientId;
-    const targetGroup = (clientId === DOCTOR_CLIENT_ID) ? "doctor" : "patient";
+
+    // Map client ID to Cognito group
+    let targetGroup;
+    if (clientId === DOCTOR_CLIENT_ID) {
+        targetGroup = "doctor";
+    } else if (ADMIN_CLIENT_ID && clientId === ADMIN_CLIENT_ID) {
+        targetGroup = "admin";
+    } else if (STAFF_CLIENT_ID && clientId === STAFF_CLIENT_ID) {
+        targetGroup = "staff";
+    } else {
+        targetGroup = "patient";
+    }
 
     try {
         await client.send(new AdminAddUserToGroupCommand({

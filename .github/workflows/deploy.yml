@@ -490,7 +490,7 @@ jobs:
             --concurrency 80 \
             --timeout 300 \
             --no-cpu-boost \
-            --set-env-vars "NODE_ENV=production,AWS_REGION=us-east-1,AWS_ROLE_ARN=${{ steps.role.outputs.arn }},AWS_EC2_METADATA_DISABLED=true,DOCTOR_SERVICE_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},API_PUBLIC_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},GOOGLE_CLIENT_ID=${{ secrets.GCP_CLIENT_ID }},GOOGLE_CLIENT_SECRET=${{ secrets.GCP_CLIENT_SECRET }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }}" \
+            --set-env-vars "NODE_ENV=production,AWS_REGION=us-east-1,AWS_ROLE_ARN=${{ steps.role.outputs.arn }},AWS_EC2_METADATA_DISABLED=true,DOCTOR_SERVICE_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},API_PUBLIC_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},GOOGLE_CLIENT_ID=${{ secrets.GCP_CLIENT_ID }},GOOGLE_CLIENT_SECRET=${{ secrets.GCP_CLIENT_SECRET }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }},COGNITO_USER_POOL_ID_US=${{ secrets.COGNITO_USER_POOL_ID_US }},COGNITO_CLIENT_ID_US_PATIENT=${{ secrets.COGNITO_CLIENT_ID_US_PATIENT }},COGNITO_CLIENT_ID_US_DOCTOR=${{ secrets.COGNITO_CLIENT_ID_US_DOCTOR }},COGNITO_CLIENT_ID_US_ADMIN=${{ secrets.COGNITO_CLIENT_ID_US_ADMIN }},COGNITO_CLIENT_ID_US_STAFF=${{ secrets.COGNITO_CLIENT_ID_US_STAFF }}" \
             --platform managed \
             --allow-unauthenticated
 
@@ -508,7 +508,7 @@ jobs:
             --concurrency 80 \
             --timeout 300 \
             --no-cpu-boost \
-            --set-env-vars "NODE_ENV=production,AWS_REGION=eu-central-1,AWS_ROLE_ARN=${{ steps.role.outputs.arn }},AWS_EC2_METADATA_DISABLED=true,DOCTOR_SERVICE_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},API_PUBLIC_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},GOOGLE_CLIENT_ID=${{ secrets.GCP_CLIENT_ID }},GOOGLE_CLIENT_SECRET=${{ secrets.GCP_CLIENT_SECRET }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }}" \
+            --set-env-vars "NODE_ENV=production,AWS_REGION=eu-central-1,AWS_ROLE_ARN=${{ steps.role.outputs.arn }},AWS_EC2_METADATA_DISABLED=true,DOCTOR_SERVICE_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},API_PUBLIC_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},GOOGLE_CLIENT_ID=${{ secrets.GCP_CLIENT_ID }},GOOGLE_CLIENT_SECRET=${{ secrets.GCP_CLIENT_SECRET }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }},COGNITO_USER_POOL_ID_EU=${{ secrets.COGNITO_USER_POOL_ID_EU }},COGNITO_CLIENT_ID_EU_PATIENT=${{ secrets.COGNITO_CLIENT_ID_EU_PATIENT }},COGNITO_CLIENT_ID_EU_DOCTOR=${{ secrets.COGNITO_CLIENT_ID_EU_DOCTOR }},COGNITO_CLIENT_ID_EU_ADMIN=${{ secrets.COGNITO_CLIENT_ID_EU_ADMIN }},COGNITO_CLIENT_ID_EU_STAFF=${{ secrets.COGNITO_CLIENT_ID_EU_STAFF }}" \
             --platform managed \
             --allow-unauthenticated
 
@@ -537,6 +537,8 @@ jobs:
   #    COGNITO_USER_POOL_ID_US, COGNITO_USER_POOL_ID_EU
   #    COGNITO_CLIENT_ID_US_PATIENT, COGNITO_CLIENT_ID_EU_PATIENT
   #    COGNITO_CLIENT_ID_US_DOCTOR, COGNITO_CLIENT_ID_EU_DOCTOR
+  #    COGNITO_CLIENT_ID_US_ADMIN, COGNITO_CLIENT_ID_EU_ADMIN
+  #    COGNITO_CLIENT_ID_US_STAFF, COGNITO_CLIENT_ID_EU_STAFF
   #    WS_PRIMARY_URL_US, WS_BACKUP_URL_US   (communication-service /chat/ws-event)
   #    WS_PRIMARY_URL_EU, WS_BACKUP_URL_EU   (communication-service /chat/ws-event)
   #
@@ -639,7 +641,7 @@ jobs:
           aws lambda update-function-configuration \
             --function-name mediconnect-cognito-triggers \
             --region us-east-1 \
-            --environment "Variables={COGNITO_CLIENT_ID_US_DOCTOR=${{ secrets.COGNITO_CLIENT_ID_US_DOCTOR }}}"
+            --environment "Variables={COGNITO_CLIENT_ID_US_DOCTOR=${{ secrets.COGNITO_CLIENT_ID_US_DOCTOR }},COGNITO_CLIENT_ID_US_ADMIN=${{ secrets.COGNITO_CLIENT_ID_US_ADMIN }},COGNITO_CLIENT_ID_US_STAFF=${{ secrets.COGNITO_CLIENT_ID_US_STAFF }}}"
 
           # ws-authorizer
           aws lambda update-function-configuration \
@@ -665,7 +667,7 @@ jobs:
           aws lambda update-function-configuration \
             --function-name mediconnect-cognito-triggers \
             --region eu-central-1 \
-            --environment "Variables={COGNITO_CLIENT_ID_EU_DOCTOR=${{ secrets.COGNITO_CLIENT_ID_EU_DOCTOR }}}"
+            --environment "Variables={COGNITO_CLIENT_ID_EU_DOCTOR=${{ secrets.COGNITO_CLIENT_ID_EU_DOCTOR }},COGNITO_CLIENT_ID_EU_ADMIN=${{ secrets.COGNITO_CLIENT_ID_EU_ADMIN }},COGNITO_CLIENT_ID_EU_STAFF=${{ secrets.COGNITO_CLIENT_ID_EU_STAFF }}}"
 
           # ws-authorizer
           aws lambda update-function-configuration \

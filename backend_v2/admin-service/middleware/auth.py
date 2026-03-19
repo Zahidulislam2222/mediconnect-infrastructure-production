@@ -25,12 +25,16 @@ def _get_cognito_config() -> Dict[str, Dict[str, str]]:
             "USER_POOL_ID": os.getenv("COGNITO_USER_POOL_ID_US", os.getenv("COGNITO_USER_POOL_ID", "")),
             "CLIENT_PATIENT": os.getenv("COGNITO_CLIENT_ID_US_PATIENT", os.getenv("COGNITO_CLIENT_ID", "")),
             "CLIENT_DOCTOR": os.getenv("COGNITO_CLIENT_ID_US_DOCTOR", os.getenv("COGNITO_CLIENT_ID", "")),
+            "CLIENT_ADMIN": os.getenv("COGNITO_CLIENT_ID_US_ADMIN", ""),
+            "CLIENT_STAFF": os.getenv("COGNITO_CLIENT_ID_US_STAFF", ""),
         },
         "EU": {
             "REGION": "eu-central-1",
             "USER_POOL_ID": os.getenv("COGNITO_USER_POOL_ID_EU", ""),
             "CLIENT_PATIENT": os.getenv("COGNITO_CLIENT_ID_EU_PATIENT", ""),
             "CLIENT_DOCTOR": os.getenv("COGNITO_CLIENT_ID_EU_DOCTOR", ""),
+            "CLIENT_ADMIN": os.getenv("COGNITO_CLIENT_ID_EU_ADMIN", ""),
+            "CLIENT_STAFF": os.getenv("COGNITO_CLIENT_ID_EU_STAFF", ""),
         },
     }
 
@@ -83,7 +87,7 @@ async def verify_cognito_token(token: str, user_region: str) -> Dict[str, Any]:
     if not user_pool_id:
         raise HTTPException(status_code=500, detail=f"AUTH_CRITICAL: Missing Cognito Config for {region_key}")
 
-    allowed_clients = [c for c in [config["CLIENT_PATIENT"], config["CLIENT_DOCTOR"]] if c]
+    allowed_clients = [c for c in [config["CLIENT_PATIENT"], config["CLIENT_DOCTOR"], config["CLIENT_ADMIN"], config["CLIENT_STAFF"]] if c]
     if not allowed_clients:
         raise HTTPException(status_code=500, detail=f"AUTH_CRITICAL: No client IDs configured for {region_key}")
 

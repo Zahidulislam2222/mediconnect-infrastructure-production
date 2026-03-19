@@ -36,7 +36,7 @@ const getVerifier = async (region: string) => {
     verifiers[region] = CognitoJwtVerifier.create({
         userPoolId: config.USER_POOL_ID,
         tokenUse: "id",
-        clientId: [config.CLIENT_PATIENT, config.CLIENT_DOCTOR].filter(Boolean) as string[],
+        clientId: [config.CLIENT_PATIENT, config.CLIENT_DOCTOR, config.CLIENT_ADMIN, config.CLIENT_STAFF].filter(Boolean) as string[],
     });
 
     return verifiers[region];

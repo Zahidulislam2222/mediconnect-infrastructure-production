@@ -15,6 +15,7 @@ import jwt from 'jsonwebtoken';
 import { GoogleAuth } from "google-auth-library";
 import { SendEmailCommand } from "@aws-sdk/client-ses";
 import { AdminDeleteUserCommand } from "@aws-sdk/client-cognito-identity-provider";
+import { safeLog, safeError } from '../../../shared/logger';
 
 // 🟢 FIX 1: Use Getter to prevent loading race condition
 const CONFIG = {
@@ -658,6 +659,11 @@ export const requestDoctorClosure = catchAsync(async (req: Request, res: Respons
 
     if (!userCheck.Item) return res.status(404).json({ error: "Doctor not found" });
 
+    const authUser = (req as any).user;
+    if (!authUser || (authUser.id !== id && authUser.sub !== id)) {
+        return res.status(403).json({ error: "You can only request closure for your own account." });
+    }
+
     await docClient.send(new UpdateCommand({
         TableName: CONFIG.DYNAMO_TABLE,
         Key: { doctorId: id },
@@ -694,6 +700,20 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
 
     if (!userCheck.Item) return res.status(404).json({ error: "Doctor not found" });
 
+    // Ownership check: only the doctor themselves can delete their account
+    if (!authUser || (authUser.id !== id && authUser.sub !== id)) {
+        await writeAuditLog(authUser?.id || "unknown", id, "ILLEGAL_DELETE_ATTEMPT", "Unauthorized user tried to delete another doctor's account", { region, ipAddress: req.ip });
+        return res.status(403).json({ error: "You can only delete your own account." });
+    }
+
+    // Authorization check: admin must have approved the closure first
+    if (userCheck.Item.closureStatus !== "APPROVED_FOR_DELETION") {
+        await writeAuditLog(authUser.id, id, "ILLEGAL_DELETE_ATTEMPT", "Doctor tried to delete without admin approval", { region, ipAddress: req.ip });
+        return res.status(403).json({
+            error: "Security Violation: Your closure request must be approved by an administrator before deletion can proceed."
+        });
+    }
+
     try {
         const apptQuery = await docClient.send(new QueryCommand({
             TableName: process.env.TABLE_APPOINTMENTS || "mediconnect-appointments",
@@ -703,6 +723,21 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
         }));
 
         const doctorAppointments = apptQuery.Items || [];
+
+        // Hoist GoogleAuth outside loop to avoid repeated handshakes
+        let bqAccessToken: string | null = null;
+        let bqProjectId: string | null = null;
+        try {
+            const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+            const client = await auth.getClient();
+            bqAccessToken = (await client.getAccessToken()).token || null;
+            bqProjectId = await auth.getProjectId();
+        } catch (authErr) {
+            safeError("BigQuery auth failed during doctor deletion — appointments will still be anonymized", authErr);
+        }
+
+        const dataset = region.toUpperCase() === 'EU' ? "mediconnect_analytics_eu" : "mediconnect_analytics";
+
         for (const apt of doctorAppointments) {
             // Anonymize the FHIR resource participant name
             let fhirResource = apt.resource || {};
@@ -719,67 +754,37 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
                 Key: { appointmentId: apt.appointmentId },
                 UpdateExpression: "SET doctorName = :anon, doctorAvatar = :null, #res = :resource, lastUpdated = :now",
                 ExpressionAttributeNames: { "#res": "resource" },
-                ExpressionAttributeValues: { 
-                    ":anon": "ANONYMIZED_PRACTITIONER", 
+                ExpressionAttributeValues: {
+                    ":anon": "ANONYMIZED_PRACTITIONER",
                     ":null": null,
-                    ":resource": fhirResource, 
-                    ":now": new Date().toISOString()
-                }
-            }));
-            const doctorAppointments = apptQuery.Items ||[];
-        for (const apt of doctorAppointments) {
-            // Anonymize the FHIR resource participant name
-            let fhirResource = apt.resource || {};
-            if (Array.isArray(fhirResource.participant)) {
-                fhirResource.participant.forEach((p: any) => {
-                    if (p.actor?.reference === `Practitioner/${id}`) {
-                        p.actor.display = "ANONYMIZED_PRACTITIONER";
-                    }
-                });
-            }
-
-            await docClient.send(new UpdateCommand({
-                TableName: process.env.TABLE_APPOINTMENTS || "mediconnect-appointments",
-                Key: { appointmentId: apt.appointmentId },
-                UpdateExpression: "SET doctorName = :anon, doctorAvatar = :null, #res = :resource, lastUpdated = :now",
-                ExpressionAttributeNames: { "#res": "resource" },
-                ExpressionAttributeValues: { 
-                    ":anon": "ANONYMIZED_PRACTITIONER", 
-                    ":null": null,
-                    ":resource": fhirResource, 
+                    ":resource": fhirResource,
                     ":now": new Date().toISOString()
                 }
             }));
 
-            // 🟢 PASTE IT HERE (Inside the loop)
-            try {
-                const auth = new GoogleAuth({ scopes:['https://www.googleapis.com/auth/cloud-platform'] });
-                const client = await auth.getClient();
-                const accessToken = (await client.getAccessToken()).token;
-                const projectId = await auth.getProjectId();
-                const dataset = region.toUpperCase() === 'EU' ? "mediconnect_analytics_eu" : "mediconnect_analytics";
-                
-                await fetch(`https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/datasets/${dataset}/tables/appointments_stream/insertAll`, {
-                    method: "POST",
-                    headers: { "Authorization": `Bearer ${accessToken}`, "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        kind: "bigquery#tableDataInsertAllRequest",
-                        rows:[{ json: {
-                            appointment_id: apt.appointmentId,
-                            doctor_id: "ANONYMIZED_PRACTITIONER", 
-                            patient_id: apt.patientId, 
-                            status: "DOCTOR_DELETED",
-                            timestamp: new Date().toISOString()
-                        }}]
-                    })
-                });
-            } catch (bqErr) { console.error("BQ Doctor Anonymization Failed", bqErr); }
+            // Stream anonymization event to BigQuery
+            if (bqAccessToken && bqProjectId) {
+                try {
+                    await fetch(`https://bigquery.googleapis.com/bigquery/v2/projects/${bqProjectId}/datasets/${dataset}/tables/appointments_stream/insertAll`, {
+                        method: "POST",
+                        headers: { "Authorization": `Bearer ${bqAccessToken}`, "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            kind: "bigquery#tableDataInsertAllRequest",
+                            rows: [{ json: {
+                                appointment_id: apt.appointmentId,
+                                doctor_id: "ANONYMIZED_PRACTITIONER",
+                                patient_id: apt.patientId,
+                                status: "DOCTOR_DELETED",
+                                timestamp: new Date().toISOString()
+                            }}]
+                        })
+                    });
+                } catch (bqErr) { safeError("BQ appointment anonymization failed", bqErr); }
             }
         }
-        console.log(`[GDPR] Scrubbed Doctor Identity from ${doctorAppointments.length} appointment records.`);
+        safeLog(`[GDPR] Scrubbed Doctor Identity from ${doctorAppointments.length} appointment records.`);
     } catch (sweepErr) {
-        console.error("Doctor Appointment Sweep Failed:", sweepErr);
-        // We continue because we don't want to block the primary deletion if one record fails
+        safeError("Doctor Appointment Sweep Failed", sweepErr);
     }
 
     try {
@@ -808,16 +813,9 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
                 }
             }));
         }
-        console.log(`[GDPR] Anonymized ${transactions.length} financial transaction records.`);
+        safeLog(`[GDPR] Anonymized ${transactions.length} financial transaction records.`);
     } catch (txErr) {
-        console.error("Transaction Anonymization Failed:", txErr);
-    }
-
-    if (userCheck.Item.closureStatus !== "PENDING_CLOSURE") {
-        await writeAuditLog(authUser.id, id, "ILLEGAL_DELETE_ATTEMPT", "Doctor tried to bypass closure review via API", { region, ipAddress: req.ip });
-        return res.status(403).json({ 
-            error: "Security Violation: You cannot delete an active account. You must first 'Request Account Closure' and wait for Admin review." 
-        });
+        safeError("Transaction Anonymization Failed", txErr);
     }
 
     const regionalS3 = getRegionalS3Client(region);
@@ -875,7 +873,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
                 ...retentionTags
             }));
         }
-    } catch (e) { console.warn("Credential tagging failed"); }
+    } catch (e) { safeLog("Credential tagging failed"); }
 
     // 4. DELETE BIOMETRIC DATA (Face Photos) IMMEDIATELY
     try {
@@ -888,7 +886,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
             await regionalS3.send(new PutObjectTaggingCommand({ Bucket: bucketName, Key: key, ...biometricTags }));
             await regionalS3.send(new DeleteObjectCommand({ Bucket: bucketName, Key: key }));
         }
-    } catch (e) { console.warn("Biometric deletion failed"); }
+    } catch (e) { safeLog("Biometric deletion failed"); }
 
     try {
         const regionalSns = getRegionalSNSClient(region);
@@ -918,7 +916,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
             }));
         }
     } catch (err) {
-        console.error("Failed to send deletion alerts/emails", err);
+        safeError("Failed to send deletion alerts/emails", err);
     }
 
      try {
@@ -930,10 +928,10 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
                 UserPoolId: userPoolId,
                 Username: id
             }));
-            console.log(`[COMPLIANCE] Doctor Identity ${id} permanently erased from Cognito.`);
+            safeLog(`[COMPLIANCE] Doctor Identity ${id} permanently erased from Cognito.`);
         }
     } catch (cognitoErr) {
-        console.error("Failed to remove doctor from Cognito Pool", cognitoErr);
+        safeError("Failed to remove doctor from Cognito Pool", cognitoErr);
     }
 
     await writeAuditLog(id, id, "DELETE_PROFILE", "User invoked GDPR Right to be Forgotten", {
@@ -944,7 +942,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
             phone: userCheck.Item.phone || "N/A" 
         }
     });
-    logDoctorOnboarding(id, "ACCOUNT_DELETION", "DELETED", region).catch(console.error);
+    logDoctorOnboarding(id, "ACCOUNT_DELETION", "DELETED", region).catch((e: any) => safeError("Failed to log doctor onboarding", e));
 
     res.status(200).json({ message: "Identity erased. Credentials tagged for legal audit." });
 });

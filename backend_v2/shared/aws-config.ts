@@ -111,14 +111,18 @@ export const COGNITO_CONFIG: Record<string, any> = {
     US: {
         REGION: 'us-east-1',
         get USER_POOL_ID() { return process.env.COGNITO_USER_POOL_ID_US || process.env.COGNITO_USER_POOL_ID || '' },
-        get CLIENT_PATIENT() { return process.env.COGNITO_CLIENT_ID_US_PATIENT || process.env.COGNITO_CLIENT_ID || '' }, 
+        get CLIENT_PATIENT() { return process.env.COGNITO_CLIENT_ID_US_PATIENT || process.env.COGNITO_CLIENT_ID || '' },
         get CLIENT_DOCTOR() { return process.env.COGNITO_CLIENT_ID_US_DOCTOR || process.env.COGNITO_CLIENT_ID || '' },
+        get CLIENT_ADMIN() { return process.env.COGNITO_CLIENT_ID_US_ADMIN || '' },
+        get CLIENT_STAFF() { return process.env.COGNITO_CLIENT_ID_US_STAFF || '' },
     },
     EU: {
         REGION: 'eu-central-1',
         get USER_POOL_ID() { return process.env.COGNITO_USER_POOL_ID_EU || '' },
         get CLIENT_PATIENT() { return process.env.COGNITO_CLIENT_ID_EU_PATIENT || '' },
         get CLIENT_DOCTOR() { return process.env.COGNITO_CLIENT_ID_EU_DOCTOR || '' },
+        get CLIENT_ADMIN() { return process.env.COGNITO_CLIENT_ID_EU_ADMIN || '' },
+        get CLIENT_STAFF() { return process.env.COGNITO_CLIENT_ID_EU_STAFF || '' },
     }
 };
 

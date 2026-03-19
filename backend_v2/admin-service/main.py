@@ -19,7 +19,7 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from routers import users, analytics, audit, system
+from routers import users, analytics, audit, system, closures
 
 logging.basicConfig(
     level=logging.INFO,
@@ -94,6 +94,7 @@ app.include_router(users.router, prefix="/api/v1/admin/users", tags=["Users"])
 app.include_router(analytics.router, prefix="/api/v1/admin/analytics", tags=["Analytics"])
 app.include_router(audit.router, prefix="/api/v1/admin/audit", tags=["Audit"])
 app.include_router(system.router, prefix="/api/v1/admin/system", tags=["System"])
+app.include_router(closures.router, prefix="/api/v1/admin/closures", tags=["Closures"])
 
 # ─── Health Checks (unauthenticated for K8s probes) ─────────────────────
 @app.get("/health")
