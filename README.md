@@ -1,44 +1,43 @@
-# 🏥 MediConnect — Multi-Cloud Telemedicine Platform (V2)
+# MediConnect — Multi-Cloud Telemedicine Infrastructure
 
 <div align="center">
 
-![Status](https://img.shields.io/badge/Status-Live%20%7C%20Demo-brightgreen)
-![HIPAA](https://img.shields.io/badge/HIPAA-Compliant%202026-blue)
-![GDPR](https://img.shields.io/badge/GDPR-Compliant-blue)
-![FHIR](https://img.shields.io/badge/FHIR-R4%20Verified-blueviolet)
-![Cloud](https://img.shields.io/badge/Cloud-AWS%20%7C%20GCP%20%7C%20Azure-orange)
-![Cost](https://img.shields.io/badge/Idle%20Cost-%241%2Fmo-success)
-![License](https://img.shields.io/badge/License-Private-red)
+![Status](https://img.shields.io/badge/Status-Production-brightgreen)
+![HIPAA](https://img.shields.io/badge/HIPAA-Compliant-22C55E)
+![GDPR](https://img.shields.io/badge/GDPR-Compliant-3B82F6)
+![FHIR](https://img.shields.io/badge/FHIR-R4-8B5CF6)
+![Cloud](https://img.shields.io/badge/Cloud-AWS%20%7C%20GCP%20%7C%20Azure-F97316)
+![Cost](https://img.shields.io/badge/Idle%20Cost-%241%2Fmo-22C55E)
 
-**Production-grade, multi-cloud telemedicine infrastructure.**
+**Production-grade, multi-cloud telemedicine backend with 7 microservices.**
 **Forensically verified HIPAA / GDPR / HL7 FHIR R4 compliance.**
 **Zero-Cost Idle architecture: ~$1/month at rest.**
 
-[🌐 Live Demo](https://askme-82f72.web.app) · [👤 Author](https://github.com/Zahidulislam2222) · [📋 Architecture Docs](#architecture)
+[Live Demo](https://askme-82f72.web.app) · [Frontend Repo](https://github.com/Zahidulislam2222/mediconnect-hub) · [Author](https://zahidul-islam.vercel.app)
 
 </div>
 
 ---
 
-## 📑 Table of Contents
+## Table of Contents
 
 - [Overview](#overview)
-- [Live Demo](#live-demo)
 - [Architecture](#architecture)
 - [Microservices](#microservices)
-- [Repository Structure](#repository-structure)
 - [Tech Stack](#tech-stack)
+- [Repository Structure](#repository-structure)
 - [Compliance](#compliance)
 - [Cost Model](#cost-model)
 - [CI/CD & Deployment](#cicd--deployment)
 - [Security](#security)
+- [Getting Started](#getting-started)
 - [Author](#author)
 
 ---
 
 ## Overview
 
-MediConnect V2 is a **production-grade global telemedicine platform** built on a three-cloud Zero-Cost Idle architecture. It handles the complete clinical workflow — patient registration with biometric identity verification, AI-assisted doctor credentialing, real-time video consultations, KMS-signed e-prescriptions, pharmacy supply chain, Stripe billing, IoT wearable vitals, and a full analytics engine.
+MediConnect V2 is a **production-grade global telemedicine platform** built on a three-cloud Zero-Cost Idle architecture. It handles the complete clinical workflow — patient registration with biometric identity verification, AI-assisted doctor credentialing, real-time video consultations, KMS-signed e-prescriptions, pharmacy supply chain, Stripe billing, IoT wearable vitals, DICOM medical imaging, and a full analytics engine.
 
 **Key engineering achievements:**
 
@@ -46,291 +45,221 @@ MediConnect V2 is a **production-grade global telemedicine platform** built on a
 - **Zero-Cost Idle**: infrastructure costs ~$1/month when no users are active (vs ~$300/month traditional always-on)
 - **Forensically verified** HIPAA, GDPR, and HL7 FHIR R4 compliance — proven in code, not just promised
 - **Multi-cloud AI Circuit Breaker** across AWS Bedrock → GCP Vertex AI → Azure OpenAI for 99.99% AI availability
+- **Multi-region data residency**: US data in `us-east-1`, EU data in `eu-central-1` — GDPR Schrems II compliant
 - **0 npm vulnerabilities** — OIDC Workload Identity replacing all static keys
-
----
-
-## Live Demo
-
-> ⚠️ Demo environment uses test data only. No real patient data is stored.
-
-| Interface | URL |
-|-----------|-----|
-| 🌐 Web App (Patient) | [askme-82f72.web.app](https://askme-82f72.web.app) |
-| 🩺 Patient Service API | GCP Cloud Run (auto-scales) |
-| 👨‍⚕️ Doctor Service API | Azure Container Apps (auto-scales) |
-
-> Screenshots coming soon — contact author for a live walkthrough.
 
 ---
 
 ## Architecture
 
-MediConnect V2 uses a **"Three-Cloud Split"** strategy, assigning each cloud provider a specific role to maximise free tiers and scale-to-zero behaviour:
-
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     MEDICONNECT V2 ARCHITECTURE                  │
-├──────────────────┬──────────────────────┬───────────────────────┤
-│   AWS            │   GCP                │   Azure               │
-│   Security Hub   │   Relational Heart   │   Compute Layer       │
-├──────────────────┼──────────────────────┼───────────────────────┤
-│ • Cognito        │ • Cloud Run          │ • Container Apps      │
-│   (Auth + JWT)   │   (patient-service)  │   (doctor-service)    │
-│ • DynamoDB       │ • Cloud SQL          │   (booking-service)   │
-│   (patients,     │   (PostgreSQL 15)    │   (comm-service)      │
-│    audit logs,   │   Auto-pause idle    │   Scale to zero       │
-│    chat history) │ • BigQuery           │ • AKS Kubernetes      │
-│ • S3             │   (analytics DW)     │   (active-active)     │
-│   (documents,    │ • Pub/Sub            │ • Cosmos DB           │
-│    ID verify,    │   (event streaming)  │   (serverless mode)   │
-│    prescriptions)│ • Artifact Registry  │                       │
-│ • KMS            │                      │                       │
-│   (RX signing)   │                      │                       │
-│ • SSM Vault      │                      │                       │
-│ • Rekognition    │                      │                       │
-│ • Textract       │                      │                       │
-│ • Comprehend Med │                      │                       │
-│ • Bedrock        │                      │                       │
-│ • IoT Core       │                      │                       │
-│ • EKS (k8s)      │                      │                       │
-└──────────────────┴──────────────────────┴───────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                    MEDICONNECT V2 ARCHITECTURE                       │
+├──────────────────┬───────────────────────┬───────────────────────────┤
+│   AWS            │   GCP                 │   Azure                   │
+│   Security Hub   │   Compute Backup      │   Compute Primary         │
+├──────────────────┼───────────────────────┼───────────────────────────┤
+│ • Cognito        │ • Cloud Run           │ • AKS Kubernetes          │
+│   (Auth + JWT)   │   (backup failover)   │   (active-active)         │
+│ • DynamoDB       │ • BigQuery            │ • Cosmos DB               │
+│   (all tables)   │   (analytics DW)      │   (serverless mode)       │
+│ • S3 (documents) │ • Artifact Registry   │ • Container Apps          │
+│ • KMS (signing)  │   (Docker images)     │   (scale to zero)         │
+│ • SSM (vault)    │                       │                           │
+│ • IoT Core       │                       │                           │
+│ • Rekognition    │                       │                           │
+│ • Bedrock (AI)   │                       │                           │
+│ • Chime SDK      │                       │                           │
+│ • EKS (k8s)      │                       │                           │
+│ • Lambda (4 fn)  │                       │                           │
+└──────────────────┴───────────────────────┴───────────────────────────┘
 
-Failover Logic:
-Primary: AKS (Azure eastus) + EKS (AWS eu-central-1)
-Backup:  GCP Cloud Run (automatic 5s failover on 5xx)
-
-AI Circuit Breaker:
-AWS Bedrock → GCP Vertex AI → Azure OpenAI
-(auto-fallback, 99.99% AI availability)
-
-Data Residency:
-US patients  →  us-east-1 / us-central1
-EU patients  →  eu-central-1 / europe-west
-(GDPR Schrems II compliant — EU data never leaves EU)
+Failover: Primary (AKS/EKS) → Backup (GCP Cloud Run, 5s auto-failover)
+AI:       AWS Bedrock → GCP Vertex AI → Azure OpenAI (circuit breaker)
+Data:     US patients → us-east-1  |  EU patients → eu-central-1
 ```
 
 ---
 
 ## Microservices
 
-The platform is composed of **6 core Dockerized microservices** inside `backend_v2/`:
+### Core Services (`backend_v2/`)
 
-| Service | Cloud Host | Responsibility |
-|---------|-----------|----------------|
-| `patient-service` | GCP Cloud Run | Registration, biometric verify, FHIR Patient resource, IoT vitals |
-| `doctor-service` | Azure Container Apps | Credentialing, AI diploma OCR, scheduling, FHIR Practitioner |
-| `booking-service` | Azure Container Apps | Atomic slot locking, Stripe payments, FHIR Appointment resource |
-| `communication-service` | Azure Container Apps | WebSocket chat, AI consultation, FHIR ImagingReport, Chime video |
-| `ws-authorizer` | AWS Lambda | Cognito JWT verification for all WebSocket connections |
-| `failover-proxy` | GCP Cloud Run | Health-check router, automatic traffic rerouting on failure |
+| Service | Language | Port | Responsibility |
+|---------|----------|------|----------------|
+| `patient-service` | Node.js/Express | 8081 | Registration, biometric verify, FHIR Patient, IoT vitals, MQTT bridge |
+| `doctor-service` | Node.js/Express | 8082 | Credentialing, AI diploma OCR, scheduling, EHR, e-prescriptions |
+| `booking-service` | Node.js/Express | 8083 | Appointment scheduling, Stripe billing, BigQuery analytics |
+| `communication-service` | Node.js/Express | 8084 | WebSocket chat, Chime video, Bedrock/OpenAI clinical NLP |
+| `admin-service` | Python/FastAPI | 8085 | User management, audit logs, system health, platform analytics |
+| `staff-service` | Node.js/Express | 8086 | Shifts, tasks, announcements, staff directory |
+| `dicom-service` | Python/FastAPI | 8005 | DICOM upload, HIPAA de-identification, Orthanc PACS, FHIR ImagingStudy |
 
-**Supporting services:**
+### Lambda Functions (deployed per-region: US + EU)
+
+| Function | Trigger | Purpose |
+|----------|---------|---------|
+| `cognito-triggers` | Cognito Post-Confirmation | Auto-assign user to doctor/patient group |
+| `ws-authorizer` | API Gateway WebSocket | JWT verification for WebSocket connections |
+| `cleanup-recordings` | EventBridge MeetingEnded | Delete Chime media pipelines to stop billing |
+| `failover-proxy` | API Gateway integration | Primary → backup failover for WebSocket events |
+
+### Shared Utilities (`shared/`)
 
 | Module | Purpose |
 |--------|---------|
-| `shared/` | Centralized audit logger, FHIR mappers, SSM vault loader |
-| `cognito-triggers/` | Pre-signup, post-confirmation, and custom auth Lambda triggers |
-| `cleanup-recordings/` | Auto-delete Chime video recordings after retention period |
-| `k8s/` | Kubernetes manifests — HPA, PDB, Network Policies, Ingress |
-
----
-
-## Repository Structure
-
-```
-mediconnect-infrastructure-develop/
-│
-├── .github/
-│   └── workflows/
-│       └── deploy.yml              # GitHub Actions CI/CD pipeline
-│
-├── backend_v2/                     # All V2 microservices
-│   ├── booking-service/            # Appointments + Stripe payments
-│   ├── cleanup-recordings/         # Chime recording lifecycle
-│   ├── cognito-triggers/           # AWS Cognito Lambda hooks
-│   ├── communication-service/      # WebSocket + AI chat + video
-│   ├── doctor-service/             # Doctor onboarding + credentialing
-│   ├── failover-proxy/             # Multi-cloud health router
-│   ├── k8s/                        # Kubernetes manifests
-│   ├── patient-service/            # Patient registration + vitals
-│   ├── shared/                     # audit.ts, FHIR mappers, SSM loader
-│   ├── ws-authorizer/              # Lambda JWT auth for WebSocket
-│   ├── verify_consolidation.js     # Cross-service data integrity check
-│   └── verify_health.js            # Health check runner
-│
-├── environments/                   # Per-environment config (staging/prod)
-├── legacy_lambdas/                 # Archived V1 Lambda functions (reference)
-├── migration_app/                  # V1 → V2 data migration scripts
-├── modules/                        # Shared Terraform modules
-│
-├── deploy_azure.sh                 # Azure Container Apps deployment
-├── deploy_booking.sh               # Booking service deployment
-├── deploy_communication.sh         # Communication service deployment
-├── deploy_doctor_global.sh         # Doctor service (multi-region)
-├── deploy_gcp.sh                   # GCP Cloud Run deployment
-├── deploy_patient_global.sh        # Patient service (multi-region)
-│
-├── docker-compose.yml              # Local multi-service orchestration
-├── aks.kubeconfig                  # Azure Kubernetes config
-├── eks.kubeconfig                  # AWS Kubernetes config
-├── cloudflare-connector.yaml       # Cloudflare Tunnel (Zero-Trust ingress)
-└── aks-bridge-policy.json          # AKS network bridge policy
-```
+| `aws-config.ts` | Regional AWS SDK client factories (memory-cached, GDPR-aware routing) |
+| `audit.ts` | FHIR AuditEvent logging, 7-year TTL, breach detection trigger |
+| `kms-crypto.ts` | KMS envelope encryption for PHI fields and OAuth tokens |
+| `logger.ts` | Winston PII masking (email, SSN, phone, passwords, base64) |
+| `breach-detection.ts` | Rate-based anomaly detection (50 PHI ops/5min → SNS alert) |
+| `validation.ts` | Zod request validation middleware |
+| `rate-limit-store.ts` | Redis-backed distributed rate limiting (in-memory fallback) |
+| `fhir-metadata.ts` | FHIR R4 CapabilityStatement (14 resource types) |
 
 ---
 
 ## Tech Stack
 
-### Frontend
-| Technology | Usage |
-|-----------|-------|
-| React.js + Vite | Web application (SPA) |
-| TypeScript | Full type safety |
-| Tailwind CSS | UI styling |
-| Framer Motion | Animations |
-| Capacitor | iOS/Android mobile wrapper |
-| Firebase Hosting | Web deployment (CDN) |
-| Recharts | Analytics dashboards |
-| AWS Amplify SDK | Cognito auth integration |
-
 ### Backend
 | Technology | Usage |
 |-----------|-------|
-| Node.js + Express | All microservices |
-| TypeScript | Full type safety |
-| Docker + Multi-stage builds | Containerization |
+| Node.js + Express + TypeScript | 5 microservices |
+| Python + FastAPI | 2 microservices (admin, DICOM) |
+| Docker (multi-stage builds) | Containerization |
 | WebSocket + Socket.io | Real-time communication |
-| REST APIs | Service-to-service communication |
-| Python | Analytics scripts |
+| Amazon Chime SDK | Video consultation infrastructure |
 
 ### Infrastructure & DevOps
 | Technology | Usage |
 |-----------|-------|
 | Kubernetes (AKS + EKS) | Active-active container orchestration |
+| GCP Cloud Run | Scale-to-zero backup compute |
+| GitHub Actions | CI/CD pipeline (7 services + 4 Lambdas) |
 | Terraform | Infrastructure as Code |
-| GitHub Actions | CI/CD pipeline |
-| Cloudflare Tunnels | Zero-Trust public ingress (no open ports) |
 | Prometheus + Grafana | Metrics and dashboards |
-| Alertmanager → Slack | Automated incident alerts |
-| Docker Compose | Local development orchestration |
+| Cloudflare Tunnels | Zero-Trust public ingress |
 
 ### AI & Machine Learning
 | Service | Usage |
 |---------|-------|
-| AWS Rekognition | Biometric face match (Selfie vs Government ID) |
+| AWS Rekognition | Biometric face match (selfie vs government ID) |
 | AWS Textract | AI diploma OCR for doctor credentialing |
 | AWS Comprehend Medical | FHIR term extraction from symptoms |
 | AWS Bedrock (Claude 3.5) | Primary AI consultation engine |
 | GCP Vertex AI (Gemini 2.5) | Secondary AI (circuit breaker fallback) |
 | Azure OpenAI (GPT-4) | Tertiary AI (circuit breaker fallback) |
 | Amazon Transcribe Medical | Voice-to-text for consultations |
-| Amazon Chime SDK | Video consultation infrastructure |
 | AWS IoT Core (MQTT) | Real-time wearable vitals ingestion |
+
+### Data Stores
+| Store | Usage |
+|-------|-------|
+| AWS DynamoDB | Primary database (9 tables, on-demand billing) |
+| AWS S3 | Documents, ID verification, prescriptions, recordings |
+| GCP BigQuery | Analytics data warehouse |
+| Azure Cosmos DB | Serverless request mode (secondary) |
+| Redis | Distributed rate limiting, session caching |
+
+---
+
+## Repository Structure
+
+```
+mediconnect-infrastructure-production/
+├── .github/workflows/
+│   └── deploy.yml                 # CI/CD: build, test, deploy 7 services + 4 Lambdas
+│
+├── backend_v2/                    # All V2 microservices
+│   ├── patient-service/           # Node.js — port 8081
+│   ├── doctor-service/            # Node.js — port 8082
+│   ├── booking-service/           # Node.js — port 8083
+│   ├── communication-service/     # Node.js — port 8084
+│   ├── admin-service/             # Python — port 8085
+│   ├── staff-service/             # Node.js — port 8086
+│   ├── dicom-service/             # Python — port 8005
+│   ├── shared/                    # Shared utilities (audit, crypto, logger, FHIR)
+│   ├── cognito-triggers/          # Lambda: user group assignment
+│   ├── ws-authorizer/             # Lambda: WebSocket JWT auth
+│   ├── cleanup-recordings/        # Lambda: Chime pipeline cleanup
+│   ├── failover-proxy/            # Lambda: primary→backup failover
+│   ├── k8s/                       # Kubernetes manifests (AKS + EKS)
+│   ├── package.json               # npm workspaces root
+│   └── docker-compose.yml         # Local development
+│
+├── environments/                  # Per-environment config (staging/prod)
+├── modules/                       # Terraform modules
+├── migration_app/                 # V1 → V2 data migration scripts
+├── docker-compose.yml             # Root orchestration
+└── deploy_*.sh                    # Manual deployment scripts
+```
 
 ---
 
 ## Compliance
 
-MediConnect V2 has undergone a **forensic compliance audit** across all backend services.
+### HIPAA 2026
 
-### ✅ HIPAA 2026 — PASSED
-
-| Control | Evidence |
-|---------|---------|
-| Zero-Trust Identity | `auth.middleware.ts` — RS256 JWT verified against AWS Cognito JWKS. `patientId` extracted from verified token only — spoofing is mathematically impossible |
-| PHI/PII Masking | `logger.ts` — recursive scrubber strips SSN, email, passwords before CloudWatch |
-| Immutable Audit Trail | `shared/audit.ts` — UUID-stamped `writeAuditLog` on every clinical action capturing Actor ID, IP, Region, Timestamp |
-| Encryption at Rest | AWS KMS RSA-256 key signing on all e-prescriptions |
+| Control | Implementation |
+|---------|---------------|
+| Zero-Trust Identity | Cognito RS256 JWT verified on every request via JWKS |
+| PHI/PII Masking | Recursive scrubber strips SSN, email, passwords before logging |
+| Immutable Audit Trail | UUID-stamped `writeAuditLog` on every clinical action (7-year TTL) |
+| Encryption at Rest | AWS KMS RSA-256 for e-prescriptions, AES-256 for all databases |
+| Breach Detection | Rate-based anomaly detection (50 PHI ops/5min → SNS alert) |
 | Minimum Necessary | RBAC enforced — doctors cannot access other doctors' patients |
+| Auto-Logout | 15-minute inactivity timeout with Cognito session invalidation |
 
-### ✅ GDPR / Schrems II — PASSED
+### GDPR / Schrems II
 
-| Control | Evidence |
-|---------|---------|
-| Data Residency | EU data pinned to `eu-central-1` and `europe-west`. Cross-border flow physically blocked at service level |
-| Right to Access | Dedicated patient portal for personal medical history only |
-| Right to Erasure | S3 lifecycle policies auto-delete ID verification images post-processing |
-| Data Minimisation | Only verified JWT `sub` used as identity — no unnecessary PII in request bodies |
+| Control | Implementation |
+|---------|---------------|
+| Data Residency | EU data pinned to `eu-central-1` / `europe-west` — cross-border flow blocked |
+| Right to Access | Dedicated patient portal for personal medical history |
+| Right to Erasure | S3 lifecycle policies auto-delete verification images post-processing |
+| Consent Management | Granular cookie consent (essential/functional/analytics) with timestamps |
+| Data Minimisation | Only verified JWT `sub` used as identity — no unnecessary PII |
 
-### ✅ HL7 FHIR R4 — PASSED (90% Structural)
+### HL7 FHIR R4
 
-| Resource | Mapping |
-|----------|---------|
-| `Patient` | `patient.controller.ts` → FHIR R4 `Patient` resource with `telecom`, `birthDate` |
-| `Practitioner` | `doctor.controller.ts` → FHIR R4 `Practitioner` resource |
-| `Appointment` | `booking.controller.ts` → FHIR R4 `Appointment` resource |
-| `ImagingReport` | `imaging.controller.ts` → FHIR `ImagingReport` mapping |
-| `Observation` | Heart rate readings → LOINC code `8867-4` in FHIR `Bundle` |
+14 resource types mapped: Patient, Practitioner, PractitionerRole, Appointment, MedicationRequest, Medication, Observation, Condition, AllergyIntolerance, CarePlan, Encounter, DocumentReference, DiagnosticReport, ImagingStudy.
 
 ---
 
 ## Cost Model
 
-### Legacy Architecture V1 (Always-On)
-| Service | Monthly Cost |
-|---------|-------------|
-| AWS EC2 (LB + Servers) | $75.00 |
-| AWS RDS PostgreSQL | $45.00 |
-| AWS ElastiCache Redis | $35.00 |
-| AWS NAT Gateway | $35.00 |
-| AWS Secrets Manager | $2.00 |
-| Azure AI Services (Idle) | $100.00 |
-| **TOTAL** | **~$292/month** |
-
-### Architecture V2 (Zero-Cost Idle)
-| Service | Monthly Cost |
-|---------|-------------|
-| GCP Cloud Run (scale to zero) | $0.00 |
-| GCP Cloud SQL (auto-pause) | $0.00 |
-| Azure Container Apps (scale to zero) | $0.00 |
-| AWS DynamoDB (on-demand) | $0.00 |
-| AWS Cognito (< 50k MAU) | $0.00 |
-| AWS SSM Parameter Store | $0.00 |
-| AWS KMS (prescription signing) | $1.00 |
-| **TOTAL (IDLE)** | **~$1/month** |
-
-> 💡 You only pay when real users are actively using the platform.
+| | V1 (Always-On) | V2 (Zero-Cost Idle) |
+|--|----------------|---------------------|
+| Compute | $110/mo (EC2 + Azure) | $0/mo (scale to zero) |
+| Database | $80/mo (RDS + ElastiCache) | $0/mo (DynamoDB on-demand) |
+| Auth | $0/mo | $0/mo (Cognito <50k MAU) |
+| Crypto | $2/mo | $1/mo (KMS) |
+| **Total (idle)** | **~$292/mo** | **~$1/mo** |
 
 ---
 
 ## CI/CD & Deployment
 
-### GitHub Actions Pipeline (`.github/workflows/deploy.yml`)
+### GitHub Actions Pipeline
+
+Triggered on push to `main` when `backend_v2/**` changes:
 
 ```
-Git Push → main
-    │
-    ├── Lint & Type Check (tsc)
-    ├── npm audit (0 vulnerabilities gate)
-    ├── Unit Tests
-    │
-    ├── Build Docker Images (multi-stage)
-    │
-    ├── Deploy to GCP Cloud Run  (patient-service)
-    ├── Deploy to Azure Container Apps  (doctor, booking, communication)
-    └── Health Check Verification
+Push to main
+  ├── test-and-lint          npm ci + npm test --workspaces
+  ├── build-and-push         Docker build → GCP Artifact Registry (+ACR/ECR if K8s enabled)
+  ├── deploy-gcp             Cloud Run (always active, scale-to-zero, 256Mi)
+  ├── deploy-staging         K8s staging namespace (when enabled)
+  ├── deploy-prod-k8s        K8s prod namespace (auto-rollback on failure)
+  └── deploy-lambdas         4 Lambda functions → us-east-1 + eu-central-1
 ```
 
-### Manual Deployment Scripts
+### Kubernetes
 
-```bash
-# Deploy all services
-./deploy_patient_global.sh      # Patient service → GCP (multi-region)
-./deploy_doctor_global.sh       # Doctor service → Azure (multi-region)
-./deploy_booking.sh             # Booking service → Azure
-./deploy_communication.sh       # Communication service → Azure
-./deploy_gcp.sh                 # GCP infrastructure
-./deploy_azure.sh               # Azure infrastructure
-```
-
-### Kubernetes (Production)
-- **AKS** (Azure East US) — primary cluster
-- **EKS** (AWS eu-central-1) — active-active secondary
-- HPA configured: scales on CPU/Memory > 70%
-- PDB configured: minimum 2 replicas always running
-- Network Policies: Default-Deny, namespace isolation
-- Cloudflare Tunnels: zero open inbound ports
+- **AKS** (Azure East US) + **EKS** (AWS eu-central-1) — active-active
+- HPA: 1–5 replicas, scales on CPU/Memory > 70%
+- Probes: `/health` (liveness), `/ready` (readiness)
+- Namespace isolation: staging cannot reach production
 
 ---
 
@@ -338,34 +267,67 @@ Git Push → main
 
 | Layer | Implementation |
 |-------|---------------|
-| **Identity** | AWS Cognito RS256 JWT — verified on every request via JWKS endpoint |
-| **Secrets** | AWS SSM Parameter Store — no secrets in code or environment files |
-| **Network** | Cloudflare Tunnels — no public inbound ports on any cluster |
-| **Transport** | TLS 1.2+ enforced on all cross-cloud service communication |
-| **API** | `helmet` (CSP + HSTS) + `express-rate-limit` (100 req/15min) |
-| **Cryptography** | AWS KMS RSA-256 for e-prescription digital signatures |
-| **Container** | OIDC Workload Identity — no static AWS/GCP keys in containers |
-| **Kubernetes** | Namespace isolation Network Policies — staging cannot reach production |
-| **Payments** | Stripe Webhooks only — client cannot fake payment confirmation |
+| **Identity** | AWS Cognito RS256 JWT, verified against JWKS on every request |
+| **Secrets** | AWS SSM Parameter Store (WithDecryption) — no `.env` files in production |
+| **Network** | Cloudflare Tunnels — zero open inbound ports |
+| **Transport** | TLS 1.2+ enforced, HSTS (1 year) |
+| **API** | Helmet (CSP + HSTS), rate limiting (Redis-backed), Zod validation |
+| **Cryptography** | AWS KMS for e-prescriptions, PHI field encryption |
+| **Containers** | OIDC Workload Identity — no static AWS/GCP keys |
+| **Kubernetes** | Namespace isolation, Network Policies, RBAC |
+| **Payments** | Stripe server-confirmed PaymentIntents — client cannot fake confirmation |
 | **IDOR** | All resources verified against JWT `sub` — ownership enforced server-side |
+
+---
+
+## Getting Started
+
+### Prerequisites
+
+- Node.js 20+
+- Python 3.12+ (for admin-service and dicom-service)
+- Docker
+- AWS CLI configured
+
+### Local Development
+
+```bash
+cd backend_v2
+npm install                           # Install all workspace dependencies
+
+# Start individual services
+cd patient-service && npm run dev     # Port 8081
+cd doctor-service && npm run dev      # Port 8082
+cd booking-service && npm run dev     # Port 8083
+
+# Python services
+cd admin-service
+pip install -r requirements.txt
+uvicorn main:app --port 8085
+
+cd dicom-service
+pip install -r requirements.txt
+uvicorn main:app --port 8005
+```
+
+### Docker Build
+
+```bash
+# Build from repo root (required — Dockerfiles use repo root as context)
+docker build -f backend_v2/patient-service/Dockerfile -t patient-service .
+```
 
 ---
 
 ## Author
 
-**Zahidul Islam**
-Hybrid Cloud Architect · Full Stack Engineer · HealthTech Specialist
-
-> *"I build systems that are secure by architecture, compliant by default, and cost-optimized to the penny."*
+**Zahidul Islam** — Hybrid Cloud Architect · Full Stack Engineer · HealthTech Specialist
 
 | | |
 |--|--|
-| 🌐 Portfolio | [zahidul-islam.vercel.app](https://zahidul-islam.vercel.app) |
-| 💼 GitHub | [github.com/Zahidulislam2222](https://github.com/Zahidulislam2222) |
-| 📧 Email | muhammadzahidulislam2222@gmail.com |
-| 📍 Location | Dhaka, Bangladesh (Remote) |
-
-**Professional note:** I take on only ethical projects consistent with my values. I do not work on interest-based finance, gambling, adult content, or any activity that conflicts with Islamic principles.
+| Portfolio | [zahidul-islam.vercel.app](https://zahidul-islam.vercel.app) |
+| GitHub | [github.com/Zahidulislam2222](https://github.com/Zahidulislam2222) |
+| Email | muhammadzahidulislam2222@gmail.com |
 
 ---
 

@@ -60,3 +60,6 @@ venv/
 env/
 
 trust-policy.json
+
+# Claude Code
+CLAUDE.md
