@@ -278,7 +278,13 @@ const startServer = async () => {
         // 🟢 3. Attach routes
         app.use('/stats', sensitiveDataLimiter);
         app.use('/search', sensitiveDataLimiter);
-        app.use('/vitals', sensitiveDataLimiter); 
+        app.use('/vitals', sensitiveDataLimiter);
+        // ─── Gap #5 FIX: Rate limit Tier 3 clinical endpoints ─────────────
+        app.use('/sdoh', sensitiveDataLimiter);
+        app.use('/mpi', sensitiveDataLimiter);
+        app.use('/care-plans', sensitiveDataLimiter);
+        app.use('/bluebutton', sensitiveDataLimiter);
+        app.use('/fhir', sensitiveDataLimiter);
         app.use('/', patientRoutes);
         app.use('/', iotRoutes);
 

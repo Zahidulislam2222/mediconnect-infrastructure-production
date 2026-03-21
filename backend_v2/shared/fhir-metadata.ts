@@ -28,7 +28,14 @@ export const getCapabilityStatement = (req: Request, res: Response) => {
             security: {
                 cors: true,
                 service: [{ coding: [{ system: "http://terminology.hl7.org/CodeSystem/restful-security-service", code: "SMART-on-FHIR" }] }],
-                description: "OAuth2 via AWS Cognito, HIPAA/GDPR compliant"
+                description: "OAuth2 via AWS Cognito, HIPAA/GDPR compliant, SMART App Launch 2.0",
+                extension: [{
+                    url: "http://fhir-registry.smarthealthit.org/StructureDefinition/oauth-uris",
+                    extension: [
+                        { url: "authorize", valueUri: `${process.env.COGNITO_DOMAIN || 'https://mediconnect.auth.us-east-1.amazoncognito.com'}/oauth2/authorize` },
+                        { url: "token", valueUri: `${process.env.COGNITO_DOMAIN || 'https://mediconnect.auth.us-east-1.amazoncognito.com'}/oauth2/token` },
+                    ]
+                }]
             },
             resource: [
                 {
@@ -183,4 +190,104 @@ export const getCapabilityStatement = (req: Request, res: Response) => {
     };
 
     res.json(capabilityStatement);
+};
+
+// ─── Gap #4 FIX: SMART on FHIR Well-Known Configuration ─────────────────────
+// SMART App Launch Framework conformance endpoint.
+// Ref: http://hl7.org/fhir/smart-app-launch/conformance.html
+// Exposed at: GET /.well-known/smart-configuration
+// ────────────────────────────────────────────────────────────────────────────
+
+export const getSmartConfiguration = (req: Request, res: Response) => {
+    const baseUrl = process.env.FHIR_BASE_URL || 'https://api.mediconnect.com/fhir';
+    const cognitoBaseUrl = process.env.COGNITO_DOMAIN || 'https://mediconnect.auth.us-east-1.amazoncognito.com';
+
+    const smartConfig = {
+        // REQUIRED fields per SMART App Launch 2.0
+        issuer: baseUrl,
+        authorization_endpoint: `${cognitoBaseUrl}/oauth2/authorize`,
+        token_endpoint: `${cognitoBaseUrl}/oauth2/token`,
+        jwks_uri: `${cognitoBaseUrl}/.well-known/jwks.json`,
+
+        // Supported grant types
+        grant_types_supported: [
+            'authorization_code',
+            'client_credentials',
+        ],
+
+        // SMART-specific capabilities
+        scopes_supported: [
+            'openid',
+            'fhirUser',
+            'launch',
+            'launch/patient',
+            'launch/practitioner',
+            'patient/*.read',
+            'patient/*.write',
+            'user/*.read',
+            'user/*.write',
+            'offline_access',
+        ],
+
+        response_types_supported: ['code'],
+        code_challenge_methods_supported: ['S256'],
+
+        // SMART capabilities (what this server supports)
+        capabilities: [
+            'launch-ehr',
+            'launch-standalone',
+            'client-public',
+            'client-confidential-symmetric',
+            'sso-openid-connect',
+            'context-ehr-patient',
+            'context-standalone-patient',
+            'permission-offline',
+            'permission-patient',
+            'permission-user',
+        ],
+
+        // Token introspection (if supported)
+        introspection_endpoint: `${cognitoBaseUrl}/oauth2/introspect`,
+
+        // Management endpoints
+        management_endpoint: `${baseUrl}/manage`,
+        registration_endpoint: `${cognitoBaseUrl}/oauth2/register`,
+    };
+
+    res.json(smartConfig);
+};
+
+// ─── GET /fhir/launch — SMART EHR Launch Context ────────────────────────────
+// Returns launch context (patient, practitioner) for SMART app launch.
+// Called by EHR to provide context to the SMART app being launched.
+// ────────────────────────────────────────────────────────────────────────────
+
+export const getSmartLaunchContext = (req: Request, res: Response) => {
+    const user = (req as any).user;
+
+    if (!user) {
+        return res.status(401).json({ error: 'Authentication required for SMART launch' });
+    }
+
+    const patientId = req.query.patient as string || req.params.patientId;
+    const launchId = `launch-${Date.now().toString(36)}`;
+
+    const launchContext: any = {
+        launch: launchId,
+        // Include practitioner context if user is a doctor
+        ...(user.isDoctor && { practitioner: user.id }),
+        // Include patient context if specified or if user is a patient
+        ...(patientId && { patient: patientId }),
+        ...(!patientId && user.isPatient && { patient: user.id }),
+        // FHIR server endpoint
+        fhirServer: process.env.FHIR_BASE_URL || 'https://api.mediconnect.com/fhir',
+        // Token endpoints for the SMART app to use
+        tokenUrl: `${process.env.COGNITO_DOMAIN || 'https://mediconnect.auth.us-east-1.amazoncognito.com'}/oauth2/token`,
+        // Supported scopes for this launch
+        scope: user.isDoctor
+            ? 'openid fhirUser launch user/*.read user/*.write'
+            : 'openid fhirUser launch/patient patient/*.read',
+    };
+
+    res.json(launchContext);
 };

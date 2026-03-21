@@ -123,6 +123,8 @@ app.use(morgan((tokens, req, res) => {
 
 app.use('/appointments', bookingLimiter);
 app.use('/billing', bookingLimiter);
+app.use('/prior-auth', bookingLimiter);
+app.use('/eligibility', bookingLimiter);
 
 // ─── RATE LIMIT FIX: Stricter limiter for payment endpoint ──────────────
 // ORIGINAL: /billing/pay was only covered by bookingLimiter (5 req/min).

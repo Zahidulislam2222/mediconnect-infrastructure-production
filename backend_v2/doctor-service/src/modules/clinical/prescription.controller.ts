@@ -5,6 +5,7 @@ import { PutCommand, QueryCommand, GetCommand, UpdateCommand, TransactWriteComma
 import { v4 as uuidv4 } from "uuid";
 import { safeLog, safeError } from '../../../../shared/logger';
 import { writeAuditLog } from '../../../../shared/audit';
+import { validateUSCore } from '../../../../shared/us-core-profiles';
 
 const router = Router();
 const pdfGen = new PDFGenerator();
@@ -82,6 +83,16 @@ export const createPrescription = async (req: Request, res: Response) => {
             dosageInstruction: [{ text: `${dosage} - ${instructions}`, timing: { code: { text: dosage } }, doseAndRate: [{ type: { text: "ordered" } }] }],
             dispenseRequest: { numberOfRepeatsAllowed: Number(req.body.refills) || 2 },
         };
+
+        // ─── Gap #2 FIX: US Core validation before write ─────────────────
+        const validation = validateUSCore(fhirResource);
+        if (!validation.valid) {
+            return res.status(422).json({
+                error: 'US Core MedicationRequest validation failed',
+                profile: validation.profile,
+                issues: validation.errors,
+            });
+        }
 
         // 🟢 ATOMIC TRANSACTION: Solves Data Integrity Violation
         await docClient.send(new TransactWriteCommand({

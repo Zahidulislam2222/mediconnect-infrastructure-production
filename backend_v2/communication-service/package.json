@@ -20,6 +20,7 @@
         "@aws-sdk/client-rekognition": "^3.995.0",
         "@aws-sdk/client-s3": "^3.995.0",
         "@aws-sdk/client-sns": "^3.985.0",
+        "@aws-sdk/client-sqs": "^3.1014.0",
         "@aws-sdk/client-ssm": "^3.983.0",
         "@aws-sdk/lib-dynamodb": "^3.500.0",
         "@azure/cosmos": "^4.9.1",

@@ -16,6 +16,7 @@ const BREACH_ACTIONS = [
     'ILLEGAL_ANALYTICS_ACCESS',
     'ILLEGAL_ACCESS_ATTEMPT',
     'AUTH_FAILURE',
+    'EMERGENCY_ACCESS_GRANTED', // Gap #1 FIX: Notify compliance on break-glass
 ];
 
 export async function checkForBreach(

@@ -176,6 +176,9 @@ const startServer = async () => {
 
         // 🟢 3. Attach the routes to Express
         app.use('/doctors', directoryLimiter);
+        // ─── Gap #5 FIX: Rate limit Tier 3 clinical endpoints ─────────────
+        app.use('/referrals', directoryLimiter);
+        app.use('/med-reconciliation', directoryLimiter);
         app.use('/', doctorRoutes);
         app.use('/', clinicalRoutes);
 

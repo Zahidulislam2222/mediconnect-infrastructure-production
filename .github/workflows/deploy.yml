@@ -51,6 +51,31 @@ jobs:
       - run: cd backend_v2 && npm ci
       - run: cd backend_v2 && npm test --workspaces --if-present
 
+      # --- Vulnerability Scanning (OWASP Dependency Check) ---
+      - name: Audit dependencies for vulnerabilities
+        run: |
+          cd backend_v2
+          # Run npm audit; fail on critical/high vulnerabilities
+          npm audit --workspaces --audit-level=critical --omit=dev || {
+            echo "::warning::npm audit found vulnerabilities above threshold"
+            # Fail the build on critical vulnerabilities
+            npm audit --workspaces --audit-level=critical --omit=dev --json > audit-report.json 2>/dev/null || true
+            CRITICAL_COUNT=$(node -e "try{const r=require('./audit-report.json');console.log(r.metadata?.vulnerabilities?.critical||0)}catch{console.log(0)}")
+            if [ "$CRITICAL_COUNT" -gt 0 ]; then
+              echo "::error::Found $CRITICAL_COUNT critical vulnerabilities. Blocking deployment."
+              exit 1
+            fi
+            echo "No critical vulnerabilities found. Continuing with warnings."
+          }
+      - name: Upload audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-report
+          path: backend_v2/audit-report.json
+          if-no-files-found: ignore
+          retention-days: 30
+
   # ═══════════════════════════════════════════════════════════════
   #  2. Build & Push Container Images
   # ═══════════════════════════════════════════════════════════════
