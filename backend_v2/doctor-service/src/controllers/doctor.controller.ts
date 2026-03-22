@@ -126,7 +126,7 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
 
     // After encryption, update FHIR resource to use encrypted values (prevent PHI leak in stored resource)
     if (encryptedName !== name) {
-        fhirResource.name = [{ use: "official", text: encryptedName }];
+        fhirResource.name = [{ use: "official", text: encryptedName, family: encryptedName, given: [encryptedName] }];
     }
 
     const item = {

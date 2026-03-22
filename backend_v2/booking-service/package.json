@@ -8,7 +8,8 @@
         "build": "tsc",
         "dev": "nodemon src/index.ts",
         "lint": "eslint src/**/*.ts",
-        "test": "echo \"No tests defined yet\" && exit 0"
+        "test": "echo \"No tests defined yet\" && exit 0",
+        "typecheck": "tsc --noEmit"
     },
     "dependencies": {
         "@aws-sdk/client-dynamodb": "^3.983.0",

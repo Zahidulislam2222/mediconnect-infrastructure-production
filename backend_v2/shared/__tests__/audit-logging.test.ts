@@ -1,3 +1,4 @@
+export {};
 // ─── Fix #16: Audit Logging & Breach Detection Unit Tests ────────────────────
 // Tests: FHIR AuditEvent structure, TTL calculation (7-year retention),
 // breach detection threshold (50 ops/5min), security event classification.
@@ -205,11 +206,11 @@ describe('Audit Log Item — Complete record structure', () => {
     const item = {
         logId,
         timestamp,
-        actorId: 'doctor-123' || 'SYSTEM',
-        patientId: 'patient-456' || 'UNKNOWN',
+        actorId: 'doctor-123',
+        patientId: 'patient-456',
         action: 'READ_EHR',
         details: 'Accessed patient EHR record',
-        ipAddress: '192.168.1.1' || '0.0.0.0',
+        ipAddress: '192.168.1.1',
         metadata: { region: 'us-east-1', role: 'doctor' },
         resource: buildFhirAuditEvent(logId, 'doctor-123', 'patient-456', 'READ_EHR', timestamp, 'doctor'),
         region: 'us-east-1',

@@ -1,3 +1,4 @@
+export {};
 // ─── Gap #3 FIX: Unit tests for high-risk clinical controllers ──────────────
 // Pure function tests for: RxNorm severity mapping, MPI scoring/Soundex,
 // Med-Reconciliation issue detection, Prior-Auth FHIR mapping.

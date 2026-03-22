@@ -1,3 +1,4 @@
+export {};
 // ─── Fix #16: Security Controls Unit Tests ──────────────────────────────────
 // Tests: KMS encryption prefix detection, PHI encrypt/decrypt roundtrip
 // (with mocked KMS), Zod validation middleware, and schema validation.
