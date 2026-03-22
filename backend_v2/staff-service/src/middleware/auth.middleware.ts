@@ -11,6 +11,7 @@ import { Request, Response, NextFunction } from 'express';
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import { COGNITO_CONFIG } from '../../../shared/aws-config';
 import { writeAuditLog } from "../../../shared/audit";
+import { safeError } from '../../../shared/logger';
 
 const verifiers: Record<string, any> = {
     'us-east-1': null,
@@ -79,7 +80,7 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
         const ip = req.ip || req.headers['x-forwarded-for'] || 'UNKNOWN';
         const region = extractRegion(req);
 
-        console.warn(`Staff Auth Failed [${region}]: ${err.message}`);
+        safeError(`Staff Auth Failed [${region}]: ${err.message}`);
 
         if (!err.message.includes('expired')) {
             await writeAuditLog(

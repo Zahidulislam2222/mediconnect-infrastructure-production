@@ -4,6 +4,7 @@ import FormData from 'form-data';
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { v4 as uuidv4 } from "uuid";
+import { writeAuditLog } from '../../../../shared/audit';
 
 // 1. UPLOAD SCAN
 export const uploadDicom = async (req: Request, res: Response) => {
@@ -43,6 +44,11 @@ export const uploadDicom = async (req: Request, res: Response) => {
             }
         }));
 
+        await writeAuditLog(user.sub, user.sub, "UPLOAD_DICOM", `DICOM imaging study uploaded`, {
+            region: user.region,
+            ipAddress: (req as any).ip
+        });
+
         res.status(200).json({ message: "Scan processed successfully", resource: data.fhirResource });
     } catch (err: any) {
         res.status(500).json({ error: "Failed to process DICOM", details: err.message });
@@ -66,6 +72,12 @@ export const getPatientScans = async (req: Request, res: Response) => {
 
     try {
         const result = await db.send(cmd);
+
+        await writeAuditLog(user.sub, patientId, "READ_IMAGING", `Doctor viewed patient imaging studies`, {
+            region: user.region,
+            ipAddress: (req as any).ip
+        });
+
         res.status(200).json(result.Items);
     } catch (err: any) {
         res.status(500).json({ error: "Failed to fetch scans" });

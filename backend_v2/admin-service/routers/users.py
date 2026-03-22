@@ -50,7 +50,7 @@ async def list_patients(
 
     response = table.scan(**scan_kwargs)
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], "SYSTEM", "ADMIN_LIST_PATIENTS",
         f"Listed {len(response.get('Items', []))} patients",
         region, {"limit": limit}
@@ -76,7 +76,7 @@ async def get_patient(
     if "Item" not in response:
         raise HTTPException(status_code=404, detail="Patient not found")
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], patient_id, "ADMIN_VIEW_PATIENT",
         "Admin viewed patient record", region
     )
@@ -113,7 +113,7 @@ async def suspend_patient(
         },
     )
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], patient_id, "ADMIN_SUSPEND_PATIENT",
         f"Patient suspended: {body.reason}", region
     )
@@ -149,7 +149,7 @@ async def reactivate_patient(
         },
     )
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], patient_id, "ADMIN_REACTIVATE_PATIENT",
         f"Patient reactivated: {body.reason}", region
     )
@@ -179,7 +179,7 @@ async def list_doctors(
 
     response = table.scan(**scan_kwargs)
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], "SYSTEM", "ADMIN_LIST_DOCTORS",
         f"Listed {len(response.get('Items', []))} doctors",
         region, {"limit": limit}
@@ -205,7 +205,7 @@ async def get_doctor(
     if "Item" not in response:
         raise HTTPException(status_code=404, detail="Doctor not found")
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], doctor_id, "ADMIN_VIEW_DOCTOR",
         "Admin viewed doctor record", region
     )
@@ -238,7 +238,7 @@ async def suspend_doctor(
         },
     )
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], doctor_id, "ADMIN_SUSPEND_DOCTOR",
         f"Doctor suspended: {body.reason}", region
     )
@@ -270,7 +270,7 @@ async def reactivate_doctor(
         },
     )
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], doctor_id, "ADMIN_REACTIVATE_DOCTOR",
         f"Doctor reactivated: {body.reason}", region
     )

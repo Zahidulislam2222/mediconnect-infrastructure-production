@@ -3,6 +3,8 @@ import { QueryCommand } from "@aws-sdk/lib-dynamodb";
 // 🟢 ARCHITECTURE FIX: Use Shared Factory (Prevents Region Lock & Socket Exhaustion)
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
+import { decryptPHI } from '../../../../shared/kms-crypto';
+import { safeError } from '../../../../shared/logger';
 
 const TABLE_GRAPH = "mediconnect-graph-data";
 
@@ -46,6 +48,20 @@ export const getRelationships = async (req: Request, res: Response) => {
 
         const response = await docClient.send(command);
         const rawItems = response.Items || [];
+
+        // Decrypt encrypted PHI names from graph-data
+        for (const item of rawItems) {
+            try {
+                if (item.doctorName && item.doctorName.startsWith('phi:kms:')) {
+                    const decrypted = await decryptPHI({ doctorName: item.doctorName }, userRegion);
+                    item.doctorName = decrypted.doctorName || item.doctorName;
+                }
+                if (item.patientName && item.patientName.startsWith('phi:kms:')) {
+                    const decrypted = await decryptPHI({ patientName: item.patientName }, userRegion);
+                    item.patientName = decrypted.patientName || item.patientName;
+                }
+            } catch { /* KMS unavailable — return as-is */ }
+        }
 
         // 🟢 FHIR R4 MAPPING: Transform DynamoDB Graph -> FHIR CareTeam Resource
         // This makes the data interoperable with hospital systems.
@@ -97,7 +113,7 @@ export const getRelationships = async (req: Request, res: Response) => {
         });
 
     } catch (error: any) {
-        console.error("Relationship Graph Error:", error);
+        safeError("Relationship Graph Error:", error);
         res.status(500).json({ error: "Failed to load care network" });
     }
 };

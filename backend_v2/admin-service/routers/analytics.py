@@ -65,7 +65,7 @@ async def platform_overview(
     appt_scan = appt_table.scan(Select="COUNT")
     total_appointments = appt_scan.get("Count", 0)
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], "SYSTEM", "ADMIN_VIEW_OVERVIEW",
         "Admin viewed platform overview analytics", region
     )
@@ -128,7 +128,7 @@ async def revenue_summary(
     total_refunds = sum(abs(float(t.get("amount", 0))) for t in all_txs if t.get("type") == "REFUND")
     net_revenue = total_revenue - total_refunds
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], "SYSTEM", "ADMIN_VIEW_REVENUE",
         f"Admin viewed revenue summary (period={period})", region
     )
@@ -169,7 +169,7 @@ async def appointment_stats(
         status = appt.get("status", "UNKNOWN")
         status_counts[status] = status_counts.get(status, 0) + 1
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], "SYSTEM", "ADMIN_VIEW_APPT_STATS",
         "Admin viewed appointment statistics", region
     )

@@ -8,6 +8,7 @@
 // ──────────────────────────────────────────────────────────────────────────
 
 import Redis from 'ioredis';
+import { safeLog, safeError } from './logger';
 
 let redisClient: Redis | null = null;
 let isRedisHealthy = false;
@@ -22,7 +23,7 @@ export function getRedisClient(): Redis | null {
 
     const redisUrl = process.env.REDIS_URL;
     if (!redisUrl) {
-        console.warn('⚠️ REDIS_URL not set — rate limiting will use in-memory store (not suitable for multi-instance deployments)');
+        safeLog('REDIS_URL not set — rate limiting will use in-memory store (not suitable for multi-instance deployments)');
         return null;
     }
 
@@ -31,7 +32,7 @@ export function getRedisClient(): Redis | null {
         enableReadyCheck: true,
         retryStrategy(times) {
             if (times > 10) {
-                console.error('❌ Redis: Max reconnection attempts reached. Falling back to in-memory.');
+                safeError('Redis: Max reconnection attempts reached. Falling back to in-memory.');
                 return null; // Stop retrying
             }
             return Math.min(times * 200, 5000);
@@ -41,12 +42,12 @@ export function getRedisClient(): Redis | null {
 
     redisClient.on('connect', () => {
         isRedisHealthy = true;
-        console.log('✅ Redis connected — distributed rate limiting active');
+        safeLog('Redis connected — distributed rate limiting active');
     });
 
     redisClient.on('error', (err) => {
         isRedisHealthy = false;
-        console.error('⚠️ Redis connection error:', err.message);
+        safeError('Redis connection error:', err.message);
     });
 
     redisClient.on('close', () => {
@@ -54,22 +55,18 @@ export function getRedisClient(): Redis | null {
     });
 
     redisClient.on('reconnecting', () => {
-        console.log('🔄 Redis reconnecting...');
+        safeLog('Redis reconnecting...');
     });
 
     return redisClient;
 }
 
-/**
- * Returns true if Redis is connected and healthy.
- */
+/** Check if Redis is connected and healthy. Useful for health-check endpoints. */
 export function isRedisConnected(): boolean {
     return isRedisHealthy && redisClient !== null && redisClient.status === 'ready';
 }
 
-/**
- * Gracefully disconnect Redis on shutdown.
- */
+/** Gracefully disconnect Redis. Call during process shutdown for clean teardown. */
 export async function disconnectRedis(): Promise<void> {
     if (redisClient) {
         await redisClient.quit();

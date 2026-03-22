@@ -10,6 +10,8 @@ import { PublishCommand } from '@aws-sdk/client-sns';
 import { QueryCommand, ScanCommand, UpdateCommand, PutCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient, getRegionalSNSClient } from '../../../shared/aws-config';
 import { writeAuditLog } from '../../../shared/audit';
+import { safeLog, safeError } from '../../../shared/logger';
+import { publishEvent, EventType } from '../../../shared/event-bus';
 
 const TABLE_APPOINTMENTS = process.env.TABLE_APPOINTMENTS || 'mediconnect-appointments';
 const TABLE_REMINDERS = process.env.TABLE_REMINDERS || 'mediconnect-reminders';
@@ -107,7 +109,7 @@ async function sendSNSNotification(
 
         return { error: 'No topic ARN or phone number provided' };
     } catch (error: any) {
-        console.error('SNS send error:', error.message);
+        safeError('SNS send error:', { error: error.message });
         return { error: error.message };
     }
 }
@@ -198,28 +200,41 @@ export const sendAppointmentReminder = async (req: Request, res: Response) => {
         const reminderId = uuidv4();
         const now = new Date().toISOString();
 
-        await db.send(new PutCommand({
-            TableName: TABLE_REMINDERS,
-            Item: {
-                reminderId,
-                appointmentId,
-                patientId: appointment.patientId,
-                doctorId: appointment.doctorId,
-                type,
-                channel: sendChannel,
-                status: snsResult.error ? 'failed' : 'sent',
-                snsMessageId: snsResult.snsMessageId,
-                error: snsResult.error,
-                sentAt: now,
-                sentBy: user.id,
-                createdAt: now,
+        // Idempotency: prevent duplicate reminders of same type for same appointment
+        try {
+            await db.send(new PutCommand({
+                TableName: TABLE_REMINDERS,
+                Item: {
+                    reminderId,
+                    appointmentId,
+                    patientId: appointment.patientId,
+                    doctorId: appointment.doctorId,
+                    type,
+                    channel: sendChannel,
+                    status: snsResult.error ? 'failed' : 'sent',
+                    snsMessageId: snsResult.snsMessageId,
+                    error: snsResult.error,
+                    sentAt: now,
+                    sentBy: user.id,
+                    createdAt: now,
+                    dedupKey: `${appointmentId}:${type}`
+                },
+                ConditionExpression: "attribute_not_exists(reminderId)"
+            }));
+        } catch (dedup: any) {
+            if (dedup.name === 'ConditionalCheckFailedException') {
+                return res.status(409).json({ error: 'Duplicate reminder', appointmentId, type });
             }
-        }));
+            throw dedup;
+        }
 
         await writeAuditLog(user.id, appointment.patientId, 'SEND_REMINDER',
             `Appointment reminder sent: ${type} via ${sendChannel} for ${appointmentId}`,
             { region, reminderId, appointmentId, type, channel: sendChannel }
         );
+
+        // Event bus: appointment reminder sent
+        publishEvent(EventType.APPOINTMENT_REMINDER, { appointmentId, patientId: appointment.patientId, type, channel: sendChannel, reminderId }, region).catch(() => {});
 
         res.json({
             reminderId,
@@ -233,7 +248,7 @@ export const sendAppointmentReminder = async (req: Request, res: Response) => {
             snsMessageId: snsResult.snsMessageId,
         });
     } catch (error: any) {
-        console.error('Send reminder error:', error);
+        safeError('Send reminder error:', { error: error.message });
         res.status(500).json({ error: 'Failed to send appointment reminder' });
     }
 };
@@ -298,7 +313,7 @@ export const getPendingReminders = async (req: Request, res: Response) => {
             pendingReminders: needsReminder,
         });
     } catch (error: any) {
-        console.error('Get pending reminders error:', error);
+        safeError('Get pending reminders error:', { error: error.message });
         res.status(500).json({ error: 'Failed to get pending reminders' });
     }
 };
@@ -333,7 +348,7 @@ export const getAppointmentReminders = async (req: Request, res: Response) => {
             }))
         });
     } catch (error: any) {
-        console.error('Get appointment reminders error:', error);
+        safeError('Get appointment reminders error:', { error: error.message });
         res.status(500).json({ error: 'Failed to get reminders' });
     }
 };

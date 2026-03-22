@@ -36,7 +36,7 @@ async def list_pending_closures(
         ExpressionAttributeValues={":status": "PENDING_CLOSURE"},
     )
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], "SYSTEM", "ADMIN_LIST_PENDING_CLOSURES",
         f"Listed {len(response.get('Items', []))} pending closures",
         region,
@@ -75,7 +75,7 @@ async def get_closure_details(
         },
     )
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], doctor_id, "ADMIN_VIEW_CLOSURE_DETAILS",
         "Admin reviewed doctor closure request", region,
     )
@@ -115,7 +115,7 @@ async def approve_closure(
         },
     )
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], doctor_id, "ADMIN_APPROVE_CLOSURE",
         f"Doctor closure approved: {body.reason}", region,
     )
@@ -155,7 +155,7 @@ async def reject_closure(
         },
     )
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], doctor_id, "ADMIN_REJECT_CLOSURE",
         f"Doctor closure rejected: {body.reason}", region,
     )

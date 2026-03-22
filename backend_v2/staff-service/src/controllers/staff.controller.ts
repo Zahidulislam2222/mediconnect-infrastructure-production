@@ -11,6 +11,7 @@ import { Request, Response, NextFunction } from 'express';
 import { getRegionalClient } from '../../../shared/aws-config';
 import { PutCommand, QueryCommand, GetCommand, UpdateCommand, ScanCommand, DeleteCommand } from "@aws-sdk/lib-dynamodb";
 import { writeAuditLog } from '../../../shared/audit';
+import { sendNotification } from '../../../shared/notifications';
 import { randomUUID } from 'crypto';
 
 // ─── Configuration ──────────────────────────────────────────────────────
@@ -61,6 +62,24 @@ export const createShift = catchAsync(async (req: Request, res: Response) => {
     }));
 
     await writeAuditLog(user.id, staffId, "CREATE_SHIFT", `Shift ${shiftId} created`, { region, ipAddress: req.ip });
+
+    // Fire-and-forget shift assignment notification
+    (async () => {
+        try {
+            const staffRecord = await docClient.send(new GetCommand({
+                TableName: TABLE_DOCTORS,
+                Key: { doctorId: staffId }
+            }));
+            sendNotification({
+                region,
+                recipientEmail: staffRecord.Item?.email,
+                subject: 'New Shift Assigned',
+                message: `You have been assigned a new shift in ${department} from ${startTime} to ${endTime}.`,
+                type: 'SHIFT_ASSIGNED',
+                metadata: { shiftId, staffId, department }
+            }).catch(() => {});
+        } catch { /* Staff email lookup failed — notification skipped */ }
+    })();
 
     res.status(201).json({ message: "Shift created", shiftId });
 });
@@ -156,6 +175,26 @@ export const deleteShift = catchAsync(async (req: Request, res: Response) => {
 
     await writeAuditLog(user.id, existing.Item.staffId, "DELETE_SHIFT", `Shift ${shiftId} deleted`, { region, ipAddress: req.ip });
 
+    // Fire-and-forget shift cancellation notification
+    if (existing.Item.staffId) {
+        (async () => {
+            try {
+                const staffRecord = await docClient.send(new GetCommand({
+                    TableName: TABLE_DOCTORS,
+                    Key: { doctorId: existing.Item!.staffId }
+                }));
+                sendNotification({
+                    region,
+                    recipientEmail: staffRecord.Item?.email,
+                    subject: 'Shift Cancelled',
+                    message: `Your shift on ${existing.Item!.startTime || 'N/A'} has been cancelled.`,
+                    type: 'SHIFT_CANCELLED',
+                    metadata: { shiftId, staffId: existing.Item!.staffId }
+                }).catch(() => {});
+            } catch { /* Staff email lookup failed — notification skipped */ }
+        })();
+    }
+
     res.json({ message: "Shift deleted", shiftId });
 });
 
@@ -192,6 +231,24 @@ export const createTask = catchAsync(async (req: Request, res: Response) => {
     }));
 
     await writeAuditLog(user.id, assignedTo, "CREATE_TASK", `Task ${taskId}: ${title}`, { region, ipAddress: req.ip });
+
+    // Fire-and-forget task assignment notification
+    (async () => {
+        try {
+            const staffRecord = await docClient.send(new GetCommand({
+                TableName: TABLE_DOCTORS,
+                Key: { doctorId: assignedTo }
+            }));
+            sendNotification({
+                region,
+                recipientEmail: staffRecord.Item?.email,
+                subject: 'New Task Assigned',
+                message: `You have been assigned a new task: "${title}" (Priority: ${priority}). ${dueDate ? `Due: ${dueDate}` : ''}`.trim(),
+                type: 'TASK_ASSIGNED',
+                metadata: { taskId, assignedTo, priority }
+            }).catch(() => {});
+        } catch { /* Staff email lookup failed — notification skipped */ }
+    })();
 
     res.status(201).json({ message: "Task created", taskId });
 });
@@ -325,6 +382,97 @@ export const getAnnouncements = catchAsync(async (req: Request, res: Response) =
     );
 
     res.json({ announcements: items });
+});
+
+export const deleteTask = catchAsync(async (req: Request, res: Response) => {
+    const region = extractRegion(req);
+    const docClient = getRegionalClient(region);
+    const user = (req as any).user;
+
+    const { taskId } = req.params;
+
+    const existing = await docClient.send(new GetCommand({ TableName: TABLE_TASKS, Key: { taskId } }));
+    if (!existing.Item) return res.status(404).json({ error: "Task not found" });
+
+    await docClient.send(new DeleteCommand({ TableName: TABLE_TASKS, Key: { taskId } }));
+
+    await writeAuditLog(user.id, existing.Item.assignedTo, "DELETE_TASK", `Task ${taskId} deleted`, { region, ipAddress: req.ip });
+
+    // Fire-and-forget task cancellation notification
+    if (existing.Item.assignedTo) {
+        (async () => {
+            try {
+                const staffRecord = await docClient.send(new GetCommand({
+                    TableName: TABLE_DOCTORS,
+                    Key: { doctorId: existing.Item!.assignedTo }
+                }));
+                sendNotification({
+                    region,
+                    recipientEmail: staffRecord.Item?.email,
+                    subject: 'Task Removed',
+                    message: `A task assigned to you has been removed: "${existing.Item!.title || 'N/A'}".`,
+                    type: 'TASK_CANCELLED',
+                    metadata: { taskId, assignedTo: existing.Item!.assignedTo }
+                }).catch(() => {});
+            } catch { /* Staff email lookup failed — notification skipped */ }
+        })();
+    }
+
+    res.json({ message: "Task deleted", taskId });
+});
+
+// ─── ANNOUNCEMENT MANAGEMENT ─────────────────────────────────────────────
+
+export const updateAnnouncement = catchAsync(async (req: Request, res: Response) => {
+    const region = extractRegion(req);
+    const docClient = getRegionalClient(region);
+    const user = (req as any).user;
+
+    const { announcementId } = req.params;
+    const { title, content, priority, category } = req.body;
+
+    const existing = await docClient.send(new GetCommand({ TableName: TABLE_ANNOUNCEMENTS, Key: { announcementId } }));
+    if (!existing.Item) return res.status(404).json({ error: "Announcement not found" });
+
+    const updates: string[] = [];
+    const values: Record<string, any> = {};
+    const names: Record<string, string> = {};
+
+    if (title) { updates.push("#t = :t"); values[":t"] = title; names["#t"] = "title"; }
+    if (content) { updates.push("#c = :c"); values[":c"] = content; names["#c"] = "content"; }
+    if (priority) { updates.push("priority = :p"); values[":p"] = priority; }
+    if (category) { updates.push("category = :cat"); values[":cat"] = category; }
+
+    updates.push("updatedAt = :u"); values[":u"] = new Date().toISOString();
+
+    await docClient.send(new UpdateCommand({
+        TableName: TABLE_ANNOUNCEMENTS,
+        Key: { announcementId },
+        UpdateExpression: `SET ${updates.join(", ")}`,
+        ExpressionAttributeValues: values,
+        ...(Object.keys(names).length > 0 && { ExpressionAttributeNames: names }),
+    }));
+
+    await writeAuditLog(user.id, "STAFF", "UPDATE_ANNOUNCEMENT", `Announcement ${announcementId} updated`, { region, ipAddress: req.ip });
+
+    res.json({ message: "Announcement updated", announcementId });
+});
+
+export const deleteAnnouncement = catchAsync(async (req: Request, res: Response) => {
+    const region = extractRegion(req);
+    const docClient = getRegionalClient(region);
+    const user = (req as any).user;
+
+    const { announcementId } = req.params;
+
+    const existing = await docClient.send(new GetCommand({ TableName: TABLE_ANNOUNCEMENTS, Key: { announcementId } }));
+    if (!existing.Item) return res.status(404).json({ error: "Announcement not found" });
+
+    await docClient.send(new DeleteCommand({ TableName: TABLE_ANNOUNCEMENTS, Key: { announcementId } }));
+
+    await writeAuditLog(user.id, "STAFF", "DELETE_ANNOUNCEMENT", `Announcement ${announcementId} deleted`, { region, ipAddress: req.ip });
+
+    res.json({ message: "Announcement deleted", announcementId });
 });
 
 // ─── STAFF DIRECTORY ────────────────────────────────────────────────────

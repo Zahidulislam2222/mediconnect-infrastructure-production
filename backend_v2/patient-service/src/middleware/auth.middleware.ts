@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { CognitoJwtVerifier } from "aws-jwt-verify";
-import { COGNITO_CONFIG } from '../../../shared/aws-config'; 
+import { COGNITO_CONFIG } from '../../../shared/aws-config';
+import { safeLog, safeError } from '../../../shared/logger';
 
 // Cache verifiers in memory
 const verifiers: Record<string, any> = {};
@@ -20,7 +21,7 @@ const getVerifier = async (userRegion: string) => {
     }
 
     try {
-        console.log(`🔐 Initializing Cognito Verifier for ${regionKey}...`);
+        safeLog(`🔐 Initializing Cognito Verifier for ${regionKey}...`);
 
         // 3. 🟢 USE THE OFFICIAL CLASS (No Axios needed)
         const verifier = CognitoJwtVerifier.create({
@@ -33,7 +34,7 @@ const getVerifier = async (userRegion: string) => {
         verifiers[regionKey] = verifier;
         return verifier;
     } catch (error: any) {
-        console.error(`❌ Auth Init Error: ${error.message}`);
+        safeError(`❌ Auth Init Error: ${error.message}`);
         throw new Error(`Failed to initialize Auth for ${regionKey}`);
     }
 };
@@ -75,7 +76,7 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
 
     } catch (err: any) {
 
-        console.warn(`🔒 Auth Failed [IP: ${req.ip}]: ${err.message}`);
+        safeError(`🔒 Auth Failed [IP: ${req.ip}]: ${err.message}`);
         res.status(401).json({ error: "Unauthorized: Invalid or expired token" });
         return;
     }

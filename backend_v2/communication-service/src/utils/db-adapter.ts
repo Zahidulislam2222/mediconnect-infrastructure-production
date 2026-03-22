@@ -1,6 +1,7 @@
 import { CosmosClient } from "@azure/cosmos";
 import { Firestore } from "@google-cloud/firestore";
 import { getSSMParameter } from '../../../shared/aws-config';
+import { safeLog } from '../../../shared/logger';
 
 // 🟢 Unified Interface: Controllers don't need to know which DB they are using
 export interface IDatabase {
@@ -54,10 +55,10 @@ export const getRegionalDB = (region: string): IDatabase => {
     const isEU = region.toUpperCase() === 'EU' || region === 'eu-central-1';
     
     if (isEU) {
-        console.log(`🇪🇺 [EU] Using Google Firestore (Frankfurt)`);
+        safeLog("[EU] Using Google Firestore (Frankfurt)");
         return new GoogleAdapter();
     } else {
-        console.log(`🇺🇸 [US] Using Azure Cosmos DB (Virginia)`);
+        safeLog("[US] Using Azure Cosmos DB (Virginia)");
         return new AzureAdapter();
     }
 };

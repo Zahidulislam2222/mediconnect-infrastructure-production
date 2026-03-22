@@ -13,6 +13,7 @@
 
 import { EncryptCommand, DecryptCommand } from "@aws-sdk/client-kms";
 import { getRegionalKMSClient } from './aws-config';
+import { safeError } from './logger';
 
 // KMS key alias or ARN — set per region in environment
 const KMS_KEY_ID_US = () => process.env.KMS_KEY_ID_US || process.env.KMS_KEY_ID || "";
@@ -57,7 +58,7 @@ export async function encryptToken(plaintext: string, region: string): Promise<s
         return `${ENCRYPTED_PREFIX}${cipherBase64}`;
 
     } catch (err: any) {
-        console.error(`❌ KMS Encrypt Failed [${region}]:`, err.message);
+        safeError(`KMS Encrypt Failed [${region}]:`, err.message);
         throw new Error("Failed to encrypt sensitive data");
     }
 }
@@ -74,7 +75,7 @@ export async function decryptToken(ciphertext: string, region: string): Promise<
 
     // Migration safety: handle legacy plaintext tokens gracefully
     if (!ciphertext.startsWith(ENCRYPTED_PREFIX)) {
-        console.warn("⚠️ KMS: Found unencrypted token (legacy). Will be encrypted on next write.");
+        safeError("KMS: Found unencrypted token (legacy). Will be encrypted on next write.");
         return ciphertext;
     }
 
@@ -93,14 +94,12 @@ export async function decryptToken(ciphertext: string, region: string): Promise<
         return Buffer.from(result.Plaintext).toString('utf-8');
 
     } catch (err: any) {
-        console.error(`❌ KMS Decrypt Failed [${region}]:`, err.message);
+        safeError(`KMS Decrypt Failed [${region}]:`, err.message);
         throw new Error("Failed to decrypt sensitive data");
     }
 }
 
-/**
- * Check if a value is already KMS-encrypted.
- */
+/** Check if a value is already encrypted (has KMS prefix). Useful for migration-safe encryption. */
 export function isEncrypted(value: string): boolean {
     return value?.startsWith(ENCRYPTED_PREFIX) || false;
 }

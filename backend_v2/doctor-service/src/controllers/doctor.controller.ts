@@ -7,15 +7,16 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { TextractClient, AnalyzeDocumentCommand } from "@aws-sdk/client-textract";
 import { PublishCommand } from "@aws-sdk/client-sns";
 import { google } from 'googleapis';
-import { PutCommand, GetCommand, UpdateCommand, ScanCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
+import { PutCommand, GetCommand, UpdateCommand, ScanCommand, QueryCommand, DeleteCommand, BatchWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient, getRegionalSNSClient, getRegionalSESClient, getRegionalCognitoClient } from '../../../shared/aws-config';
-import { encryptToken, decryptToken } from '../../../shared/kms-crypto';
+import { encryptToken, decryptToken, encryptPHI, decryptPHI } from '../../../shared/kms-crypto';
 import { writeAuditLog } from '../../../shared/audit';
 import jwt from 'jsonwebtoken';
 import { GoogleAuth } from "google-auth-library";
 import { SendEmailCommand } from "@aws-sdk/client-ses";
 import { AdminDeleteUserCommand } from "@aws-sdk/client-cognito-identity-provider";
 import { safeLog, safeError } from '../../../shared/logger';
+import { publishEvent, EventType } from '../../../shared/event-bus';
 
 // 🟢 FIX 1: Use Getter to prevent loading race condition
 const CONFIG = {
@@ -40,7 +41,7 @@ async function signAvatarUrl(avatarKey: string | null, region: string): Promise<
     if (avatarKey.startsWith('http')) {
 
         const match = avatarKey.match(/(patient|doctor)\/[a-zA-Z0-9-]+\/[^?]+/);
-        if (match) finalKey = match[0]; 
+        if (match) finalKey = match[0];
         else return avatarKey;
     }
 
@@ -49,11 +50,11 @@ async function signAvatarUrl(avatarKey: string | null, region: string): Promise<
         const baseBucket = process.env.BUCKET_NAME || 'mediconnect-doctor-data';
 const isEU = region.toUpperCase() === 'EU';
 const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
-            
+
         const command = new GetObjectCommand({ Bucket: bucketName, Key: finalKey });
         return await getSignedUrl(regionalS3, command, { expiresIn: 900 });
     } catch (e) {
-        console.error(`[Avatar Sign Error]`, e);
+        safeError(`[Avatar Sign Error]`, e);
         return null;
     }
 }
@@ -63,14 +64,15 @@ const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : 
 // =============================================================================
 
 export const createDoctor = catchAsync(async (req: Request, res: Response) => {
-    const docClient = getRegionalClient(extractRegion(req) as string);
-    
+    const region = extractRegion(req) as string;
+    const docClient = getRegionalClient(region);
+
     const authUser = (req as any).user;
     if (!authUser || !authUser.sub) {
         return res.status(401).json({ error: "Unauthorized: You must be logged in to create a profile." });
     }
-    
-    const finalId = authUser.sub; 
+
+    const finalId = authUser.sub;
     const { email, name, specialization, licenseNumber, role, consentDetails, schedule } = req.body;
 
     if (!email) return res.status(400).json({ error: 'Missing email' });
@@ -113,10 +115,24 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
         })) : [],
     };
 
+    // 🟢 FIX #8: Encrypt PHI (doctor name) at rest using KMS envelope encryption
+    let encryptedName = name;
+    try {
+        const encryptedPHI = await encryptPHI({ name }, region);
+        encryptedName = encryptedPHI.name || name;
+    } catch (kmsErr: any) {
+        safeError('[PHI] KMS encryption unavailable for doctor name, storing plaintext', kmsErr.message);
+    }
+
+    // After encryption, update FHIR resource to use encrypted values (prevent PHI leak in stored resource)
+    if (encryptedName !== name) {
+        fhirResource.name = [{ use: "official", text: encryptedName }];
+    }
+
     const item = {
         doctorId: finalId,
         email,
-        name,
+        name: encryptedName,
         specialization: specialization || 'General Practice',
         licenseNumber: licenseNumber || 'PENDING_VERIFICATION',
         verificationStatus: 'UNVERIFIED',
@@ -135,7 +151,7 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
 
     try {
         await docClient.send(new PutCommand({
-            TableName: CONFIG.DYNAMO_TABLE, 
+            TableName: CONFIG.DYNAMO_TABLE,
             Item: item,
             ConditionExpression: "attribute_not_exists(doctorId)"
         }));
@@ -144,27 +160,30 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
         throw e;
     }
 
-    await writeAuditLog(finalId, finalId, "CREATE_DOCTOR", "Doctor profile created and explicit GDPR/HIPAA consent captured", { 
-        region: extractRegion(req), 
+    await writeAuditLog(finalId, finalId, "CREATE_DOCTOR", "Doctor profile created and explicit GDPR/HIPAA consent captured", {
+        region: extractRegion(req),
         ipAddress: req.ip,
         policyVersion: consentDetails.policyVersion || "v1.0"
     });
-    
-    logDoctorOnboarding(finalId, "SIGNUP", "UNVERIFIED", extractRegion(req)).catch(console.error);
+
+    logDoctorOnboarding(finalId, "SIGNUP", "UNVERIFIED", extractRegion(req)).catch((e: any) => safeError("Onboarding log failed", e));
 
     // 🟢 ADMIN ALERT FIX: Notify Admin immediately when a doctor registers
     try {
         const regionalSns = getRegionalSNSClient(extractRegion(req));
         const topicArn = extractRegion(req).toUpperCase() === 'EU' ? process.env.SNS_TOPIC_ARN_EU : process.env.SNS_TOPIC_ARN_US;
-        
+
         await regionalSns.send(new PublishCommand({
             TopicArn: topicArn,
             Subject: "🩺 NEW DOCTOR REGISTRATION",
             Message: `A new doctor (${email}) has registered on the platform.\nName: ${name}\nSpecialization: ${specialization || 'N/A'}\n\nThey have consented to terms and are currently UNVERIFIED. Awaiting credential upload.`
         }));
     } catch (snsErr) {
-        console.error("Failed to alert admin of new doctor", snsErr);
+        safeError("Failed to alert admin of new doctor", snsErr);
     }
+
+    // Event bus: doctor registered
+    publishEvent(EventType.DOCTOR_REGISTERED, { doctorId: finalId, email, specialization: specialization || 'General Practice' }, extractRegion(req)).catch(() => {});
 
     res.status(201).json({ message: "Doctor profile created", profile: item });
 });
@@ -172,15 +191,15 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
 export const verifyDoctorIdentity = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req) as string;
     const authUser = (req as any).user;
-    
+
     const { selfieImage, idImage, gender } = req.body;
     if (!authUser?.sub || !selfieImage) return res.status(400).json({ error: "Missing identity data" });
 
     const userId = authUser.sub;
-    const docClient = getRegionalClient(region); 
+    const docClient = getRegionalClient(region);
 
     const userCheck = await docClient.send(new GetCommand({
-        TableName: CONFIG.DYNAMO_TABLE, 
+        TableName: CONFIG.DYNAMO_TABLE,
         Key: { doctorId: userId }
     }));
 
@@ -191,7 +210,7 @@ export const verifyDoctorIdentity = catchAsync(async (req: Request, res: Respons
     const idCardKey = `doctor/${userId}/id_card.jpg`;
     const regionalS3 = getRegionalS3Client(region);
     const regionalRek = getRegionalRekognitionClient(region);
-    
+
     const baseBucket = process.env.BUCKET_NAME || 'mediconnect-doctor-data';
 const isEU = region.toUpperCase() === 'EU';
 const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
@@ -210,7 +229,7 @@ const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : 
         TargetImage: { Bytes: Buffer.from(selfieImage, 'base64') },
         SimilarityThreshold: 80
     });
-    
+
     const aiResponse = await regionalRek.send(compareCmd);
     if (!aiResponse.FaceMatches || aiResponse.FaceMatches.length === 0) {
         return res.json({ verified: false, message: "Face does not match Medical ID card." });
@@ -223,15 +242,15 @@ const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : 
     }));
 
     await docClient.send(new UpdateCommand({
-        TableName: CONFIG.DYNAMO_TABLE, 
+        TableName: CONFIG.DYNAMO_TABLE,
         Key: { doctorId: userId },
         UpdateExpression: "set avatar = :a, isIdentityVerified = :v, identityStatus = :s, #g = :g, #res.#gen = :g",
-    ExpressionAttributeNames: { 
+    ExpressionAttributeNames: {
         "#g": "gender",
         "#res": "resource",
         "#gen": "gender"
     },
-    ExpressionAttributeValues: { 
+    ExpressionAttributeValues: {
         ':a': selfieKey, ':v': true, ':s': "VERIFIED", ':g': gender }
     }));
 
@@ -250,13 +269,19 @@ export const getDoctor = catchAsync(async (req: Request, res: Response) => {
     if (!id) return res.status(400).json({ error: 'Missing Doctor ID' });
 
     const result = await docClient.send(new GetCommand({
-        TableName: CONFIG.DYNAMO_TABLE, 
+        TableName: CONFIG.DYNAMO_TABLE,
         Key: { doctorId: String(id) }
     }));
 
     if (!result.Item) return res.status(404).json({ error: 'Doctor not found' });
 
     const doctor = result.Item;
+
+    // 🟢 FIX #8: Decrypt PHI (doctor name) before returning to client
+    try {
+        const decrypted = await decryptPHI({ name: doctor.name }, region);
+        if (decrypted.name) doctor.name = decrypted.name;
+    } catch { /* KMS unavailable — field is already plaintext */ }
 
     doctor.avatar = await signAvatarUrl(doctor.avatar, region);
 
@@ -286,7 +311,8 @@ export const getDoctor = catchAsync(async (req: Request, res: Response) => {
 });
 
 export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
-    const docClient = getRegionalClient(extractRegion(req) as string);
+    const region = extractRegion(req) as string;
+    const docClient = getRegionalClient(region);
     const { id } = req.params;
     const updates = req.body;
     const authUser = (req as any).user;
@@ -301,6 +327,16 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
         }
         const match = updates.avatar.match(/(patient|doctor)\/[a-zA-Z0-9-]+\/[^?]+/);
         if (match) updates.avatar = match[0];
+    }
+
+    // 🟢 FIX #8: Encrypt name PHI if being updated
+    if (updates.name) {
+        try {
+            const encryptedPHI = await encryptPHI({ name: updates.name }, region);
+            updates.name = encryptedPHI.name || updates.name;
+        } catch (kmsErr: any) {
+            safeError('[PHI] KMS encryption unavailable for doctor name update, storing plaintext', kmsErr.message);
+        }
     }
 
     const parts: string[] =[];
@@ -331,14 +367,14 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
         values[":officer"] = false;
     }
 
-    names["#res"] = "resource"; 
-    
+    names["#res"] = "resource";
+
     if (updates.name) {
         parts.push("#res.#nm = :fhirNameArr");
         names["#nm"] = "name";
         values[":fhirNameArr"] = [{ use: "official", text: updates.name }];
     }
-    
+
     if (updates.specialization) {
         parts.push("#res.#qual = :fhirQualArr");
         names["#qual"] = "qualification";
@@ -355,7 +391,7 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
 
     try {
         const response = await docClient.send(new UpdateCommand({
-            TableName: CONFIG.DYNAMO_TABLE, 
+            TableName: CONFIG.DYNAMO_TABLE,
             Key: { doctorId: id },
             UpdateExpression: "SET " + parts.join(", "),
             ExpressionAttributeNames: names,
@@ -363,9 +399,9 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
             ReturnValues: "ALL_NEW"
         }));
 
-        await writeAuditLog(authUser.sub, id, "UPDATE_DOCTOR", `Profile updated. Re-verification required: ${requiresReverification}`, { 
-            region: extractRegion(req), 
-            ipAddress: req.ip 
+        await writeAuditLog(authUser.sub, id, "UPDATE_DOCTOR", `Profile updated. Re-verification required: ${requiresReverification}`, {
+            region: extractRegion(req),
+            ipAddress: req.ip
         });
 
         if (requiresReverification) {
@@ -377,13 +413,13 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
                 Message: `Doctor ${id} updated their Core Clinical Identity (Name or Specialization).\nTheir account has been automatically suspended pending administrative officer review.\nIP: ${req.ip}`
             }));
         }
-        
-        res.status(200).json({ 
-            message: requiresReverification ? "Profile updated. Your account is suspended pending Admin review." : "Doctor profile updated", 
-            profile: response.Attributes 
+
+        res.status(200).json({
+            message: requiresReverification ? "Profile updated. Your account is suspended pending Admin review." : "Doctor profile updated",
+            profile: response.Attributes
         });
     } catch (dbError: any) {
-        console.error("DynamoDB Update Error:", dbError.message);
+        safeError("DynamoDB Update Error:", dbError.message);
         res.status(500).json({ error: "Database update failed", details: dbError.message });
     }
 });
@@ -391,9 +427,9 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
 export const getDoctors = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req) as string;
     const docClient = getRegionalClient(region);
-    
-    const response = await docClient.send(new ScanCommand({ 
-        TableName: CONFIG.DYNAMO_TABLE, 
+
+    const response = await docClient.send(new ScanCommand({
+        TableName: CONFIG.DYNAMO_TABLE,
         FilterExpression: "verificationStatus <> :unverified AND verificationStatus <> :rejected",
         ExpressionAttributeValues: {
             ":unverified": "UNVERIFIED",
@@ -401,16 +437,25 @@ export const getDoctors = catchAsync(async (req: Request, res: Response) => {
         }
     }));
 
-    const safeDoctors = await Promise.all((response.Items ||[]).map(async (doc: any) => ({
-        doctorId: doc.doctorId,
-        name: doc.name,
-        specialization: doc.specialization,
-        avatar: await signAvatarUrl(doc.avatar, region), 
-        bio: doc.bio,
-        consultationFee: doc.consultationFee,
-        verificationStatus: doc.verificationStatus,
-        schedule: doc.schedule 
-    })));
+    const safeDoctors = await Promise.all((response.Items ||[]).map(async (doc: any) => {
+        // 🟢 FIX #8: Decrypt PHI (doctor name) before returning in list
+        let decryptedName = doc.name;
+        try {
+            const decrypted = await decryptPHI({ name: doc.name }, region);
+            if (decrypted.name) decryptedName = decrypted.name;
+        } catch { /* KMS unavailable — field is already plaintext */ }
+
+        return {
+            doctorId: doc.doctorId,
+            name: decryptedName,
+            specialization: doc.specialization,
+            avatar: await signAvatarUrl(doc.avatar, region),
+            bio: doc.bio,
+            consultationFee: doc.consultationFee,
+            verificationStatus: doc.verificationStatus,
+            schedule: doc.schedule
+        };
+    }));
 
     res.status(200).json({ doctors: safeDoctors });
 });
@@ -424,7 +469,7 @@ export const getSchedule = catchAsync(async (req: Request, res: Response) => {
     const { id } = req.params;
 
     const result = await docClient.send(new GetCommand({
-        TableName: CONFIG.DYNAMO_TABLE, 
+        TableName: CONFIG.DYNAMO_TABLE,
         Key: { doctorId: id },
         ProjectionExpression: "#sch, #tz",
         ExpressionAttributeNames: { "#sch": "schedule", "#tz": "timezone" }
@@ -445,7 +490,7 @@ export const updateSchedule = catchAsync(async (req: Request, res: Response) => 
 
     try {
         await docClient.send(new UpdateCommand({
-            TableName: CONFIG.DYNAMO_TABLE, 
+            TableName: CONFIG.DYNAMO_TABLE,
             Key: { doctorId: id },
             UpdateExpression: "SET #sch = :s, #tz = :t",
             ExpressionAttributeNames: { "#sch": "schedule", "#tz": "timezone" },
@@ -453,9 +498,11 @@ export const updateSchedule = catchAsync(async (req: Request, res: Response) => 
             ReturnValues: "UPDATED_NEW"
         }));
 
+        await writeAuditLog(authUser.sub, id, "UPDATE_SCHEDULE", "Doctor schedule updated", { region: extractRegion(req), ipAddress: req.ip });
+
         res.status(200).json({ message: 'Schedule updated successfully', schedule });
     } catch (dbError: any) {
-        console.error("Schedule Update Error:", dbError.message);
+        safeError("Schedule Update Error:", dbError.message);
         res.status(500).json({ error: "Schedule update failed", details: dbError.message });
     }
 });
@@ -467,9 +514,9 @@ export const updateSchedule = catchAsync(async (req: Request, res: Response) => 
 export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req) as string;
     const docClient = getRegionalClient(region);
-    
+
     // 🟢 KEYLESS FIX: AWS WIF automatically provides credentials to this client
-    const regionalTextract = new TextractClient({ 
+    const regionalTextract = new TextractClient({
         region: region.toUpperCase() === 'EU' ? 'eu-central-1' : 'us-east-1'
     });
 
@@ -480,7 +527,7 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
     if (!authUser || authUser.sub !== id) return res.status(403).json({ error: "Unauthorized" });
 
     const userCheck = await docClient.send(new GetCommand({
-        TableName: CONFIG.DYNAMO_TABLE, 
+        TableName: CONFIG.DYNAMO_TABLE,
         Key: { doctorId: id }
     }));
 
@@ -514,28 +561,30 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
         const status = isLegit ? "PENDING_OFFICER_APPROVAL" : "REJECTED_AUTO";
 
         await docClient.send(new UpdateCommand({
-            TableName: CONFIG.DYNAMO_TABLE, 
+            TableName: CONFIG.DYNAMO_TABLE,
             Key: { doctorId: id },
             UpdateExpression: "SET isDiplomaAutoVerified = :v, isOfficerApproved = :o, verificationStatus = :s, diplomaUrl = :u, aiExtractedText = :txt",
-            ExpressionAttributeValues: { 
-                ":v": isLegit, 
+            ExpressionAttributeValues: {
+                ":v": isLegit,
                 ":o": false,
-                ":s": status, 
-                ":u": `s3://${bucketName}/${s3Key}`, 
-                ":txt": fullOcrText.substring(0, 500) 
+                ":s": status,
+                ":u": `s3://${bucketName}/${s3Key}`,
+                ":txt": fullOcrText.substring(0, 500)
             }
         }));
 
+        await writeAuditLog(authUser.sub, id, "VERIFY_DIPLOMA", "Doctor diploma verification submitted", { region: extractRegion(req), ipAddress: req.ip });
+
         if (isLegit) {
             const maskedId = `${String(id).substring(0, 4)}****`;
-            
+
             // 🟢 KEYLESS FIX: Use Shared Factory for SNS
             const regionalSns = getRegionalSNSClient(region);
-            
-            logDoctorOnboarding(id, "AI_VERIFICATION", "PENDING_OFFICER_APPROVAL", region).catch(console.error);
-            
+
+            logDoctorOnboarding(id, "AI_VERIFICATION", "PENDING_OFFICER_APPROVAL", region).catch((err: any) => safeError("Doctor onboarding log failed", err));
+
             const topicArn = region.toUpperCase() === 'EU' ? process.env.SNS_TOPIC_ARN_EU : process.env.SNS_TOPIC_ARN_US;
-            
+
             await regionalSns.send(new PublishCommand({
                 TopicArn: topicArn,
                 Message: `STRICT VERIFICATION: A Doctor (ID: ${maskedId}) uploaded a diploma. AI Confidence: HIGH. Awaiting human officer approval.`,
@@ -546,7 +595,7 @@ export const verifyDiploma = catchAsync(async (req: Request, res: Response) => {
         return res.json({ verified: isLegit, status, message: isLegit ? "AI Verification Successful." : "AI could not match your name." });
 
     } catch (e: any) {
-        console.error("Textract Error:", e);
+        safeError("Textract Error:", e);
         return res.status(500).json({ error: "AI Processing Failed" });
     }
 });
@@ -564,7 +613,7 @@ export const getCalendarStatus = catchAsync(async (req: Request, res: Response) 
 });
 
 export const connectGoogleCalendar = catchAsync(async (req: Request, res: Response) => {
-    const { id } = req.query; 
+    const { id } = req.query;
 
     const doctorBase = process.env.API_PUBLIC_URL || "http://localhost:8082";
     const redirectUri = `${doctorBase.replace(/\/$/, '')}/doctors/auth/google/callback`;
@@ -577,10 +626,10 @@ export const connectGoogleCalendar = catchAsync(async (req: Request, res: Respon
         process.env.GOOGLE_CLIENT_SECRET,
         redirectUri // ✅ Uses the dynamic URL
     );
-    
-    const url = oauth2Client.generateAuthUrl({ 
-        access_type: 'offline', 
-        scope: ['https://www.googleapis.com/auth/calendar'], 
+
+    const url = oauth2Client.generateAuthUrl({
+        access_type: 'offline',
+        scope: ['https://www.googleapis.com/auth/calendar'],
         state: secureState
     });
 
@@ -589,7 +638,7 @@ export const connectGoogleCalendar = catchAsync(async (req: Request, res: Respon
 
 export const googleCallback = catchAsync(async (req: Request, res: Response) => {
     const docClient = getRegionalClient(extractRegion(req) as string);
-    const { code, state } = req.query; 
+    const { code, state } = req.query;
 
     if (!code || !state) return res.status(400).json({ error: "Invalid callback data" });
 
@@ -609,7 +658,7 @@ export const googleCallback = catchAsync(async (req: Request, res: Response) => 
         process.env.GOOGLE_CLIENT_SECRET,
         redirectUri // ✅ Uses the dynamic URL
     );
-    
+
     const { tokens } = await oauth2Client.getToken(code as string);
 
     if (tokens.refresh_token) {
@@ -625,10 +674,12 @@ export const googleCallback = catchAsync(async (req: Request, res: Response) => 
             Key: { doctorId: targetDoctorId },
             UpdateExpression: "SET googleRefreshToken = :token", ExpressionAttributeValues: { ":token": encryptedToken }
         }));
+
+        await writeAuditLog(targetDoctorId, targetDoctorId, "GOOGLE_CALENDAR_CONNECTED", "Google Calendar OAuth2 token stored", { region: extractRegion(req), ipAddress: req.ip });
     }
     const origins = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : ['http://localhost:8080'];
-    const redirectBase = origins[0].trim(); 
-    
+    const redirectBase = origins[0].trim();
+
     res.redirect(`${redirectBase}/settings?calendar=connected`);
 });
 
@@ -640,6 +691,9 @@ export const disconnectGoogleCalendar = catchAsync(async (req: Request, res: Res
     if (!authUser || authUser.sub !== id) return res.status(403).json({ error: "Unauthorized" });
 
     await docClient.send(new UpdateCommand({ TableName: CONFIG.DYNAMO_TABLE, Key: { doctorId: id }, UpdateExpression: "REMOVE googleRefreshToken" })); // ✅ FIXED
+
+    await writeAuditLog(authUser.sub, authUser.sub, "GOOGLE_CALENDAR_DISCONNECTED", "Google Calendar token removed", { region: extractRegion(req), ipAddress: req.ip });
+
     res.json({ connected: false, message: "Calendar disconnected" });
 });
 
@@ -671,6 +725,8 @@ export const requestDoctorClosure = catchAsync(async (req: Request, res: Respons
         ExpressionAttributeValues: { ":p": "PENDING_CLOSURE", ":s": "SUSPENDED" }
     }));
 
+    await writeAuditLog(authUser.sub, authUser.sub, "REQUEST_CLOSURE", "Doctor requested account closure", { region: extractRegion(req), ipAddress: req.ip });
+
     try {
         const regionalSns = getRegionalSNSClient(region);
         const topicArn = region.toUpperCase() === 'EU' ? process.env.SNS_TOPIC_ARN_EU : process.env.SNS_TOPIC_ARN_US;
@@ -681,7 +737,7 @@ export const requestDoctorClosure = catchAsync(async (req: Request, res: Respons
             Message: `HIGH PRIORITY: Doctor ${id} (${userCheck.Item.email}) has requested to close their account. \n\nPlease review pending clinical appointments and legal obligations before finalizing the deletion via the Admin Panel. \n\nRegion: ${region}\nIP Address: ${req.ip}`
         }));
     } catch (e) {
-        console.error("SNS Admin alert failed", e);
+        safeError("SNS Admin alert failed", e);
     }
 
     res.json({ message: "Closure request sent to administration for review." });
@@ -715,6 +771,19 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
     }
 
     try {
+        // Mark doctor DELETED first (before cascade) — prevents active doctor with partial anonymization on crash
+        const fhirResource = userCheck.Item.resource || {};
+        fhirResource.active = false;
+        fhirResource.name = [{ use: "official", text: "ANONYMIZED_GDPR" }];
+
+        await docClient.send(new UpdateCommand({
+            TableName: CONFIG.DYNAMO_TABLE,
+            Key: { doctorId: id },
+            UpdateExpression: "SET #v = :status, #res = :safeFhir",
+            ExpressionAttributeNames: { "#v": "verificationStatus", "#res": "resource" },
+            ExpressionAttributeValues: { ":status": "DELETED", ":safeFhir": fhirResource }
+        }));
+
         const apptQuery = await docClient.send(new QueryCommand({
             TableName: process.env.TABLE_APPOINTMENTS || "mediconnect-appointments",
             IndexName: "DoctorIndex",
@@ -807,7 +876,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
                 TableName: process.env.TABLE_TRANSACTIONS || "mediconnect-transactions",
                 Key: { billId: tx.billId },
                 UpdateExpression: "SET description = :desc, lastUpdated = :now",
-                ExpressionAttributeValues: { 
+                ExpressionAttributeValues: {
                     ":desc": newDesc,
                     ":now": new Date().toISOString()
                 }
@@ -818,31 +887,207 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
         safeError("Transaction Anonymization Failed", txErr);
     }
 
+    // ─── Graph-data cleanup: remove all DOCTOR# relationships ─────────────
+    try {
+        const graphTable = process.env.TABLE_GRAPH || 'mediconnect-graph-data';
+        const graphResult = await docClient.send(new QueryCommand({
+            TableName: graphTable,
+            KeyConditionExpression: 'PK = :pk',
+            ExpressionAttributeValues: { ':pk': `DOCTOR#${id}` }
+        }));
+        const graphItems = graphResult.Items || [];
+        // BatchWrite in chunks of 25 (DynamoDB limit)
+        for (let i = 0; i < graphItems.length; i += 25) {
+            const batch = graphItems.slice(i, i + 25);
+            await docClient.send(new BatchWriteCommand({
+                RequestItems: {
+                    [graphTable]: batch.map((item: any) => ({
+                        DeleteRequest: { Key: { PK: item.PK, SK: item.SK } }
+                    }))
+                }
+            }));
+        }
+        safeLog(`[GDPR] Deleted ${graphItems.length} graph-data relationships for doctor ${id}.`);
+
+        // Delete reverse graph-data entries (PATIENT#x → DOCTOR#id)
+        const reverseGraphScan = await docClient.send(new ScanCommand({
+            TableName: graphTable,
+            FilterExpression: 'SK = :doctorSk',
+            ExpressionAttributeValues: { ':doctorSk': `DOCTOR#${id}` }
+        }));
+        if (reverseGraphScan.Items?.length) {
+            const batches = [];
+            for (let i = 0; i < reverseGraphScan.Items.length; i += 25) {
+                const batch = reverseGraphScan.Items.slice(i, i + 25);
+                batches.push(docClient.send(new BatchWriteCommand({
+                    RequestItems: {
+                        [graphTable]: batch.map(item => ({
+                            DeleteRequest: { Key: { PK: item.PK, SK: item.SK } }
+                        }))
+                    }
+                })));
+            }
+            await Promise.all(batches);
+            safeLog(`[GDPR] Deleted ${reverseGraphScan.Items.length} reverse graph-data entries for doctor ${id}.`);
+        }
+    } catch (graphErr) {
+        safeError("Graph-data cleanup failed", graphErr);
+    }
+
+    // ─── Prescriptions anonymization ──────────────────────────────────────
+    try {
+        const rxTable = process.env.TABLE_PRESCRIPTIONS || 'mediconnect-prescriptions';
+        const rxResult = await docClient.send(new QueryCommand({
+            TableName: rxTable,
+            IndexName: 'DoctorIndex',
+            KeyConditionExpression: 'doctorId = :did',
+            ExpressionAttributeValues: { ':did': id }
+        }));
+        const prescriptions = rxResult.Items || [];
+        for (const rx of prescriptions) {
+            await docClient.send(new UpdateCommand({
+                TableName: rxTable,
+                Key: { prescriptionId: (rx as any).prescriptionId },
+                UpdateExpression: 'SET doctorName = :anon, doctorId = :anonId, lastUpdated = :now',
+                ExpressionAttributeValues: {
+                    ':anon': 'ANONYMIZED_DOCTOR',
+                    ':anonId': 'ANONYMIZED',
+                    ':now': new Date().toISOString()
+                }
+            }));
+        }
+        safeLog(`[GDPR] Anonymized ${prescriptions.length} prescription records.`);
+    } catch (rxErr) {
+        safeError("Prescription Anonymization Failed", rxErr);
+    }
+
+    // ─── Lab orders anonymization ─────────────────────────────────────────
+    try {
+        const labTable = process.env.TABLE_LAB_ORDERS || 'mediconnect-lab-orders';
+        const labResult = await docClient.send(new ScanCommand({
+            TableName: labTable,
+            FilterExpression: 'orderingProviderId = :did',
+            ExpressionAttributeValues: { ':did': id }
+        }));
+        const labOrders = labResult.Items || [];
+        for (const lab of labOrders) {
+            await docClient.send(new UpdateCommand({
+                TableName: labTable,
+                Key: { orderId: (lab as any).orderId, patientId: (lab as any).patientId },
+                UpdateExpression: 'SET orderingProviderId = :anonId, orderingProviderName = :anon, lastUpdated = :now',
+                ExpressionAttributeValues: {
+                    ':anonId': 'ANONYMIZED',
+                    ':anon': 'ANONYMIZED_DOCTOR',
+                    ':now': new Date().toISOString()
+                }
+            }));
+        }
+        safeLog(`[GDPR] Anonymized ${labOrders.length} lab order records.`);
+    } catch (labErr) {
+        safeError("Lab Order Anonymization Failed", labErr);
+    }
+
+    // ─── Referrals anonymization ──────────────────────────────────────────
+    try {
+        const referralTable = process.env.TABLE_REFERRALS || 'mediconnect-referrals';
+        const referralResult = await docClient.send(new ScanCommand({
+            TableName: referralTable,
+            FilterExpression: 'requestingDoctorId = :did OR targetDoctorId = :did',
+            ExpressionAttributeValues: { ':did': id }
+        }));
+        const referrals = referralResult.Items || [];
+        for (const ref of referrals) {
+            const updates: string[] = ['lastUpdated = :now'];
+            const values: any = { ':now': new Date().toISOString() };
+
+            if ((ref as any).requestingDoctorId === id) {
+                updates.push('requestingDoctorId = :anonId', 'requestingDoctorName = :anon');
+                values[':anonId'] = 'ANONYMIZED';
+                values[':anon'] = 'ANONYMIZED_DOCTOR';
+            }
+            if ((ref as any).targetDoctorId === id) {
+                updates.push('targetDoctorId = :anonTargetId', 'targetDoctorName = :anonTarget');
+                values[':anonTargetId'] = 'ANONYMIZED';
+                values[':anonTarget'] = 'ANONYMIZED_DOCTOR';
+            }
+
+            await docClient.send(new UpdateCommand({
+                TableName: referralTable,
+                Key: { referralId: (ref as any).referralId },
+                UpdateExpression: `SET ${updates.join(', ')}`,
+                ExpressionAttributeValues: values
+            }));
+        }
+        safeLog(`[GDPR] Anonymized ${referrals.length} referral records.`);
+    } catch (refErr) {
+        safeError("Referral Anonymization Failed", refErr);
+    }
+
+    // ─── Med-reconciliation anonymization ─────────────────────────────────
+    try {
+        const reconTable = process.env.TABLE_MED_RECON || 'mediconnect-med-reconciliations';
+        const reconResult = await docClient.send(new ScanCommand({
+            TableName: reconTable,
+            FilterExpression: 'performedBy = :did',
+            ExpressionAttributeValues: { ':did': id }
+        }));
+        const reconciliations = reconResult.Items || [];
+        for (const recon of reconciliations) {
+            await docClient.send(new UpdateCommand({
+                TableName: reconTable,
+                Key: { reconId: (recon as any).reconId },
+                UpdateExpression: 'SET performedBy = :anonId, lastUpdated = :now',
+                ExpressionAttributeValues: {
+                    ':anonId': 'ANONYMIZED',
+                    ':now': new Date().toISOString()
+                }
+            }));
+        }
+        safeLog(`[GDPR] Anonymized ${reconciliations.length} med-reconciliation records.`);
+    } catch (reconErr) {
+        safeError("Med-reconciliation Anonymization Failed", reconErr);
+    }
+
+    // ─── Chat-history anonymization ───────────────────────────────────────
+    try {
+        const chatScan = await docClient.send(new ScanCommand({
+            TableName: 'mediconnect-chat-history',
+            FilterExpression: 'senderId = :did',
+            ExpressionAttributeValues: { ':did': id }
+        }));
+        if (chatScan.Items?.length) {
+            for (const msg of chatScan.Items) {
+                await docClient.send(new UpdateCommand({
+                    TableName: 'mediconnect-chat-history',
+                    Key: { conversationId: msg.conversationId, timestamp: msg.timestamp },
+                    UpdateExpression: 'SET senderId = :anon',
+                    ExpressionAttributeValues: { ':anon': 'ANONYMIZED_DOCTOR' }
+                }));
+            }
+            safeLog(`[GDPR] Anonymized ${chatScan.Items.length} chat-history messages for doctor ${id}.`);
+        }
+    } catch (chatErr) {
+        safeError("Failed to anonymize doctor chat history", chatErr);
+    }
+
     const regionalS3 = getRegionalS3Client(region);
     const baseBucket = process.env.BUCKET_NAME || 'mediconnect-doctor-data';
     const isEU = region.toUpperCase() === 'EU';
     const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
 
-    const fhirResource = userCheck.Item.resource || {};
-    fhirResource.active = false; // Legally mark doctor as no longer practicing here
-    fhirResource.name =[{ use: "official", text: "ANONYMIZED_GDPR" }]; // Wipe PII
-  
+    // Final PII wipe (DELETED status + FHIR resource already set at top of cascade)
     await docClient.send(new UpdateCommand({
-        TableName: CONFIG.DYNAMO_TABLE, 
+        TableName: CONFIG.DYNAMO_TABLE,
         Key: { doctorId: id },
-        UpdateExpression: "SET #n = :del, #e = :del, #a = :null, #v = :status, #res = :safeFhir, bio = :null, phone = :null, address = :null, aiExtractedText = :null, licenseNumber = :null, googleRefreshToken = :null",
-        ExpressionAttributeNames: { 
+        UpdateExpression: "SET #n = :del, #e = :del, #a = :null, bio = :null, phone = :null, address = :null, aiExtractedText = :null, licenseNumber = :null, googleRefreshToken = :null",
+        ExpressionAttributeNames: {
             "#n": "name",
             "#e": "email",
-            "#a": "avatar",
-            "#v": "verificationStatus",
-            "#res": "resource" // Safely mapped
+            "#a": "avatar"
         },
-        ExpressionAttributeValues: { 
-            ":del": "ANONYMIZED_GDPR", 
-            ":status": "DELETED", 
-            ":null": null,
-            ":safeFhir": fhirResource // Saves the preserved qualifications!
+        ExpressionAttributeValues: {
+            ":del": "ANONYMIZED_GDPR",
+            ":null": null
         }
     }));
 
@@ -859,7 +1104,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
     try {
 
         const legalRecords =[`doctor/${id}/id_card.jpg`];
-        
+
         if (userCheck.Item.diplomaUrl) {
 
             const exactDiplomaKey = userCheck.Item.diplomaUrl.split('/').slice(3).join('/');
@@ -879,7 +1124,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
     try {
         // 🟢 PROFESSIONAL FIX: Tag as Biometric so your 1-day rule also catches them
         const biometricTags = { Tagging: { TagSet: [{ Key: "DataType", Value: "Biometric" }] } };
-        
+
         const photos = [`doctor/${id}/profile_picture.jpg`, `doctor/${id}/profile_picture.png`, `doctor/${id}/selfie_verified.jpg`, `doctor/${id}/selfie_verified.png` ];
         for (const key of photos) {
             // First tag it as biometric (extra safety) then delete
@@ -907,10 +1152,10 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
                 Destination: { ToAddresses: [userCheck.Item.email] },
                 Message: {
                     Subject: { Data: "MediConnect - Account Closed Successfully" },
-                    Body: { 
-                        Text: { 
-                            Data: `Hello Dr. ${userCheck.Item.name || id}, \n\nYour professional account with MediConnect has been closed. Your medical identity has been anonymized and biometric data has been destroyed. \n\nIn accordance with medical record laws, your board credentials will be retained for the legal 7-year period to satisfy audit requirements. \n\nThank you for your service.` 
-                        } 
+                    Body: {
+                        Text: {
+                            Data: `Hello Dr. ${userCheck.Item.name || id}, \n\nYour professional account with MediConnect has been closed. Your medical identity has been anonymized and biometric data has been destroyed. \n\nIn accordance with medical record laws, your board credentials will be retained for the legal 7-year period to satisfy audit requirements. \n\nThank you for your service.`
+                        }
                     }
                 }
             }));
@@ -937,12 +1182,15 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
     await writeAuditLog(id, id, "DELETE_PROFILE", "User invoked GDPR Right to be Forgotten", {
         region,
         ipAddress: req.ip,
-        lastKnownContact: { 
-            email: userCheck.Item.email, 
-            phone: userCheck.Item.phone || "N/A" 
+        lastKnownContact: {
+            email: userCheck.Item.email,
+            phone: userCheck.Item.phone || "N/A"
         }
     });
     logDoctorOnboarding(id, "ACCOUNT_DELETION", "DELETED", region).catch((e: any) => safeError("Failed to log doctor onboarding", e));
+
+    // Event bus: doctor account deleted
+    publishEvent(EventType.DOCTOR_DELETED, { doctorId: id, region }, region).catch(() => {});
 
     res.status(200).json({ message: "Identity erased. Credentials tagged for legal audit." });
 });
@@ -953,7 +1201,7 @@ const logDoctorOnboarding = async (doctorId: string, eventType: string, status: 
         const auth = new GoogleAuth({
             scopes:['https://www.googleapis.com/auth/cloud-platform']
         });
-        
+
         const client = await auth.getClient();
         const accessToken = (await client.getAccessToken()).token;
         const projectId = await auth.getProjectId();
@@ -981,19 +1229,19 @@ const logDoctorOnboarding = async (doctorId: string, eventType: string, status: 
         });
         if (!response.ok) {
             const errText = await response.text();
-            console.error(`❌ BQ REJECTED ONBOARDING LOG [${response.status}]:`, errText);
+            safeError(`BQ REJECTED ONBOARDING LOG [${response.status}]:`, errText);
         } else {
-            console.log(`✅ BQ APPOINTMENT STREAM SUCCESS!`);
+            safeLog(`BQ APPOINTMENT STREAM SUCCESS`);
         }
-    } catch (e: any) { 
-        console.error("BigQuery Onboarding Log Failed", e.message); 
+    } catch (e: any) {
+        safeError("BigQuery Onboarding Log Failed", e.message);
     }
 };
 
 export const approveDoctorByOfficer = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req);
     const docClient = getRegionalClient(region);
-    const { id } = req.params; 
+    const { id } = req.params;
     const authUser = (req as any).user;
 
     if (authUser.sub === id) {
@@ -1001,21 +1249,21 @@ export const approveDoctorByOfficer = catchAsync(async (req: Request, res: Respo
     }
 
     await docClient.send(new UpdateCommand({
-        TableName: CONFIG.DYNAMO_TABLE, 
+        TableName: CONFIG.DYNAMO_TABLE,
         Key: { doctorId: id },
         UpdateExpression: "SET isOfficerApproved = :t, verificationStatus = :s, #res.active = :t",
         ExpressionAttributeNames: { "#res": "resource" },
-        ExpressionAttributeValues: { 
-            ":t": true, 
-            ":s": "APPROVED" 
+        ExpressionAttributeValues: {
+            ":t": true,
+            ":s": "APPROVED"
         }
     }));
 
-    await writeAuditLog(authUser.sub, id, "OFFICER_APPROVAL", "Human Medical Officer manually verified AI data and diploma", { 
-        region, 
-        ipAddress: req.ip 
+    await writeAuditLog(authUser.sub, id, "OFFICER_APPROVAL", "Human Medical Officer manually verified AI data and diploma", {
+        region,
+        ipAddress: req.ip
     });
-    logDoctorOnboarding(id, "OFFICER_APPROVAL", "APPROVED", region).catch(console.error);
+    logDoctorOnboarding(id, "OFFICER_APPROVAL", "APPROVED", region).catch((e: any) => safeError("Onboarding log failed", e));
 
     res.json({ message: "Doctor officially board-certified and approved for practice." });
 });
@@ -1033,7 +1281,7 @@ export async function syncToGoogleCalendar(doctorId: string, timeSlot: string, p
         const storedToken = res.Item?.googleRefreshToken;
 
         if (!storedToken) {
-            console.log(`[Calendar] No Google Token found for doctor ${doctorId}`);
+            safeLog(`[Calendar] No Google Token found for doctor ${doctorId}`);
             return;
         }
 
@@ -1043,13 +1291,13 @@ export async function syncToGoogleCalendar(doctorId: string, timeSlot: string, p
         const oauth2Client = new google.auth.OAuth2(
             process.env.GOOGLE_CLIENT_ID,
             process.env.GOOGLE_CLIENT_SECRET,
-            `${process.env.API_PUBLIC_URL}/doctors/auth/google/callback` 
+            `${process.env.API_PUBLIC_URL}/doctors/auth/google/callback`
         );
         oauth2Client.setCredentials({ refresh_token: refreshToken });
         const calendar = google.calendar({ version: 'v3', auth: oauth2Client });
 
         const startTime = new Date(timeSlot);
-        const endTime = new Date(startTime.getTime() + 30 * 60000); 
+        const endTime = new Date(startTime.getTime() + 30 * 60000);
 
         await calendar.events.insert({
             calendarId: 'primary',
@@ -1062,9 +1310,9 @@ export async function syncToGoogleCalendar(doctorId: string, timeSlot: string, p
             }
         });
 
-        console.log(`[Calendar] Event created for ${doctorId}`);
+        safeLog(`[Calendar] Event created for ${doctorId}`);
 
     } catch (error: any) {
-        console.error("[Calendar Sync Failed]:", error.message);
+        safeError("[Calendar Sync Failed]:", error.message);
     }
 }

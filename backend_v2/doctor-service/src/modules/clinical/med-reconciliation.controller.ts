@@ -10,6 +10,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { PutCommand, QueryCommand, GetCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
+import { validateUSCore } from '../../../../shared/us-core-profiles';
 
 const TABLE_MED_RECON = process.env.TABLE_MED_RECON || 'mediconnect-med-reconciliations';
 
@@ -285,6 +286,29 @@ export const performReconciliation = async (req: Request, res: Response) => {
             reconciledList: null, // To be filled by doctor's decision
             createdAt: now,
         };
+
+        // ─── US Core validation on MedicationStatement entries ────────────
+        for (let idx = 0; idx < allMedications.length; idx++) {
+            const med = allMedications[idx];
+            const medStatement = {
+                resourceType: 'MedicationStatement',
+                id: `${reconId}-med-${idx}`,
+                status: med.status || 'active',
+                medicationCodeableConcept: {
+                    coding: med.rxcui ? [{ system: 'http://www.nlm.nih.gov/research/umls/rxnorm', code: med.rxcui, display: med.name }] : [],
+                    text: med.name,
+                },
+                subject: { reference: `Patient/${patientId}` },
+            };
+            const validation = validateUSCore(medStatement);
+            if (!validation.valid) {
+                return res.status(422).json({
+                    error: `US Core MedicationStatement validation failed for medication: ${med.name}`,
+                    profile: validation.profile,
+                    issues: validation.errors,
+                });
+            }
+        }
 
         await db.send(new PutCommand({ TableName: TABLE_MED_RECON, Item: reconciliation }));
 

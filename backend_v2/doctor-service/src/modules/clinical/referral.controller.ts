@@ -9,6 +9,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { PutCommand, QueryCommand, GetCommand, UpdateCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
+import { validateUSCore } from '../../../../shared/us-core-profiles';
 
 const TABLE_REFERRALS = process.env.TABLE_REFERRALS || 'mediconnect-referrals';
 const TABLE_DOCTORS = process.env.DYNAMO_TABLE_DOCTORS || 'mediconnect-doctors';
@@ -143,11 +144,22 @@ export const createReferral = async (req: Request, res: Response) => {
             updatedAt: now,
         };
 
+        // ─── US Core ServiceRequest validation before write ────────────────
+        const fhirServiceRequest = toFHIRServiceRequest(referral);
+        const validation = validateUSCore(fhirServiceRequest);
+        if (!validation.valid) {
+            return res.status(422).json({
+                error: 'US Core ServiceRequest validation failed',
+                profile: validation.profile,
+                issues: validation.errors,
+            });
+        }
+
         await db.send(new PutCommand({ TableName: TABLE_REFERRALS, Item: referral }));
 
         await writeAuditLog(user.id, patientId, 'REFERRAL_CREATED', `Referral to ${specialty.display}`, { region, referralId, specialty: specialty.code });
 
-        res.status(201).json(toFHIRServiceRequest(referral));
+        res.status(201).json(fhirServiceRequest);
 
     } catch (error: any) {
         res.status(500).json({ error: 'Failed to create referral', details: error.message });

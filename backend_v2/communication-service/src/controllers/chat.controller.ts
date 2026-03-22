@@ -7,7 +7,8 @@ import { PutCommand, QueryCommand, GetCommand, DeleteCommand } from "@aws-sdk/li
 import { getRegionalClient } from '../../../shared/aws-config';
 import { mapToFHIRCommunication, scrubPII } from "../utils/fhir-mapper";
 import { writeAuditLog } from "../../../shared/audit";
-import { logger } from "../../../shared/logger";
+import { safeLog, safeError } from "../../../shared/logger";
+import { encryptPHI, decryptPHI } from '../../../shared/kms-crypto';
 
 const catchAsync = (fn: any) => (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(fn(req, res, next)).catch(next);
@@ -93,10 +94,25 @@ export const getChatHistory = catchAsync(async (req: Request, res: Response) => 
 
         await writeAuditLog(requesterId, String(recipientId), "READ_CHAT_HISTORY", "History accessed", { region, ipAddress: req.ip });
 
-        res.json((history.Items || []).reverse());
+        // Decrypt PHI-encrypted message text (migration-safe: plaintext passes through)
+        const items = (history.Items || []).reverse();
+        const decryptedItems = await Promise.all(items.map(async (item: any) => {
+            if (item.text) {
+                try {
+                    const decrypted = await decryptPHI({ text: item.text }, region);
+                    return { ...item, text: decrypted.text };
+                } catch {
+                    // Migration safety: return plaintext if decryption fails
+                    return item;
+                }
+            }
+            return item;
+        }));
+
+        res.json(decryptedItems);
 
     } catch (error: any) {
-        logger.error("[CHAT] Failed to fetch chat history", { error: error.message });
+        safeError("[CHAT] Failed to fetch chat history", { error: error.message });
         res.status(500).json({ error: "Failed to fetch history" });
     }
 });
@@ -109,7 +125,7 @@ export const handleWsEventHttp = catchAsync(async (req: Request, res: Response) 
         const result = await handleWebSocketEvent(event);
         res.status(result.statusCode).json(result.body);
     } catch (error: any) {
-        logger.error("[CHAT] WebSocket event handling failed", { error: error.message });
+        safeError("[CHAT] WebSocket event handling failed", { error: error.message });
         res.status(500).json({ error: "Internal Server Error" });
     }
 });
@@ -126,7 +142,7 @@ export const handleWebSocketEvent = async (event: any) => {
         : process.env.AWS_WS_GATEWAY_ENDPOINT_US;
 
     if (!endpoint) {
-        logger.error("[CHAT] CRITICAL: WebSocket Gateway Endpoint missing for region", { region: awsRegionTarget });
+        safeError("[CHAT] CRITICAL: WebSocket Gateway Endpoint missing for region", { region: awsRegionTarget });
     }
 
     const apigw = new ApiGatewayManagementApi({ endpoint, region: awsRegionTarget });
@@ -135,11 +151,19 @@ export const handleWebSocketEvent = async (event: any) => {
         case "$connect":
             if (!connectionId) return { statusCode: 200, body: { message: "REST Bridge Active" } };
 
-            await writeAuditLog(userId, "SYSTEM", "WS_CONNECT", "Secure Session", { region });
-            await regionalDb.send(new PutCommand({
-                TableName: DB_TABLES.CONNECTIONS,
-                Item: { connectionId, userId, ttl: Math.floor(Date.now() / 1000) + 7200 }
-            }));
+            try {
+                await writeAuditLog(userId, "SYSTEM", "WS_CONNECT", "Secure Session", { region });
+            } catch (auditErr) {
+                safeError("[CHAT] Audit log failed for WS_CONNECT", auditErr);
+            }
+            try {
+                await regionalDb.send(new PutCommand({
+                    TableName: DB_TABLES.CONNECTIONS,
+                    Item: { connectionId, userId, ttl: Math.floor(Date.now() / 1000) + 7200 }
+                }));
+            } catch (connErr) {
+                safeError("[CHAT] Failed to write connection record", connErr);
+            }
             return { statusCode: 200, body: {} };
 
         case "sendMessage":
@@ -167,14 +191,40 @@ export const handleWebSocketEvent = async (event: any) => {
 
             const fhirResource = mapToFHIRCommunication(userId, senderType, recipientId, recipientType, text);
             const timestamp = new Date().toISOString();
-            
-            await regionalDb.send(new PutCommand({
-                TableName: DB_TABLES.HISTORY,
-                Item: { 
-                    conversationId, timestamp, senderId: userId, recipientId,
-                    text: scrubPII(text), resource: fhirResource, isRead: false
+
+            // Encrypt message text as PHI before storage
+            const scrubbedText = scrubPII(text);
+            let encryptedText = scrubbedText;
+            try {
+                const encrypted = await encryptPHI({ text: scrubbedText }, region);
+                encryptedText = encrypted.text;
+            } catch {
+                // Fallback: store scrubbed plaintext if encryption fails
+                safeError("[CHAT] PHI encryption failed for message, storing scrubbed plaintext");
+            }
+
+            // Idempotency: use client-provided messageId to prevent duplicate storage
+            const messageId = data.messageId || `${conversationId}:${timestamp}`;
+            try {
+                await regionalDb.send(new PutCommand({
+                    TableName: DB_TABLES.HISTORY,
+                    Item: {
+                        conversationId, timestamp, senderId: userId, recipientId,
+                        text: encryptedText, resource: fhirResource, isRead: false,
+                        messageId
+                    },
+                    ConditionExpression: "attribute_not_exists(conversationId) AND attribute_not_exists(#ts)",
+                    ExpressionAttributeNames: { "#ts": "timestamp" }
+                }));
+            } catch (dedup: any) {
+                if (dedup.name === 'ConditionalCheckFailedException') {
+                    return { statusCode: 200, body: { status: "Already sent", conversationId, deduplicated: true } };
                 }
-            }));
+                throw dedup;
+            }
+
+            // Audit log for message creation
+            writeAuditLog(userId, recipientId, "CREATE_MESSAGE", "Chat message sent", { region }).catch(() => {});
 
             const connections = await regionalDb.send(new QueryCommand({
                 TableName: DB_TABLES.CONNECTIONS,

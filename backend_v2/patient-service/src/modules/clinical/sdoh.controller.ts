@@ -10,6 +10,7 @@ import { v4 as uuidv4 } from 'uuid';
 import { PutCommand, QueryCommand, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
+import { validateUSCore } from '../../../../shared/us-core-profiles';
 
 const TABLE_SDOH = process.env.TABLE_SDOH || 'mediconnect-sdoh-assessments';
 
@@ -245,6 +246,28 @@ export const submitSDOHAssessment = async (req: Request, res: Response) => {
 
         const assessmentId = uuidv4();
         const now = new Date().toISOString();
+
+        // ─── US Core Observation validation before persisting ─────────────
+        const fhirObservation = {
+            resourceType: 'Observation',
+            id: assessmentId,
+            status: 'final',
+            category: [
+                { coding: [{ system: 'http://terminology.hl7.org/CodeSystem/observation-category', code: 'social-history', display: 'Social History' }] },
+            ],
+            code: { coding: [{ system: 'http://loinc.org', code: '93025-5', display: 'Protocol for Responding to and Assessing Patients Assets, Risks, and Experiences [PRAPARE]' }] },
+            subject: { reference: `Patient/${patientId}` },
+            effectiveDateTime: now,
+            valueInteger: totalScore,
+        };
+        const validation = validateUSCore(fhirObservation);
+        if (!validation.valid) {
+            return res.status(422).json({
+                error: 'US Core Observation validation failed',
+                profile: validation.profile,
+                issues: validation.errors,
+            });
+        }
 
         const assessment = {
             assessmentId,

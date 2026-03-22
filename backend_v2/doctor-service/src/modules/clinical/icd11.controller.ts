@@ -7,6 +7,7 @@
 
 import { Request, Response } from 'express';
 import { writeAuditLog } from '../../../../shared/audit';
+import { safeError } from '../../../../shared/logger';
 
 const extractRegion = (req: Request): string => {
     const raw = req.headers['x-user-region'];
@@ -245,7 +246,7 @@ export const searchICD11 = async (req: Request, res: Response) => {
             note: 'Using built-in codes. Set WHO_ICD11_CLIENT_ID and WHO_ICD11_CLIENT_SECRET for full API access.'
         });
     } catch (error: any) {
-        console.error('ICD-11 search error:', error);
+        safeError('ICD-11 search error:', error);
         res.status(500).json({ error: 'ICD-11 search failed' });
     }
 };
@@ -323,7 +324,7 @@ export const getICD11Code = async (req: Request, res: Response) => {
             }
         });
     } catch (error: any) {
-        console.error('ICD-11 lookup error:', error);
+        safeError('ICD-11 lookup error:', error);
         res.status(500).json({ error: 'ICD-11 lookup failed' });
     }
 };
@@ -403,7 +404,7 @@ export const crossmapICD10toICD11 = async (req: Request, res: Response) => {
             }
         });
     } catch (error: any) {
-        console.error('ICD crossmap error:', error);
+        safeError('ICD crossmap error:', error);
         res.status(500).json({ error: 'ICD crossmap failed' });
     }
 };

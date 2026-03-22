@@ -6,10 +6,12 @@ import Stripe from "stripe";
 import { randomUUID } from "crypto";
 import { logger } from '../../../shared/logger';
 import { writeAuditLog } from '../../../shared/audit';
-import { decryptToken } from '../../../shared/kms-crypto';
+import { decryptToken, encryptPHI, decryptPHI } from '../../../shared/kms-crypto';
 import { BookingPDFGenerator } from "../utils/pdf-generator";
 import { google } from 'googleapis';
 import { pushAppointmentToBigQuery, pushRevenueToBigQuery } from './billing.controller';
+import { sendNotification } from '../../../shared/notifications';
+import { publishEvent, EventType } from '../../../shared/event-bus';
 
 // 🛡️ ARCHITECTURAL PURGE: 'pg' and 'db.ts' have been completely removed.
 // All data (including pricing and tokens) now securely flows through Regional DynamoDB.
@@ -218,6 +220,22 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
     }
 
     // Step 2: TransactWriteItems (Atomic Commit to Regional DB) — only after payment confirmed
+    // FIX #7: Encrypt PHI (patient/doctor names) before storing in DynamoDB
+    let encryptedPatientName = actualPatientName;
+    let encryptedDoctorName = actualDoctorName;
+    try {
+        const encryptedNames = await encryptPHI({ patientName: actualPatientName, doctorName: actualDoctorName }, region);
+        encryptedPatientName = encryptedNames.patientName;
+        encryptedDoctorName = encryptedNames.doctorName;
+        // Update FHIR resource participant display names with encrypted values
+        if (fhirResource && Array.isArray(fhirResource.participant)) {
+            fhirResource.participant[0].actor.display = encryptedPatientName;
+            fhirResource.participant[1].actor.display = encryptedDoctorName;
+        }
+    } catch (encErr: any) {
+        logger.error("[BOOKING] PHI encryption failed, storing plaintext as fallback", { error: encErr.message });
+    }
+
     try {
         await docClient.send(new TransactWriteCommand({
         TransactItems: [
@@ -225,7 +243,7 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
                 Put: {
                     TableName: TABLE_APPOINTMENTS,
                     Item: {
-                        appointmentId, patientId, patientName: actualPatientName, doctorId, doctorName: actualDoctorName,
+                        appointmentId, patientId, patientName: encryptedPatientName, doctorId, doctorName: encryptedDoctorName,
                         timeSlot: normalizedTime, status: "CONFIRMED",
                         paymentStatus: "paid", paymentId: paymentIntentId,
                         createdAt: timestamp, amountPaid: amountToCharge / 100,
@@ -265,7 +283,7 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
                     TableName: TABLE_GRAPH,
                     Item: {
                         PK: `PATIENT#${patientId}`, SK: `DOCTOR#${doctorId}`,
-                        relationship: "isTreatedBy", doctorName: doctorName,
+                        relationship: "isTreatedBy", doctorName: encryptedDoctorName,
                         lastVisit: normalizedTime, createdAt: timestamp
                     }
                 }
@@ -275,7 +293,7 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
                     TableName: TABLE_GRAPH,
                     Item: {
                         PK: `DOCTOR#${doctorId}`, SK: `PATIENT#${patientId}`,
-                        relationship: "treats", patientName: patientName,
+                        relationship: "treats", patientName: encryptedPatientName,
                         lastVisit: normalizedTime, createdAt: timestamp
                     }
                 }
@@ -287,6 +305,17 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         await writeAuditLog(patientId, patientId, "CREATE_BOOKING", `Appointment ${appointmentId} booked`, {
             doctorId, timeSlot: normalizedTime, region, ipAddress: req.ip
         });
+
+        // Push initial PAID revenue to BigQuery analytics (symmetric with REFUND push on cancel)
+        pushRevenueToBigQuery({
+            billId: transactionId,
+            patientId,
+            doctorId,
+            amount: amountToCharge / 100,
+            status: "PAID",
+            type: "BOOKING_FEE",
+        }, region).catch(e => logger.error("[BOOKING] BigQuery initial revenue sync failed", { error: e.message }));
+
         await pushAppointmentToBigQuery({
             appointmentId,
             doctorId,
@@ -294,6 +323,9 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
             status: "CONFIRMED",
             specialization: doctorRes.Item?.specialization
         }, region).catch(e => logger.error("[BOOKING] BigQuery appointment sync failed", { error: e.message }));
+
+        // Event bus: appointment booked
+        publishEvent(EventType.APPOINTMENT_BOOKED, { appointmentId, patientId, doctorId, timeSlot: normalizedTime, status: "CONFIRMED" }, region).catch(() => {});
 
         // Step 3: Post-commit side effects (PDF receipt, calendar sync)
         // These are non-critical — failures are logged but don't affect the booking
@@ -324,6 +356,16 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         } catch (sideEffectError) {
             logger.error("Non-critical post-booking side effect failed", { appointmentId, error: sideEffectError });
         }
+
+        // Fire-and-forget booking confirmation notification
+        sendNotification({
+            region,
+            recipientEmail: patientRes.Item?.email,
+            subject: 'Booking Confirmed',
+            message: `Your appointment with Dr. ${actualDoctorName} on ${new Date(normalizedTime).toLocaleString()} has been confirmed.`,
+            type: 'BOOKING_CONFIRMATION',
+            metadata: { appointmentId, doctorId, timeSlot: normalizedTime }
+        }).catch(() => {});
 
         res.status(200).json({
             message: "Appointment Secured", id: appointmentId,
@@ -371,6 +413,39 @@ function syncFhirStatus(appointment: any): any {
     return appointment;
 }
 
+// FIX #7: Helper to decrypt PHI name fields on appointment records
+async function decryptAppointmentNames(appointment: any, region: string): Promise<any> {
+    try {
+        if (appointment.patientName || appointment.doctorName) {
+            const decrypted = await decryptPHI({
+                patientName: appointment.patientName || "",
+                doctorName: appointment.doctorName || ""
+            }, region);
+            appointment.patientName = decrypted.patientName || appointment.patientName;
+            appointment.doctorName = decrypted.doctorName || appointment.doctorName;
+
+            // Decrypt FHIR resource participant display names if present
+            if (appointment.resource && Array.isArray(appointment.resource.participant)) {
+                for (const p of appointment.resource.participant) {
+                    if (p.actor?.display && typeof p.actor.display === 'string' && p.actor.display.startsWith('phi:kms:')) {
+                        try {
+                            const dec = await decryptPHI({ display: p.actor.display }, region);
+                            p.actor.display = dec.display || p.actor.display;
+                        } catch { /* fallback to encrypted */ }
+                    }
+                }
+            }
+        }
+    } catch (err: any) {
+        logger.error("[BOOKING] PHI decryption failed, returning as-is", { error: err.message });
+    }
+    return appointment;
+}
+
+async function decryptAppointmentList(items: any[], region: string): Promise<any[]> {
+    return Promise.all(items.map(item => decryptAppointmentNames(item, region)));
+}
+
 export const getAppointments = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req);
     const docClient = getRegionalClient(region);
@@ -414,7 +489,8 @@ export const getAppointments = catchAsync(async (req: Request, res: Response) =>
 
         await writeAuditLog(requesterId || "SYSTEM", String(patientId), "READ_APPOINTMENTS", "Viewed patient appointment history", { region, ipAddress: req.ip });
 
-        const items = (response.Items || []).map(syncFhirStatus);
+        const rawItems = (response.Items || []).map(syncFhirStatus);
+        const items = await decryptAppointmentList(rawItems, region);
         return res.status(200).json({
             resourceType: "Bundle", type: "searchset", total: items.length,
             entry: items.map((a: any) => ({ resource: a.resource || a })),
@@ -444,7 +520,7 @@ export const getAppointments = catchAsync(async (req: Request, res: Response) =>
 
         await writeAuditLog(requesterId || "SYSTEM", String(doctorId), "READ_SCHEDULE", "Viewed doctor appointment schedule", { region, ipAddress: req.ip });
 
-        const syncedBookings = bookings.map(syncFhirStatus);
+        const syncedBookings = await decryptAppointmentList(bookings.map(syncFhirStatus), region);
         return res.status(200).json({
             resourceType: "Bundle", type: "searchset", total: syncedBookings.length,
             entry: syncedBookings.map((a: any) => ({ resource: a.resource || a })),
@@ -512,6 +588,15 @@ export const cleanupAppointments = catchAsync(async (req: Request, res: Response
         }
     } while (exclusiveStartKey);
 
+    // Audit log for the overall cleanup operation
+    await writeAuditLog(
+        "SYSTEM",
+        "SYSTEM",
+        "SYSTEM_CLEANUP_NO_SHOWS",
+        `Automated cleanup processed ${processed} stale appointments`,
+        { region, processedCount: processed, ipAddress: req.ip }
+    ).catch(() => {});
+
     res.status(200).json({ message: "Cleanup Complete", processed });
 });
 
@@ -531,6 +616,9 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
 
     if (!apt) return res.status(404).json({ message: "Appointment not found" });
     if (apt.patientId !== patientId) return res.status(403).json({ message: "Identity mismatch." });
+
+    // FIX #7: Decrypt PHI names for downstream use (PDF receipt, etc.)
+    await decryptAppointmentNames(apt, region);
 
     // 🟢 SECURITY FIX 1: Prevent Post-Consultation Refunds (Fraud Prevention)
     if (apt.status === 'COMPLETED' || apt.status === 'IN_PROGRESS') {
@@ -576,16 +664,38 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
         }
     }
 
-    let updateExpression = "set #s = :s, #res = :resource";
-    const expressionAttributeValues: any = { ":s": "CANCELLED", ":resource": fhirResource || null };
-    const expressionAttributeNames: any = { "#s": "status", "#res": "resource" };
+    // 2b. Atomic: Update appointment status + create refund transaction (if amount > 0)
+    const transactionId = randomUUID();
+    const txStatus = refundId === "REFUND_FAILED_MANUAL_REQUIRED" ? "FAILED_REQUIRES_MANUAL_REFUND" : "PROCESSED";
 
-    await docClient.send(new UpdateCommand({
-        TableName: TABLE_APPOINTMENTS, Key: { appointmentId },
-        UpdateExpression: updateExpression,
-        ExpressionAttributeNames: expressionAttributeNames,
-        ExpressionAttributeValues: expressionAttributeValues
-    }));
+    const transactItems: any[] = [
+        {
+            Update: {
+                TableName: TABLE_APPOINTMENTS, Key: { appointmentId },
+                UpdateExpression: "set #s = :s, #res = :resource",
+                ExpressionAttributeNames: { "#s": "status", "#res": "resource" },
+                ExpressionAttributeValues: { ":s": "CANCELLED", ":resource": fhirResource || null }
+            }
+        }
+    ];
+
+    if (apt.amountPaid > 0) {
+        transactItems.push({
+            Put: {
+                TableName: TABLE_TRANSACTIONS,
+                Item: {
+                    billId: transactionId, referenceId: appointmentId,
+                    patientId, doctorId: apt.doctorId || "UNKNOWN",
+                    type: "REFUND", amount: -(apt.amountPaid || 0),
+                    currency: "USD", status: txStatus,
+                    createdAt: new Date().toISOString(),
+                    description: txStatus === "PROCESSED" ? "User requested cancellation" : "Refund Failed - Contact Support"
+                }
+            }
+        });
+    }
+
+    await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
 
     // 3. Delete Lock
     if (apt.doctorId && apt.timeSlot) {
@@ -599,10 +709,50 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
         deleteFromGoogleCalendar(apt.doctorId, apt.googleEventId, region).catch(e => logger.error("[BOOKING] Calendar delete failed on user cancel", { error: e.message }));
     }
 
+    // 3b. Clean up graph-data relationship entries (only if no other active appointments with same doctor)
+    if (apt.doctorId) {
+        try {
+            // Query for other active appointments between this patient and doctor
+            const otherApts = await docClient.send(new QueryCommand({
+                TableName: TABLE_APPOINTMENTS,
+                IndexName: "PatientIndex",
+                KeyConditionExpression: "patientId = :pid",
+                FilterExpression: "doctorId = :did AND appointmentId <> :currentId AND #s IN (:confirmed, :inProgress, :completed)",
+                ExpressionAttributeNames: { "#s": "status" },
+                ExpressionAttributeValues: {
+                    ":pid": patientId,
+                    ":did": apt.doctorId,
+                    ":currentId": appointmentId,
+                    ":confirmed": "CONFIRMED",
+                    ":inProgress": "IN_PROGRESS",
+                    ":completed": "COMPLETED"
+                },
+                Limit: 1
+            }));
+
+            // Only delete graph-data if no other active appointments exist
+            if (!otherApts.Items || otherApts.Items.length === 0) {
+                const graphTable = process.env.TABLE_GRAPH || 'mediconnect-graph-data';
+                // Delete PATIENT→DOCTOR relationship
+                await docClient.send(new DeleteCommand({
+                    TableName: graphTable,
+                    Key: { PK: `PATIENT#${patientId}`, SK: `DOCTOR#${apt.doctorId}` }
+                }));
+                // Delete DOCTOR→PATIENT relationship
+                await docClient.send(new DeleteCommand({
+                    TableName: graphTable,
+                    Key: { PK: `DOCTOR#${apt.doctorId}`, SK: `PATIENT#${patientId}` }
+                }));
+            }
+        } catch (graphErr: any) {
+            logger.error("[BOOKING] Failed to clean graph-data on cancel", { error: graphErr.message });
+        }
+    }
+
     // 4. Audit Log
     try {
-        await writeAuditLog(patientId, patientId, "CANCEL_BOOKING", `Appointment ${appointmentId} cancelled`, { 
-            reason: "User requested", region, ipAddress: req.ip 
+        await writeAuditLog(patientId, patientId, "CANCEL_BOOKING", `Appointment ${appointmentId} cancelled`, {
+            reason: "User requested", region, ipAddress: req.ip
         });
         const generator = new BookingPDFGenerator();
         await generator.generateReceipt({
@@ -615,25 +765,43 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
             status: "REFUNDED",
             type: "REFUND"
         }, region).catch(e => logger.error("[BOOKING] Auto-refund PDF generation failed", { error: e.message }));
-    } catch (e) { console.warn("Audit log failed..."); }
+    } catch (e) { logger.error("[BOOKING] Audit log failed for user cancellation"); }
 
-    // 5. Ledger Entry
+    // Push cancellation to BigQuery analytics
+    pushAppointmentToBigQuery({
+        appointmentId,
+        doctorId: apt.doctorId,
+        patientId: apt.patientId,
+        status: "CANCELLED",
+        specialization: apt.specialization,
+        reason: "Patient cancellation",
+        amountPaid: apt.amountPaid
+    }, region).catch(e => logger.error("[BOOKING] BigQuery cancellation sync failed", { error: e.message }));
+
+    // Push refund revenue to BigQuery analytics
     if (apt.amountPaid > 0) {
-        const transactionId = randomUUID();
-        const txStatus = refundId === "REFUND_FAILED_MANUAL_REQUIRED" ? "FAILED_REQUIRES_MANUAL_REFUND" : "PROCESSED";
-        
-        await docClient.send(new PutCommand({
-            TableName: TABLE_TRANSACTIONS,
-            Item: {
-                billId: transactionId, referenceId: appointmentId,
-                patientId, doctorId: apt.doctorId || "UNKNOWN",
-                type: "REFUND", amount: -(apt.amountPaid || 0),
-                currency: "USD", status: txStatus, // 🟢 ACCOUNTING FIX: Track failed refunds
-                createdAt: new Date().toISOString(), 
-                description: txStatus === "PROCESSED" ? "User requested cancellation" : "Refund Failed - Contact Support"
-            }
-        }));
+        pushRevenueToBigQuery({
+            billId: transactionId,
+            patientId: apt.patientId,
+            doctorId: apt.doctorId || "UNKNOWN",
+            amount: -(apt.amountPaid || 0),
+            status: txStatus === "PROCESSED" ? "REFUNDED" : "REFUND_FAILED",
+            type: "REFUND",
+        }, region).catch(e => logger.error("[BOOKING] BigQuery refund revenue sync failed", { error: e.message }));
     }
+
+    // Fire-and-forget cancellation notification
+    sendNotification({
+        region,
+        recipientEmail: (req as any).user?.email,
+        subject: 'Booking Cancelled',
+        message: `Your appointment (${appointmentId}) has been cancelled and a refund has been initiated.`,
+        type: 'BOOKING_CANCELLATION',
+        metadata: { appointmentId }
+    }).catch(() => {});
+
+    // Event bus: appointment cancelled
+    publishEvent(EventType.APPOINTMENT_CANCELLED, { appointmentId, patientId: apt.patientId, doctorId: apt.doctorId, reason: "Patient cancellation" }, region).catch(() => {});
 
     res.status(200).json({ message: "Appointment cancelled and refunded" });
 });
@@ -672,18 +840,6 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
                     const stripe = new Stripe(stripeKey);
                     const refund = await stripe.refunds.create({ payment_intent: existing.Item.paymentId });
                     refundId = refund.id;
-                    
-                    // Log the refund transaction
-                    await docClient.send(new PutCommand({
-                        TableName: TABLE_TRANSACTIONS,
-                        Item: {
-                            billId: randomUUID(), referenceId: appointmentId,
-                            patientId: existing.Item.patientId, doctorId: existing.Item.doctorId,
-                            type: "REFUND", amount: -(existing.Item.amountPaid || 0),
-                            currency: "USD", status: "PROCESSED",
-                            createdAt: new Date().toISOString(), description: "Doctor requested cancellation"
-                        }
-                    }));
                 }
             } catch (e: any) {
                 logger.error("[BOOKING] Stripe refund failed during doctor cancellation", { error: e.message });
@@ -745,6 +901,8 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
 // Helper Function
 async function cancelAppointment(apt: any, newStatus: string, refundId: string, region: string) {
     const docClient = getRegionalClient(region);
+    // FIX #7: Decrypt PHI names for downstream use (PDF receipt)
+    await decryptAppointmentNames(apt, region);
     try {
         // 1. FHIR & DYNAMODB CRASH FIX
         let fhirResource = apt.resource;
@@ -764,12 +922,40 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
         };
         const expressionAttributeNames: any = { "#s": "status", "#res": "resource" };
 
-        await docClient.send(new UpdateCommand({
-            TableName: TABLE_APPOINTMENTS, Key: { appointmentId: apt.appointmentId },
-            UpdateExpression: updateExpression,
-            ExpressionAttributeNames: expressionAttributeNames,
-            ExpressionAttributeValues: expressionAttributeValues
-        }));
+        // Atomic appointment update + refund transaction (matches cancelBookingUser TransactWrite pattern)
+        const refundBillId = randomUUID();
+        const txStatus = (apt.amountPaid > 0)
+            ? (refundId === "FAILED" || refundId === "REFUND_FAILED" ? "FAILED_REQUIRES_MANUAL_REFUND" : "PROCESSED")
+            : null;
+
+        const transactItems: any[] = [
+            {
+                Update: {
+                    TableName: TABLE_APPOINTMENTS, Key: { appointmentId: apt.appointmentId },
+                    UpdateExpression: updateExpression,
+                    ExpressionAttributeNames: expressionAttributeNames,
+                    ExpressionAttributeValues: expressionAttributeValues
+                }
+            }
+        ];
+
+        if (apt.amountPaid > 0 && txStatus) {
+            transactItems.push({
+                Put: {
+                    TableName: TABLE_TRANSACTIONS,
+                    Item: {
+                        billId: refundBillId, referenceId: apt.appointmentId,
+                        patientId: apt.patientId, doctorId: apt.doctorId || "UNKNOWN",
+                        type: "REFUND", amount: -(apt.amountPaid || 0),
+                        currency: "USD", status: txStatus,
+                        createdAt: new Date().toISOString(),
+                        description: newStatus === "CANCELLED_NO_SHOW" ? "No-show cancellation" : "System cancellation"
+                    }
+                }
+            });
+        }
+
+        await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
 
         if (apt.doctorId && apt.timeSlot) {
             const lockKey = `${apt.doctorId}#${normalizeTimeSlot(apt.timeSlot)}`;
@@ -806,6 +992,94 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
             specialization: apt.specialization
         }, region).catch(e => logger.error("[BOOKING] BigQuery cancellation sync failed", { error: e.message }));
 
+        // Push refund revenue to BigQuery analytics
+        if (apt.amountPaid > 0) {
+            pushRevenueToBigQuery({
+                billId: refundBillId,
+                patientId: apt.patientId,
+                doctorId: apt.doctorId || "UNKNOWN",
+                amount: -(apt.amountPaid || 0),
+                status: txStatus === "PROCESSED" ? "REFUNDED" : "REFUND_FAILED",
+                type: "REFUND",
+            }, region).catch(e => logger.error("[BOOKING] BigQuery refund revenue sync failed", { error: e.message }));
+        }
+
+        // FIX #10: Audit log for cancellation
+        try {
+            await writeAuditLog(
+                apt.patientId || "SYSTEM",
+                apt.patientId || "UNKNOWN",
+                "CANCEL_APPOINTMENT",
+                `Appointment ${apt.appointmentId} cancelled with status ${newStatus}`,
+                { region, appointmentId: apt.appointmentId, refundId, newStatus }
+            );
+        } catch (auditErr: any) {
+            logger.error("[BOOKING] Audit log failed for cancellation", { error: auditErr.message });
+        }
+
+        // Event bus: appointment cancelled
+        publishEvent(EventType.APPOINTMENT_CANCELLED, {
+            appointmentId: apt.appointmentId, patientId: apt.patientId,
+            doctorId: apt.doctorId, status: newStatus, refundId
+        }, region).catch(() => {});
+
+        // Clean up graph-data relationship entries (only if no other active appointments with same doctor)
+        if (apt.doctorId && apt.patientId) {
+            try {
+                const otherApts = await docClient.send(new QueryCommand({
+                    TableName: TABLE_APPOINTMENTS,
+                    IndexName: "PatientIndex",
+                    KeyConditionExpression: "patientId = :pid",
+                    FilterExpression: "doctorId = :did AND appointmentId <> :currentId AND #s IN (:confirmed, :inProgress, :completed)",
+                    ExpressionAttributeNames: { "#s": "status" },
+                    ExpressionAttributeValues: {
+                        ":pid": apt.patientId,
+                        ":did": apt.doctorId,
+                        ":currentId": apt.appointmentId,
+                        ":confirmed": "CONFIRMED",
+                        ":inProgress": "IN_PROGRESS",
+                        ":completed": "COMPLETED"
+                    },
+                    Limit: 1
+                }));
+
+                if (!otherApts.Items || otherApts.Items.length === 0) {
+                    const graphTable = process.env.TABLE_GRAPH || 'mediconnect-graph-data';
+                    await docClient.send(new DeleteCommand({
+                        TableName: graphTable,
+                        Key: { PK: `PATIENT#${apt.patientId}`, SK: `DOCTOR#${apt.doctorId}` }
+                    }));
+                    await docClient.send(new DeleteCommand({
+                        TableName: graphTable,
+                        Key: { PK: `DOCTOR#${apt.doctorId}`, SK: `PATIENT#${apt.patientId}` }
+                    }));
+                }
+            } catch (graphErr: any) {
+                logger.error("[BOOKING] Failed to clean graph-data on cancel", { error: graphErr.message });
+            }
+        }
+
+        // Fire-and-forget cancellation notification to patient
+        if (apt.patientId) {
+            try {
+                const patientRecord = await docClient.send(new GetCommand({
+                    TableName: process.env.DYNAMO_TABLE || 'mediconnect-patients',
+                    Key: { patientId: apt.patientId },
+                    ProjectionExpression: 'email'
+                }));
+                if (patientRecord.Item?.email) {
+                    sendNotification({
+                        region,
+                        recipientEmail: patientRecord.Item.email,
+                        subject: 'Appointment Cancelled',
+                        message: `Your appointment (${apt.appointmentId}) has been cancelled. ${refundId !== 'FAILED' ? 'A refund has been initiated.' : 'Please contact support for refund.'}`,
+                        type: 'BOOKING_CANCELLATION',
+                        metadata: { appointmentId: apt.appointmentId }
+                    }).catch(() => {});
+                }
+            } catch { /* Non-blocking */ }
+        }
+
     } catch (e: any) { logger.error("[BOOKING] Cancel appointment update failed", { error: e.message }); }
 }
 
@@ -823,6 +1097,9 @@ export const getReceipt = catchAsync(async (req: Request, res: Response) => {
 
     if (!apt) return res.status(404).json({ message: "Appointment not found" });
     if (apt.patientId !== userId) return res.status(403).json({ message: "Unauthorized" });
+
+    // FIX #7: Decrypt PHI names for PDF receipt
+    await decryptAppointmentNames(apt, region);
 
     const statusStr = apt.status || "";
     const isCancelled = statusStr.includes("CANCELLED");

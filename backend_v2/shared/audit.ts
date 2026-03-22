@@ -1,7 +1,8 @@
 import { PutCommand } from "@aws-sdk/lib-dynamodb";
 import { v4 as uuidv4 } from 'uuid';
-import { safeError } from "./logger";
+import { safeLog, safeError } from "./logger";
 import { checkForBreach } from './breach-detection';
+import { publishEvent, EventType } from './event-bus';
 
 // 🟢 PROFESSIONAL FIX: Import from the SAME folder (shared/aws-config.ts)
 // This ensures Doctor, Patient, and Booking services can all use this file.
@@ -80,10 +81,13 @@ export const writeAuditLog = async (
         const maskedActor = actorId && actorId.length > 8
             ? `${actorId.slice(0, 4)}****${actorId.slice(-4)}`
             : '****';
-        console.log(`[AUDIT][${targetRegion.toUpperCase()}] ${action} by Actor:${maskedActor} for Patient:${maskedPatient}`);
+        safeLog(`[AUDIT][${targetRegion.toUpperCase()}] ${action} by Actor:${maskedActor} for Patient:${maskedPatient}`);
 
         // Breach detection - async fire-and-forget
         checkForBreach(actorId, action, details, targetRegion).catch(() => {});
+
+        // Event bus - async fire-and-forget
+        publishEvent(EventType.AUDIT_LOG, { actorId, patientId, action, details, logId }, targetRegion).catch(() => {});
 
     } catch (error: any) {
         // 🚨 HIPAA FALLBACK

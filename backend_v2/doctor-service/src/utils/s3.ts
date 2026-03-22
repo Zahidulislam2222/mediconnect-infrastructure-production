@@ -2,6 +2,7 @@ import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 // 🟢 ARCHITECTURE FIX: Import Shared Factory (Prevents GDPR Residency leaks)
 import { getRegionalS3Client } from '../../../shared/aws-config';
+import { safeError } from '../../../shared/logger';
 
 /**
  * generatePresignedUrl - Clinical Grade File Delivery
@@ -26,7 +27,7 @@ export const generatePresignedUrl = async (
         const url = await getSignedUrl(s3Client, command, { expiresIn });
         return url;
     } catch (error) {
-        console.error('Error generating presigned URL:', error);
+        safeError('Error generating presigned URL:', error);
         return ''; 
     }
 };

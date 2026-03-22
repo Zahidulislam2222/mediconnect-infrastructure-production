@@ -141,3 +141,55 @@ metadata:
     azure.workload.identity/client-id: "__AZURE_DICOM_CLIENT_ID__"
   labels:
     azure.workload.identity/use: "true"
+
+# ==========================================
+# 🟢 6. ADMIN SERVICE IDENTITY
+# ==========================================
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admin-sa
+  namespace: mediconnect-prod
+  annotations:
+    eks.amazonaws.com/role-arn: "__EKS_ADMIN_ROLE_ARN__"
+    azure.workload.identity/client-id: "__AZURE_ADMIN_CLIENT_ID__"
+  labels:
+    azure.workload.identity/use: "true"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admin-sa
+  namespace: mediconnect-staging
+  annotations:
+    eks.amazonaws.com/role-arn: "__EKS_ADMIN_ROLE_ARN__"
+    azure.workload.identity/client-id: "__AZURE_ADMIN_CLIENT_ID__"
+  labels:
+    azure.workload.identity/use: "true"
+
+# ==========================================
+# 🟢 7. STAFF SERVICE IDENTITY
+# ==========================================
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: staff-sa
+  namespace: mediconnect-prod
+  annotations:
+    eks.amazonaws.com/role-arn: "__EKS_STAFF_ROLE_ARN__"
+    azure.workload.identity/client-id: "__AZURE_STAFF_CLIENT_ID__"
+  labels:
+    azure.workload.identity/use: "true"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: staff-sa
+  namespace: mediconnect-staging
+  annotations:
+    eks.amazonaws.com/role-arn: "__EKS_STAFF_ROLE_ARN__"
+    azure.workload.identity/client-id: "__AZURE_STAFF_CLIENT_ID__"
+  labels:
+    azure.workload.identity/use: "true"

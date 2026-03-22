@@ -26,7 +26,16 @@ COPY --chown=adminuser:admingroup backend_v2/admin-service/ .
 ENV PORT=8085
 EXPOSE 8085
 
+RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf /var/lib/apt/lists/*
+
 # Security: Drop root privileges
 USER adminuser
 
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8085} --workers 2"]
+CMD sh -c 'if [ -n "$K_SERVICE" ]; then \
+      echo "Cloud Run Detected: Bridging OIDC Identity..."; \
+      curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=sts.amazonaws.com" > /tmp/aws-token; \
+      export AWS_WEB_IDENTITY_TOKEN_FILE=/tmp/aws-token; \
+      (while true; do sleep 3000; curl -s -H "Metadata-Flavor: Google" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity?audience=sts.amazonaws.com" > /tmp/aws-token; done) & \
+      echo "Token bridged & background auto-refresh started!"; \
+    fi; \
+    uvicorn main:app --host 0.0.0.0 --port ${PORT:-8085} --workers 2'

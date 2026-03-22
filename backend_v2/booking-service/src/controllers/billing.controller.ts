@@ -3,9 +3,11 @@ import { getRegionalClient, getSSMParameter } from '../../../shared/aws-config';
 import { QueryCommand, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import Stripe from "stripe";
 import { writeAuditLog } from '../../../shared/audit';
-import { logger } from '../../../shared/logger';
+import { logger, safeError } from '../../../shared/logger';
 import { GoogleAuth } from "google-auth-library";
 import { createHash } from 'crypto';
+
+const HIPAA_SALT = process.env.HIPAA_SALT || 'mediconnect_salt';
 
 const TABLE_TRANSACTIONS = process.env.TABLE_TRANSACTIONS || "mediconnect-transactions";
 
@@ -33,7 +35,7 @@ export const getPatientBilling = async (req: Request, res: Response) => {
         if (startKey) {
             try {
                 exclusiveStartKey = JSON.parse(decodeURIComponent(startKey as string));
-            } catch (e) { console.error("Malformed startKey ignored"); }
+            } catch (e) { safeError("Malformed startKey ignored"); }
         }
 
         // 🟢 IDOR PROTECTION: Only the patient themselves can view these financial records
@@ -239,11 +241,11 @@ export const pushRevenueToBigQuery = async (txData: any, region: string) => {
                 rows:[{
                     json: {
                         transaction_id: txData.billId,
-                        patient_id: txData.patientId,
-                        doctor_id: txData.doctorId, 
+                        patient_id: txData.patientId ? createHash('sha256').update(txData.patientId + HIPAA_SALT).digest('hex') : 'UNKNOWN',
+                        doctor_id: txData.doctorId,
                         amount: txData.amount,
                         currency: "USD",
-                        status: "PAID",
+                        status: txData.status || "PAID",
                         timestamp: new Date().toISOString()
                     }
                 }]

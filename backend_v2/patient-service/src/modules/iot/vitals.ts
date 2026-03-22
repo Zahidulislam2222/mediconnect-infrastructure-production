@@ -3,6 +3,8 @@ import { getRegionalClient, getSSMParameter } from '../../../../shared/aws-confi
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { GoogleAuth } from "google-auth-library";
 import { writeAuditLog } from "../../../../shared/audit";
+import { safeError } from '../../../../shared/logger';
+import { createHash } from 'crypto';
 
 export const getVitals = async (req: Request, res: Response) => {
     try {
@@ -98,7 +100,7 @@ export const getVitals = async (req: Request, res: Response) => {
         });
 
     } catch (err: any) {
-        console.error("Vitals Error:", err.message);
+        safeError("Vitals Error:", err.message);
         res.status(500).json({ error: "Internal Server Error during vitals retrieval." });
     }
 };
@@ -133,7 +135,7 @@ export const pushVitalToBigQuery = async (patientId: string, vitalData: any, reg
                 rows: [{
                     json: {
                         data: JSON.stringify({
-                            patientId: patientId,
+                            patientId: createHash('sha256').update(patientId + (process.env.HIPAA_SALT || 'mediconnect_salt')).digest('hex'),
                             timestamp: new Date().toISOString(),
                             region: region,
                             heartRate: vitalData.heartRate,
@@ -147,6 +149,6 @@ export const pushVitalToBigQuery = async (patientId: string, vitalData: any, reg
         });
         
     } catch (err: any) {
-        console.error(`❌ BigQuery IoT Sync Failed [${region}]:`, err.message);
+        safeError(`❌ BigQuery IoT Sync Failed [${region}]:`, err.message);
     }
 };

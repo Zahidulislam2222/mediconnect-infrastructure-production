@@ -5,7 +5,8 @@ import { getRegionalClient } from '../../../shared/aws-config';
 import { PutCommand, GetCommand, DeleteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { v4 as uuidv4 } from "uuid";
 import { writeAuditLog } from "../../../shared/audit";
-import { logger } from "../../../shared/logger";
+import { safeLog, safeError } from "../../../shared/logger";
+import { publishEvent, EventType } from '../../../shared/event-bus';
 
 const catchAsync = (fn: any) => (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(fn(req, res, next)).catch(next);
@@ -84,7 +85,7 @@ export const createOrJoinSession = catchAsync(async (req: Request, res: Response
                     pipelineId = pipelineRes.MediaCapturePipeline?.MediaPipelineId;
             await writeAuditLog(userId, apt.patientId, "RECORDING_STARTED", "Patient consented to video recording", { region });
         } catch (recErr: any) {
-            logger.error("[VIDEO] Failed to start recording", { error: recErr.message });
+            safeError("[VIDEO] Failed to start recording", { error: recErr.message });
                 }
             }
 
@@ -110,13 +111,13 @@ export const createOrJoinSession = catchAsync(async (req: Request, res: Response
                 ExpressionAttributeNames: { "#res": "resource", "#stat": "status" },
                 ExpressionAttributeValues: { ":s": "arrived", ":arrived": true }
             }));
-        } catch (e: any) { logger.warn("[VIDEO] Could not update FHIR status", { error: e.message }); }
+        } catch (e: any) { safeLog("[VIDEO] Could not update FHIR status", { error: e.message }); }
 
         await writeAuditLog(userId, userId, "VIDEO_SESSION_JOINED", `Joined appointment ${appointmentId}`, { region, ipAddress: req.ip });
 
         res.json({ Meeting: meeting, Attendee: attendeeRes.Attendee });
     } catch (error: any) {
-        logger.error("[VIDEO] Video session error", { error: error.message });
+        safeError("[VIDEO] Video session error", { error: error.message });
         res.status(500).json({ error: "Video session failed" });
     }
 });
@@ -170,11 +171,14 @@ export const endSession = catchAsync(async (req: Request, res: Response) => {
             }));
 
             await writeAuditLog(userId, userId, "VIDEO_SESSION_ENDED", `Meeting ${appointmentId} ended`, { region, ipAddress: req.ip });
+
+            // Event bus: appointment completed via video session end
+            publishEvent(EventType.APPOINTMENT_COMPLETED, { appointmentId, userId, status: "COMPLETED" }, region).catch(() => {});
         }
 
         res.json({ success: true, message: "Meeting ended successfully" });
     } catch (error: any) {
-        logger.error("[VIDEO] Failed to end session", { error: error.message });
+        safeError("[VIDEO] Failed to end session", { error: error.message });
         res.status(500).json({ error: "Failed to end session" });
     }
 });

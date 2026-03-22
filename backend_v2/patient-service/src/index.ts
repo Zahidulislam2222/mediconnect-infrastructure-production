@@ -133,7 +133,7 @@ async function loadSecrets() {
     const ssm = getRegionalSSMClient(region);
 
     try {
-        console.log(`🔐 Synchronizing Patient secrets with AWS Vault [${region}]...`);
+        safeLog(`Synchronizing Patient secrets with AWS Vault [${region}]...`);
 
         const cmdInfra = new GetParametersCommand({
             Names: [
@@ -186,7 +186,7 @@ async function loadSecrets() {
         if (!process.env.COGNITO_USER_POOL_ID) process.env.COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID_US;
         if (!process.env.COGNITO_CLIENT_ID) process.env.COGNITO_CLIENT_ID = process.env.COGNITO_CLIENT_ID_US_PATIENT;
 
-        console.log("✅ AWS Vault Sync Complete.");
+        safeLog("AWS Vault Sync Complete.");
     } catch (e: any) {
         safeError(`❌ FATAL: Vault Sync Failed.`, e.message);
         process.exit(1);
@@ -196,7 +196,7 @@ async function loadSecrets() {
 // --- 4. IOT BRIDGE (AUTHENTICATED) ---
 const startIoTBridge = async () => { 
     if (!process.env.MQTT_BROKER_URL) {
-        console.warn("⚠️ MQTT Bridge Skipped: No Broker URL Found");
+        safeLog("⚠️ MQTT Bridge Skipped: No Broker URL Found");
         return;
     }
 
@@ -204,7 +204,7 @@ const startIoTBridge = async () => {
         const brokerHost = process.env.MQTT_BROKER_URL.replace('mqtts://', '').replace('wss://', '').split('/')[0];
         const brokerRegion = brokerHost.split('.')[2] || 'us-east-1';
 
-        console.log(`📡 Calculating Secure SigV4 Connection for[${brokerRegion}]...`);
+        safeLog(`📡 Calculating Secure SigV4 Connection for[${brokerRegion}]...`);
 
         const credentialProvider = defaultProvider();
         const credentials = await credentialProvider(); 
@@ -226,12 +226,12 @@ const startIoTBridge = async () => {
         });
         
         mqttClient.on('connect', () => {
-            console.log("✅ Connected to AWS IoT Core (Securely Signed)");
+            safeLog("✅ Connected to AWS IoT Core (Securely Signed)");
             mqttClient.subscribe('mediconnect/vitals/#');
         });
 
         mqttClient.on('error', (err) => {
-            console.error("⚠️ MQTT Connection Error (Non-Fatal):", err.message);
+            safeError("⚠️ MQTT Connection Error (Non-Fatal):", err.message);
         });
 
         mqttClient.on('message', async (topic, message) => {
@@ -249,19 +249,19 @@ const startIoTBridge = async () => {
                 }
                 io.to(`patient_${patientId}`).emit('vital_update', { ...payload, timestamp: new Date().toISOString() });
                 
-                pushVitalToBigQuery(patientId, payload, region).catch((err: any) => console.error(err));
+                pushVitalToBigQuery(patientId, payload, region).catch((err: any) => safeError(err));
 
-            } catch (e) { console.error("MQTT Message Error"); }
+            } catch (e) { safeError("MQTT Message Error"); }
         });
 
         io.on('connection', (socket) => {
             socket.on('join_monitoring', (pid) => {
                 socket.join(`patient_${pid}`);
-                console.log(`👁️ Monitoring session started for patient: ${pid}`);
+                safeLog(`👁️ Monitoring session started for patient: ${pid}`);
             });
         });
     } catch (error: any) {
-        console.error("❌ Failed to initialize IoT Bridge:", error.message);
+        safeError("❌ Failed to initialize IoT Bridge:", error.message);
     }
 };
 

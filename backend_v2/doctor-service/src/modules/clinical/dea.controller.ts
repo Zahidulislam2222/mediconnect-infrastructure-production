@@ -8,6 +8,7 @@
 
 import { Request, Response } from 'express';
 import { writeAuditLog } from '../../../../shared/audit';
+import { safeError } from '../../../../shared/logger';
 
 const extractRegion = (req: Request): string => {
     const raw = req.headers['x-user-region'];
@@ -161,7 +162,7 @@ export const validateDEA = async (req: Request, res: Response) => {
 
         res.json(result);
     } catch (error: any) {
-        console.error('DEA validation error:', error);
+        safeError('DEA validation error:', error);
         res.status(500).json({ error: 'DEA validation failed' });
     }
 };

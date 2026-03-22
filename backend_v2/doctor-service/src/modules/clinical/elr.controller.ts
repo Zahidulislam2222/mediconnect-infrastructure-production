@@ -8,6 +8,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { PutCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
+import { safeError } from '../../../../shared/logger';
+import { validateUSCore } from '../../../../shared/us-core-profiles';
 
 const TABLE = process.env.TABLE_ELR || 'mediconnect-elr-reports';
 
@@ -198,6 +200,17 @@ export const createELR = async (req: Request, res: Response) => {
             createdAt: now,
         };
 
+        // ─── US Core DiagnosticReport validation before write ────────────
+        const fhirDiagnosticReport = toFHIRDiagnosticReport(report);
+        const validation = validateUSCore(fhirDiagnosticReport);
+        if (!validation.valid) {
+            return res.status(422).json({
+                error: 'US Core DiagnosticReport validation failed',
+                profile: validation.profile,
+                issues: validation.errors,
+            });
+        }
+
         const db = getRegionalClient(region);
         await db.send(new PutCommand({ TableName: TABLE, Item: report }));
 
@@ -218,7 +231,7 @@ export const createELR = async (req: Request, res: Response) => {
                     ? 'This lab result is REPORTABLE to public health authorities.'
                     : 'Lab result recorded. Not a reportable condition.',
             },
-            fhirDiagnosticReport: toFHIRDiagnosticReport(report),
+            fhirDiagnosticReport,
             hl7v2: {
                 messageType: 'ORU^R01',
                 version: '2.5.1',
@@ -226,7 +239,7 @@ export const createELR = async (req: Request, res: Response) => {
             }
         });
     } catch (error: any) {
-        console.error('Create ELR error:', error);
+        safeError('Create ELR error:', error);
         res.status(500).json({ error: 'Failed to create lab report' });
     }
 };
@@ -289,7 +302,7 @@ export const listELRs = async (req: Request, res: Response) => {
             }))
         });
     } catch (error: any) {
-        console.error('List ELRs error:', error);
+        safeError('List ELRs error:', error);
         res.status(500).json({ error: 'Failed to list lab reports' });
     }
 };

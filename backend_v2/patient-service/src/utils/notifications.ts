@@ -1,4 +1,5 @@
 import admin from 'firebase-admin';
+import { safeError } from '../../../shared/logger';
 
 // Initialize with a Service Account (Architecture 2: Store this in SSM later!)
 if (!admin.apps.length) {
@@ -17,6 +18,6 @@ export const sendPushNotification = async (token: string, title: string, body: s
             android: { priority: 'high' }
         });
     } catch (error) {
-        console.error("Push Error:", error);
+        safeError("Push Error:", error);
     }
 };

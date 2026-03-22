@@ -5,8 +5,10 @@ import { v4 as uuidv4 } from "uuid";
 import { PutCommand, QueryCommand, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 
 // 🟢 ARCHITECTURE FIX: Import Shared Factories (Prevents Socket Exhaustion)
-import { getRegionalClient, getRegionalS3Client } from '../../../../shared/aws-config'; 
+import { getRegionalClient, getRegionalS3Client } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
+import { safeError } from '../../../../shared/logger';
+import { validateUSCore } from '../../../../shared/us-core-profiles';
 
 const TABLE_EHR = "mediconnect-health-records";
 
@@ -112,7 +114,7 @@ export const handleEhrAction = async (req: Request, res: Response) => {
             }));
             if (docCheck.Item) isDoctor = true;
         } catch (e) { 
-            console.error("Doctor Check Failed", e); 
+            safeError("Doctor Check Failed", e);
         }
     }
     
@@ -181,11 +183,21 @@ export const handleEhrAction = async (req: Request, res: Response) => {
                     }];
                 }
 
+                // ─── US Core validation before write ─────────────────────────
+                const noteValidation = validateUSCore(fhirImpression);
+                if (!noteValidation.valid) {
+                    return res.status(422).json({
+                        error: 'US Core ClinicalImpression validation failed',
+                        profile: noteValidation.profile,
+                        issues: noteValidation.errors,
+                    });
+                }
+
                 await regionalDb.send(new PutCommand({
                     TableName: TABLE_EHR,
                     Item: {
-                        patientId, recordId: noteId, type: 'NOTE', summary: note,       
-                        title: title || "Clinical Note", isLocked: true,      
+                        patientId, recordId: noteId, type: 'NOTE', summary: note,
+                        title: title || "Clinical Note", isLocked: true,
                         resource: fhirImpression, createdAt: new Date().toISOString()
                     }
                 }));
@@ -211,13 +223,23 @@ export const handleEhrAction = async (req: Request, res: Response) => {
                     date: new Date().toISOString()
                 };
 
+                // ─── US Core validation before write ─────────────────────────
+                const docValidation = validateUSCore(fhirDocument);
+                if (!docValidation.valid) {
+                    return res.status(422).json({
+                        error: 'US Core DocumentReference validation failed',
+                        profile: docValidation.profile,
+                        issues: docValidation.errors,
+                    });
+                }
+
                 await regionalDb.send(new PutCommand({
                     TableName: TABLE_EHR,
                     Item: {
                         patientId, recordId, fileName: fName, fileType, s3Key,
                         description: description || "Medical Upload",
                         uploadedBy: authUser.sub,
-                        resource: fhirDocument, 
+                        resource: fhirDocument,
                         createdAt: new Date().toISOString()
                     }
                 }));

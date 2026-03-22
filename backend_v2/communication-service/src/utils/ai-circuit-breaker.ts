@@ -2,14 +2,8 @@ import { BedrockRuntimeClient, InvokeModelCommand } from "@aws-sdk/client-bedroc
 import { GoogleAuth } from "google-auth-library";
 import { OpenAI } from "openai";
 import { getSSMParameter } from '../../../shared/aws-config';
-import winston from "winston";
+import { logger } from '../../../shared/logger';
 import { scrubPII } from "./fhir-mapper";
-
-const logger = winston.createLogger({
-    level: 'info',
-    format: winston.format.json(),
-    transports: [new winston.transports.Console()],
-});
 
 interface AIResponse {
     text: string;

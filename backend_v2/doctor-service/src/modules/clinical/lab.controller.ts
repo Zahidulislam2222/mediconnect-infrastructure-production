@@ -10,6 +10,8 @@ import { PutCommand, QueryCommand, GetCommand, UpdateCommand, ScanCommand } from
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
 import { validateUSCore } from '../../../../shared/us-core-profiles';
+import { safeError } from '../../../../shared/logger';
+import { publishEvent, EventType } from '../../../../shared/event-bus';
 
 const TABLE = process.env.TABLE_LAB_ORDERS || 'mediconnect-lab-orders';
 
@@ -240,7 +242,7 @@ export const createLabOrder = async (req: Request, res: Response) => {
             }
         });
     } catch (error: any) {
-        console.error('Create lab order error:', error);
+        safeError('Create lab order error:', error);
         res.status(500).json({ error: 'Failed to create lab order' });
     }
 };
@@ -300,7 +302,7 @@ export const getLabOrders = async (req: Request, res: Response) => {
             }))
         });
     } catch (error: any) {
-        console.error('Get lab orders error:', error);
+        safeError('Get lab orders error:', error);
         res.status(500).json({ error: 'Failed to retrieve lab orders' });
     }
 };
@@ -337,7 +339,7 @@ export const getLabOrder = async (req: Request, res: Response) => {
             fhirServiceRequest: toFHIRServiceRequest(order),
         });
     } catch (error: any) {
-        console.error('Get lab order error:', error);
+        safeError('Get lab order error:', error);
         res.status(500).json({ error: 'Failed to retrieve lab order' });
     }
 };
@@ -375,6 +377,43 @@ export const submitLabResults = async (req: Request, res: Response) => {
 
         const order = Items[0] as any;
         const now = new Date().toISOString();
+
+        // ─── US Core DiagnosticReport validation before persisting results ───
+        const diagnosticReport = {
+            resourceType: 'DiagnosticReport',
+            id: orderId,
+            status: 'final',
+            category: [{
+                coding: [{
+                    system: 'http://terminology.hl7.org/CodeSystem/v2-0074',
+                    code: 'LAB',
+                    display: 'Laboratory',
+                }]
+            }],
+            code: {
+                coding: (order.tests || []).map((t: any) => ({
+                    system: 'http://loinc.org',
+                    code: t.loinc,
+                    display: t.display,
+                }))
+            },
+            subject: { reference: `Patient/${order.patientId}` },
+            effectiveDateTime: now,
+            issued: now,
+            result: results.map((r: any, idx: number) => ({
+                reference: `Observation/${orderId}-obs-${idx}`,
+                display: `${r.display || LAB_TESTS.find(t => t.loinc === r.loinc)?.display || ''}: ${r.value}`,
+            })),
+        };
+
+        const validation = validateUSCore(diagnosticReport);
+        if (!validation.valid) {
+            return res.status(422).json({
+                error: 'US Core DiagnosticReport validation failed',
+                profile: validation.profile,
+                issues: validation.errors,
+            });
+        }
 
         // Update order with results
         await db.send(new UpdateCommand({
@@ -426,6 +465,9 @@ export const submitLabResults = async (req: Request, res: Response) => {
             { region, orderId, resultCount: results.length }
         );
 
+        // Event bus: lab results ready
+        publishEvent(EventType.LAB_RESULT_READY, { orderId, patientId: order.patientId, resultCount: results.length }, region).catch(() => {});
+
         res.json({
             message: 'Lab results submitted successfully',
             orderId,
@@ -438,7 +480,7 @@ export const submitLabResults = async (req: Request, res: Response) => {
             }
         });
     } catch (error: any) {
-        console.error('Submit lab results error:', error);
+        safeError('Submit lab results error:', error);
         res.status(500).json({ error: 'Failed to submit lab results' });
     }
 };

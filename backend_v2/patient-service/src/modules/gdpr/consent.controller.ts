@@ -3,6 +3,8 @@ import { PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { randomUUID } from 'crypto';
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
+import { safeError } from '../../../../shared/logger';
+import { publishEvent, EventType } from '../../../../shared/event-bus';
 
 // =============================================================================
 // GDPR Consent Versioning (Article 7 - Conditions for Consent)
@@ -104,7 +106,7 @@ export const getConsent = async (req: Request, res: Response) => {
             history
         });
     } catch (error: any) {
-        console.error('[Consent] GET failed:', error);
+        safeError('[Consent] GET failed:', error);
         return res.status(500).json({ error: 'Failed to retrieve consent records' });
     }
 };
@@ -157,6 +159,9 @@ export const updateConsent = async (req: Request, res: Response) => {
             consentType
         });
 
+        // Event bus: consent updated
+        publishEvent(EventType.CONSENT_UPDATED, { patientId, consentType, status: 'granted', policyVersion }, region).catch(() => {});
+
         // FHIR R4: Return the consent as a FHIR Consent resource
         const fhirConsent = {
             resourceType: "Consent",
@@ -183,7 +188,7 @@ export const updateConsent = async (req: Request, res: Response) => {
             fhirResource: fhirConsent
         });
     } catch (error: any) {
-        console.error('[Consent] PUT failed:', error);
+        safeError('[Consent] PUT failed:', error);
         return res.status(500).json({ error: 'Failed to record consent' });
     }
 };
@@ -276,7 +281,7 @@ export const withdrawConsent = async (req: Request, res: Response) => {
             withdrawals: withdrawalRecords
         });
     } catch (error: any) {
-        console.error('[Consent] DELETE failed:', error);
+        safeError('[Consent] DELETE failed:', error);
         return res.status(500).json({ error: 'Failed to withdraw consent' });
     }
 };

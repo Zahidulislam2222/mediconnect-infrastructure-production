@@ -4,6 +4,7 @@ import { PutCommand, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { writeAuditLog } from '../../../../shared/audit';
 import { safeLog, safeError } from '../../../../shared/logger';
 import { v4 as uuidv4 } from "uuid";
+import { publishEvent, EventType } from '../../../../shared/event-bus';
 
 const TABLE_PATIENTS = process.env.DYNAMO_TABLE || "mediconnect-patients";
 const TABLE_HL7_MESSAGES = "mediconnect-hl7-messages";
@@ -282,6 +283,9 @@ export const receiveHL7Message = async (req: Request, res: Response) => {
     const messageId = uuidv4();
     const messageKey = `${msg.messageType}^${msg.triggerEvent}`;
 
+    // Event bus: HL7 message received
+    publishEvent(EventType.HL7_MESSAGE_RECEIVED, { messageId, messageType: messageKey, sendingFacility: msg.sendingFacility }, region).catch(() => {});
+
     try {
         let fhirResources: any = {};
         let processedType = "";
@@ -349,6 +353,9 @@ export const receiveHL7Message = async (req: Request, res: Response) => {
             `Type: ${messageKey}, ID: ${msg.messageControlId}, Mapped: ${processedType}`,
             { region, ipAddress: req.ip }
         );
+
+        // Event bus: HL7 message processed
+        publishEvent(EventType.HL7_MESSAGE_PROCESSED, { messageId, messageType: messageKey, processedType, patientId: fhirResources.patient?.id }, region).catch(() => {});
 
         safeLog(`HL7 ${messageKey} processed: ${msg.messageControlId}`);
 

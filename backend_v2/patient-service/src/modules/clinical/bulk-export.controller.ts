@@ -101,6 +101,44 @@ export const startBulkExport = async (req: Request, res: Response) => {
         const region = extractRegion(req);
         const db = getRegionalClient(region);
 
+        // FHIR Bulk Data Access IG content negotiation
+        const acceptHeader = req.headers['accept'] || '';
+        const outputFormat = req.query._outputFormat as string || '';
+
+        const SUPPORTED_FORMATS = [
+            'application/fhir+ndjson',
+            'application/ndjson',
+            'ndjson'
+        ];
+
+        // If _outputFormat specified, validate it
+        if (outputFormat && !SUPPORTED_FORMATS.includes(outputFormat)) {
+            res.status(400).json({
+                resourceType: 'OperationOutcome',
+                issue: [{
+                    severity: 'error',
+                    code: 'invalid',
+                    diagnostics: `Unsupported _outputFormat: ${outputFormat}. Supported: ${SUPPORTED_FORMATS.join(', ')}`
+                }]
+            });
+            return;
+        }
+
+        // If Accept header specified and not compatible
+        if (acceptHeader && acceptHeader !== '*/*' && !SUPPORTED_FORMATS.some(f => acceptHeader.includes(f)) && !acceptHeader.includes('application/json')) {
+            res.status(406).json({
+                resourceType: 'OperationOutcome',
+                issue: [{
+                    severity: 'error',
+                    code: 'not-supported',
+                    diagnostics: `Accept header must include application/fhir+ndjson or application/ndjson`
+                }]
+            });
+            return;
+        }
+
+        await writeAuditLog(user.id, 'BULK_EXPORT', 'START_BULK_EXPORT', 'Started bulk FHIR export', { region });
+
         // Only doctors/admins can run population exports
         if (!user.isDoctor && !user.isAdmin) {
             return res.status(403).json({ error: 'Only doctors or admins can initiate bulk exports' });

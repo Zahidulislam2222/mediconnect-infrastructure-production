@@ -9,6 +9,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { PutCommand, QueryCommand, GetCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
+import { safeError } from '../../../../shared/logger';
+import { validateUSCore } from '../../../../shared/us-core-profiles';
 
 const TABLE = process.env.TABLE_ECR || 'mediconnect-ecr-reports';
 const TABLE_PATIENTS = process.env.DYNAMO_TABLE || 'mediconnect-patients';
@@ -210,14 +212,23 @@ export const createECR = async (req: Request, res: Response) => {
             createdAt: now,
         };
 
+        // ─── US Core validation before persisting ─────────────────────────
+        const composition = buildEICRComposition(report);
+        const validation = validateUSCore(composition);
+        if (!validation.valid) {
+            return res.status(422).json({
+                error: 'US Core Composition validation failed',
+                profile: validation.profile,
+                issues: validation.errors,
+            });
+        }
+
         await db.send(new PutCommand({ TableName: TABLE, Item: report }));
 
         await writeAuditLog(user.id, patientId, 'CREATE_ECR',
             `Filed eCR: ${condition.display} (${condition.code}) — ${condition.urgency} reporting`,
             { region, reportId, conditionCode: condition.code, urgency: condition.urgency }
         );
-
-        const composition = buildEICRComposition(report);
 
         res.status(201).json({
             report: {
@@ -231,7 +242,7 @@ export const createECR = async (req: Request, res: Response) => {
             fhirComposition: composition,
         });
     } catch (error: any) {
-        console.error('Create eCR error:', error);
+        safeError('Create eCR error:', error);
         res.status(500).json({ error: 'Failed to create electronic case report' });
     }
 };
@@ -272,7 +283,7 @@ export const getECR = async (req: Request, res: Response) => {
             fhirComposition: buildEICRComposition(report),
         });
     } catch (error: any) {
-        console.error('Get eCR error:', error);
+        safeError('Get eCR error:', error);
         res.status(500).json({ error: 'Failed to retrieve case report' });
     }
 };
@@ -336,7 +347,7 @@ export const listECRs = async (req: Request, res: Response) => {
             }))
         });
     } catch (error: any) {
-        console.error('List eCRs error:', error);
+        safeError('List eCRs error:', error);
         res.status(500).json({ error: 'Failed to list case reports' });
     }
 };

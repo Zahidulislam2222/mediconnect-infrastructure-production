@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
-import { CognitoJwtVerifier } from "aws-jwt-verify"; 
+import { CognitoJwtVerifier } from "aws-jwt-verify";
 import { COGNITO_CONFIG } from '../../../shared/aws-config';
 import { writeAuditLog } from '../../../shared/audit';
+import { safeLog, safeError } from '../../../shared/logger';
 
 
 const verifiers: Record<string, any> = {};
@@ -22,7 +23,7 @@ const getVerifier = async (userRegion: string) => {
     }
 
     try {
-        console.log(`🔐 Initializing Doctor Auth Gatekeeper for ${regionKey}...`);
+        safeLog(`Initializing Doctor Auth Gatekeeper for ${regionKey}...`);
 
         // 4. 🟢 Use Official Verifier (Auto-manages JWKS rotation and caching)
         const verifier = CognitoJwtVerifier.create({
@@ -35,7 +36,7 @@ const getVerifier = async (userRegion: string) => {
         return verifier;
 
     } catch (error: any) {
-        console.error(`❌ Critical Auth Failure for ${regionKey}:`, error.message);
+        safeError(`Critical Auth Failure for ${regionKey}:`, error.message);
         throw error;
     }
 };
@@ -92,7 +93,7 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
         next();
 
     } catch (err: any) {
-        console.warn(`🔒 Auth Middleware Blocked Request: ${err.message}`);
+        safeError(`Auth Middleware Blocked Request: ${err.message}`);
         
         if (err.message.includes('AUTH_CONFIG_MISSING')) {
             res.status(503).json({ error: "Service unavailable during auth initialization" });

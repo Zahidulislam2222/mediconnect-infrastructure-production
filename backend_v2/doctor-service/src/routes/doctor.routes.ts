@@ -9,10 +9,32 @@ import { uploadDicom } from '../modules/clinical/imaging.controller';
 
 // 🟢 FIX #10: Zod schema validation
 import { validate, CreateDoctorBody, UpdateDoctorBody } from '../../../shared/validation';
+import { z } from 'zod';
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 const router = Router();
+
+// ─── Zod schemas for verification & closure routes ──────────────────────
+const DoctorIdParams = z.object({
+    id: z.string().min(1, 'Doctor ID is required'),
+});
+
+const VerifyDiplomaBody = z.object({
+    s3Key: z.string().min(1, 'S3 key is required'),
+    bucketName: z.string().min(1, 'Bucket name is required'),
+    expectedName: z.string().min(1, 'Expected name is required'),
+});
+
+const VerifyIdentityBody = z.object({
+    selfieImage: z.string().min(1, 'Selfie image is required'),
+    idImage: z.string().optional(),
+    gender: z.string().optional(),
+});
+
+const RequestClosureBody = z.object({
+    reason: z.string().optional(),
+});
 
 // =============================================================================
 // 1. LOBBY ROUTES (Needs Auth, but user might not be verified yet)
@@ -32,8 +54,8 @@ router.get('/doctors/:id', authMiddleware, DoctorController.getDoctor);
 // 2. VERIFICATION ROUTES (AI-Driven)
 // Obviously, they need access to these to become verified!
 // =============================================================================
-router.post('/doctors/:id/verify-diploma', authMiddleware, DoctorController.verifyDiploma);
-router.post('/doctors/:id/verify-identity', authMiddleware, DoctorController.verifyDoctorIdentity);
+router.post('/doctors/:id/verify-diploma', authMiddleware, validate({ params: DoctorIdParams, body: VerifyDiplomaBody }), DoctorController.verifyDiploma);
+router.post('/doctors/:id/verify-identity', authMiddleware, validate({ params: DoctorIdParams, body: VerifyIdentityBody }), DoctorController.verifyDoctorIdentity);
 
 
 // =============================================================================
@@ -62,7 +84,7 @@ router.get('/doctors/auth/google', authMiddleware, requireDoctorVerification, Do
 router.delete('/doctors/:id/calendar', authMiddleware, requireDoctorVerification, DoctorController.disconnectGoogleCalendar);
 
 // CLOSURE REQUEST
-router.post('/doctors/:id/request-closure', authMiddleware, requireDoctorVerification, DoctorController.requestDoctorClosure);
+router.post('/doctors/:id/request-closure', authMiddleware, requireDoctorVerification, validate({ params: DoctorIdParams, body: RequestClosureBody }), DoctorController.requestDoctorClosure);
 
 router.get('/doctors/auth/google/callback', DoctorController.googleCallback);
 

@@ -33,6 +33,7 @@ import { searchMPI, linkPatients, getPatientLinks, scanDuplicates } from '../mod
 import { createCarePlan, getPatientCarePlans, getCarePlan, updateCarePlan, getCarePlanCategories } from '../modules/clinical/care-plan.controller';
 import { startBlueButtonAuth, handleBlueButtonCallback, getBlueButtonPatient, getBlueButtonEOB, getBlueButtonCoverage, getBlueButtonStatus, disconnectBlueButton } from '../modules/clinical/blue-button.controller';
 import { getCapabilityStatement, getSmartConfiguration, getSmartLaunchContext } from '../../../shared/fhir-metadata';
+import { registerLaunchContext, smartAuthorize, smartToken } from '../../../shared/smart-auth';
 
 // 🟢 FIX #10: Zod schema validation
 import {
@@ -41,6 +42,22 @@ import {
     UpdateProfileBody,
     VerifyIdentityBody,
 } from '../../../shared/validation';
+import { z } from 'zod';
+
+// Inline Zod schemas for routes missing validation
+const UpdateConsentBody = z.object({ policyVersion: z.string().min(1), consentType: z.string().min(1) });
+const ReceiveHL7Body = z.object({ message: z.string().min(1) });
+const CreateAllergyBody = z.object({ substance: z.string().optional(), code: z.any().optional(), category: z.enum(['food', 'medication', 'environment', 'biologic']).optional(), criticality: z.enum(['low', 'high', 'unable-to-assess']).optional(), clinicalStatus: z.string().optional(), notes: z.string().optional(), reactions: z.array(z.any()).optional() });
+const UpdateAllergyBody = z.object({ clinicalStatus: z.string().optional(), verificationStatus: z.string().optional(), criticality: z.string().optional(), notes: z.string().optional(), reactions: z.array(z.any()).optional() });
+const CreateECRBody = z.object({ patientId: z.string().min(1), conditionCode: z.string().min(1), conditionDisplay: z.string().optional(), encounterDate: z.string().optional(), clinicalNotes: z.string().optional() });
+const RecordImmunizationBody = z.object({ patientId: z.string().min(1), cvxCode: z.string().min(1), vaccineName: z.string().optional(), administrationDate: z.string().optional(), lotNumber: z.string().optional(), site: z.string().optional(), route: z.string().optional(), notes: z.string().optional() });
+const UpdateImmunizationBody = z.object({ status: z.string().optional(), notes: z.string().optional(), lotNumber: z.string().optional() });
+const SubmitSDOHBody = z.object({ patientId: z.string().min(1), responses: z.array(z.object({ questionId: z.string(), answerCode: z.string() })).min(1) });
+const SearchMPIBody = z.object({ firstName: z.string().optional(), lastName: z.string().optional(), dob: z.string().optional(), gender: z.string().optional(), phone: z.string().optional(), email: z.string().optional() });
+const LinkPatientsBody = z.object({ sourcePatientId: z.string().min(1), targetPatientId: z.string().min(1), linkType: z.enum(['duplicate', 'refer']).optional() });
+const CreateCarePlanBody = z.object({ patientId: z.string().min(1), title: z.string().min(1), description: z.string().optional(), startDate: z.string().optional(), conditions: z.array(z.any()).optional(), goals: z.array(z.any()).optional(), activities: z.array(z.any()).optional() });
+const UpdateCarePlanBody = z.object({ status: z.string().optional(), title: z.string().optional(), description: z.string().optional(), goals: z.array(z.any()).optional(), activities: z.array(z.any()).optional() });
+const StartExportQuery = z.object({ _type: z.string().optional(), _since: z.string().optional(), _outputFormat: z.string().optional() });
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
@@ -113,6 +130,10 @@ router.get('/public/knowledge/:id', getPublicArticle);
 router.get('/fhir/metadata', getCapabilityStatement);
 router.get('/.well-known/smart-configuration', getSmartConfiguration);
 
+// SMART on FHIR Authorization (public — no auth per SMART spec)
+router.get('/fhir/authorize', smartAuthorize);
+router.post('/fhir/token', smartToken);
+
 // ==========================================
 // 🔒 2. SECURE BOUNDARY (Token Required)
 // ==========================================
@@ -131,7 +152,7 @@ router.get('/me/export', requireIdentityVerification, exportPatientData);
 
 // GDPR Consent Management (Art. 7)
 router.get('/me/consent', getConsent);
-router.put('/me/consent', updateConsent);
+router.put('/me/consent', validate({ body: UpdateConsentBody }), updateConsent);
 router.delete('/me/consent', withdrawConsent);
 
 // FHIR Coverage (Insurance)
@@ -152,7 +173,7 @@ router.put(['/patients/:id', '/:id'], requireIdentityVerification, validate({ bo
 // ==========================================
 // 🔗 5. HL7 v2.x INTEGRATION LAYER
 // ==========================================
-router.post('/hl7/receive', receiveHL7Message);
+router.post('/hl7/receive', validate({ body: ReceiveHL7Body }), receiveHL7Message);
 router.get('/hl7/messages', getHL7Messages);
 router.get('/hl7/supported', getSupportedTypes);
 
@@ -166,15 +187,15 @@ router.get('/patients/:patientId/cda', generatePatientCDA);
 // ==========================================
 router.get('/allergies/common', getCommonAllergens);
 router.get('/patients/:patientId/allergies', getPatientAllergies);
-router.post('/patients/:patientId/allergies', createAllergy);
-router.put('/patients/:patientId/allergies/:allergyId', updateAllergy);
+router.post('/patients/:patientId/allergies', validate({ body: CreateAllergyBody }), createAllergy);
+router.put('/patients/:patientId/allergies/:allergyId', validate({ body: UpdateAllergyBody }), updateAllergy);
 router.delete('/patients/:patientId/allergies/:allergyId', deleteAllergy);
 
 // ==========================================
 // 🏛️ 8. eCR (Electronic Case Reporting)
 // ==========================================
 router.get('/public-health/reportable-conditions', getReportableConditions);
-router.post('/public-health/ecr', createECR);
+router.post('/public-health/ecr', validate({ body: CreateECRBody }), createECR);
 router.get('/public-health/ecr', listECRs);
 router.get('/public-health/ecr/:reportId', getECR);
 
@@ -183,14 +204,14 @@ router.get('/public-health/ecr/:reportId', getECR);
 // ==========================================
 router.get('/immunizations/cvx/search', searchCVXCodes);
 router.get('/immunizations/cvx/groups', getCVXGroups);
-router.post('/immunizations', recordImmunization);
+router.post('/immunizations', validate({ body: RecordImmunizationBody }), recordImmunization);
 router.get('/immunizations/:patientId', getPatientImmunizations);
-router.put('/immunizations/:patientId/:immunizationId', updateImmunization);
+router.put('/immunizations/:patientId/:immunizationId', validate({ body: UpdateImmunizationBody }), updateImmunization);
 
 // ==========================================
 // 📦 10. BULK FHIR $export
 // ==========================================
-router.post('/fhir/\\$export', startBulkExport);
+router.post('/fhir/\\$export', validate({ query: StartExportQuery }), startBulkExport);
 router.get('/fhir/\\$export-poll/:exportId', pollBulkExport);
 router.get('/fhir/\\$export-download/:exportId/:resourceType', downloadExportFile);
 router.get('/fhir/export-jobs', listExportJobs);
@@ -200,15 +221,15 @@ router.get('/fhir/export-jobs', listExportJobs);
 // ==========================================
 router.get('/sdoh/z-codes', getSDOHCodes);
 router.get('/sdoh/screening', getScreeningQuestionnaire);
-router.post('/sdoh/assessments', submitSDOHAssessment);
+router.post('/sdoh/assessments', validate({ body: SubmitSDOHBody }), submitSDOHAssessment);
 router.get('/sdoh/assessments/:patientId', getPatientSDOHAssessments);
 router.get('/sdoh/observations/:patientId', getSDOHObservations);
 
 // ==========================================
 // 🔗 12. MASTER PATIENT INDEX (MPI)
 // ==========================================
-router.post('/mpi/search', searchMPI);
-router.post('/mpi/link', linkPatients);
+router.post('/mpi/search', validate({ body: SearchMPIBody }), searchMPI);
+router.post('/mpi/link', validate({ body: LinkPatientsBody }), linkPatients);
 router.get('/mpi/links/:patientId', getPatientLinks);
 router.get('/mpi/duplicates', scanDuplicates);
 
@@ -216,10 +237,10 @@ router.get('/mpi/duplicates', scanDuplicates);
 // 📋 13. CARE PLANS (FHIR CarePlan)
 // ==========================================
 router.get('/care-plans/categories', getCarePlanCategories);
-router.post('/care-plans', createCarePlan);
+router.post('/care-plans', validate({ body: CreateCarePlanBody }), createCarePlan);
 router.get('/care-plans/:patientId', getPatientCarePlans);
 router.get('/care-plans/detail/:carePlanId', getCarePlan);
-router.put('/care-plans/:carePlanId', updateCarePlan);
+router.put('/care-plans/:carePlanId', validate({ body: UpdateCarePlanBody }), updateCarePlan);
 
 // ==========================================
 // 🔵 14. BLUE BUTTON 2.0 (CMS)
@@ -237,5 +258,6 @@ router.delete('/bluebutton/disconnect/:patientId', disconnectBlueButton);
 // ==========================================
 router.get('/fhir/launch', getSmartLaunchContext);
 router.get('/fhir/launch/:patientId', getSmartLaunchContext);
+router.post('/fhir/launch-context', registerLaunchContext);
 
 export default router;

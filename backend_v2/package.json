@@ -6,8 +6,7 @@
     "patient-service",
     "booking-service",
     "communication-service",
-    "staff-service",
-    "shared"
+    "staff-service"
   ],
   "main": "verify_consolidation.js",
   "scripts": {

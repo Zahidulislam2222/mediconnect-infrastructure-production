@@ -10,3 +10,5 @@ boto3==1.34.69
 # Security Fix: JWT auth middleware dependencies (matches Node.js aws-jwt-verify pattern)
 python-jose[cryptography]==3.3.0
 httpx==0.27.0
+# Distributed rate limiting (optional — falls back to in-memory if unavailable)
+redis==5.0.3

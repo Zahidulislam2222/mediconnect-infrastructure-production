@@ -3,6 +3,8 @@ import { unmarshall } from "@aws-sdk/util-dynamodb";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 // 🟢 FIX: Use Shared Regional S3 Factory to prevent GDPR leaks
 import { getRegionalS3Client } from '../../../../shared/aws-config';
+import { safeError } from '../../../../shared/logger';
+import { createHash } from 'crypto';
 
 let bigquery: BigQuery;
 
@@ -29,9 +31,11 @@ export const analyticsHandler = async (event: any, region: string = "us-east-1")
                 if (newImage.status === 'COMPLETED' && oldImage.status !== 'COMPLETED') {
                     rowsToInsert.push({
                         appointment_id: newImage.appointmentId,
-                        patient_id: newImage.patientId,
+                        patient_id: createHash('sha256').update(newImage.patientId + (process.env.HIPAA_SALT || 'mediconnect_salt')).digest('hex'),
                         doctor_id: newImage.doctorId,
                         timestamp: new Date().toISOString(),
+                        specialization: newImage.specialization || 'General',
+                        status: 'COMPLETED',
                         notes: newImage.notes,
                         cost: newImage.cost || 0
                     });
@@ -48,7 +52,7 @@ export const analyticsHandler = async (event: any, region: string = "us-east-1")
         return { message: `Synced ${rowsToInsert.length} rows to BigQuery [${DATASET_ID}]` };
 
     } catch (error: any) {
-        console.error("BigQuery Sync Failed. Sending to DLQ...", error);
+        safeError("BigQuery Sync Failed. Sending to DLQ...", error);
 
         // 🟢 GDPR FIX: Ensure Dead Letter Queue writes to the correct Legal Jurisdiction
         const regionalS3 = getRegionalS3Client(region);

@@ -3,23 +3,22 @@ version: '3.8'
 services:
   patient-service:
     build:
-      context: ./backend_v2
-      dockerfile: patient-service/Dockerfile
+      context: .
+      dockerfile: backend_v2/patient-service/Dockerfile
     ports:
-      - "8081:8081" 
+      - "8081:8081"
     environment:
       - NODE_ENV=development
       - PORT=8081
       - AWS_REGION=us-east-1
     volumes:
-      # 🟢 FIX: Matched Dockerfile WORKDIR
       - ./backend_v2/patient-service:/home/node/app/patient-service
       - ./backend_v2/shared:/home/node/app/shared
 
   doctor-service:
     build:
-      context: ./backend_v2
-      dockerfile: doctor-service/Dockerfile
+      context: .
+      dockerfile: backend_v2/doctor-service/Dockerfile
     ports:
       - "8082:8082"
     environment:
@@ -27,37 +26,70 @@ services:
       - PORT=8082
       - AWS_REGION=us-east-1
     volumes:
-      # 🟢 FIX: Matched Dockerfile WORKDIR
       - ./backend_v2/doctor-service:/home/node/app/doctor-service
       - ./backend_v2/shared:/home/node/app/shared
 
   booking-service:
     build:
-      context: ./backend_v2
-      dockerfile: booking-service/Dockerfile
+      context: .
+      dockerfile: backend_v2/booking-service/Dockerfile
     ports:
       - "8083:8083"
     environment:
       - NODE_ENV=development
       - PORT=8083
+      - AWS_REGION=us-east-1
     volumes:
-      # 🟢 FIX: Matched Dockerfile WORKDIR
       - ./backend_v2/booking-service:/home/node/app/booking-service
       - ./backend_v2/shared:/home/node/app/shared
 
   communication-service:
     build:
-      context: ./backend_v2
-      dockerfile: communication-service/Dockerfile
+      context: .
+      dockerfile: backend_v2/communication-service/Dockerfile
     ports:
       - "8084:8084"
     environment:
       - NODE_ENV=development
       - PORT=8084
+      - AWS_REGION=us-east-1
     volumes:
-      # 🟢 FIX: Matched Dockerfile WORKDIR
       - ./backend_v2/communication-service:/home/node/app/communication-service
       - ./backend_v2/shared:/home/node/app/shared
+
+  admin-service:
+    build:
+      context: .
+      dockerfile: backend_v2/admin-service/Dockerfile
+    ports:
+      - "8085:8085"
+    environment:
+      - PORT=8085
+      - AWS_REGION=us-east-1
+
+  staff-service:
+    build:
+      context: .
+      dockerfile: backend_v2/staff-service/Dockerfile
+    ports:
+      - "8086:8086"
+    environment:
+      - NODE_ENV=development
+      - PORT=8086
+      - AWS_REGION=us-east-1
+    volumes:
+      - ./backend_v2/staff-service:/home/node/app/staff-service
+      - ./backend_v2/shared:/home/node/app/shared
+
+  dicom-service:
+    build:
+      context: .
+      dockerfile: backend_v2/dicom-service/Dockerfile
+    ports:
+      - "8005:8005"
+    environment:
+      - PORT=8005
+      - AWS_REGION=us-east-1
 
   frontend:
     build: ../mediconnect-hub

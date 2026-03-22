@@ -11,6 +11,7 @@ import { SecretsManagerClient, GetSecretValueCommand } from "@aws-sdk/client-sec
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { SESClient } from "@aws-sdk/client-ses";
 import { CognitoIdentityProviderClient } from "@aws-sdk/client-cognito-identity-provider";
+import { safeError } from './logger';
 
 // 🟢 HIPAA 2026 High Availability (HA) Configuration
 // PROPER AWS SDK v3 Implementation: Prevents Multi-Cloud Cold Starts and Socket Hangs
@@ -145,7 +146,7 @@ export const getSSMParameter = async (path: string, region: string = "us-east-1"
         }
         return value;
     } catch (error: any) {
-        console.error(`❌ [VAULT_ERROR][${target.toUpperCase()}] SSM Fetch Failed: ${path}`);
+        safeError(`[VAULT_ERROR][${target.toUpperCase()}] SSM Fetch Failed: ${path}`);
         return undefined;
     }
 };
@@ -166,7 +167,7 @@ export async function getSecret(secretName: string, region: string = "us-east-1"
         }
         return null;
     } catch (err) {
-        console.error(`❌[VAULT_ERROR][${target.toUpperCase()}] Secret Fetch Failed: ${secretName}`);
+        safeError(`[VAULT_ERROR][${target.toUpperCase()}] Secret Fetch Failed: ${secretName}`);
         return null;
     }
 }

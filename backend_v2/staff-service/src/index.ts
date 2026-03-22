@@ -23,6 +23,7 @@ import { GetParametersCommand } from "@aws-sdk/client-ssm";
 import staffRoutes from './routes/staff.routes';
 import { getRegionalSSMClient } from '../../shared/aws-config';
 import { createRateLimitStore } from '../../shared/rate-limit-store';
+import { safeLog, safeError } from '../../shared/logger';
 
 dotenv.config();
 
@@ -72,7 +73,7 @@ const corsOptions = {
         if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
         if (mobileOrigins.indexOf(origin) !== -1) return callback(null, true);
 
-        console.error(`CORS Blocked: ${origin}`);
+        safeError(`CORS Blocked: ${origin}`);
         callback(new Error('Strict CORS Policy: Origin not allowed'));
     },
     credentials: true,
@@ -126,7 +127,7 @@ async function loadSecrets() {
     const region = process.env.AWS_REGION || 'us-east-1';
     const ssm = getRegionalSSMClient(region);
     try {
-        console.log(`Synchronizing Staff secrets with AWS Vault [${region}]...`);
+        safeLog(`Synchronizing Staff secrets with AWS Vault [${region}]...`);
         const cmd = new GetParametersCommand({
             Names: [
                 '/mediconnect/prod/cognito/user_pool_id',
@@ -154,9 +155,9 @@ async function loadSecrets() {
         process.env.COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID_US;
         process.env.COGNITO_CLIENT_ID = process.env.COGNITO_CLIENT_ID_US_PATIENT;
 
-        console.log("Staff Vault Sync Complete.");
+        safeLog("Staff Vault Sync Complete.");
     } catch (e: any) {
-        console.error("FATAL: Vault Sync Failed.", e.message);
+        safeError("FATAL: Vault Sync Failed.", e.message);
         process.exit(1);
     }
 }
@@ -167,10 +168,10 @@ const startServer = async () => {
         await loadSecrets();
         app.listen(Number(PORT), '0.0.0.0', () => {
             isAppReady = true;
-            console.log(`Staff Service Production Ready on port ${PORT}`);
+            safeLog(`Staff Service Production Ready on port ${PORT}`);
         });
     } catch (error: any) {
-        console.error("FATAL: Failed to start Staff Service:", error.message);
+        safeError("FATAL: Failed to start Staff Service:", error.message);
         process.exit(1);
     }
 };

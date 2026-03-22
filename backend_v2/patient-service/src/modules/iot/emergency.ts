@@ -1,9 +1,11 @@
 import { Request, Response } from "express";
-import { getRegionalClient, getRegionalSNSClient } from '../../../../shared/aws-config'; 
+import { getRegionalClient, getRegionalSNSClient } from '../../../../shared/aws-config';
 import { PutCommand } from "@aws-sdk/lib-dynamodb";
 import { PublishCommand } from "@aws-sdk/client-sns";
 import { writeAuditLog } from "../../../../shared/audit";
+import { safeLog } from '../../../../shared/logger';
 import { v4 as uuidv4 } from "uuid";
+import { publishEvent, EventType } from '../../../../shared/event-bus';
 
 /**
  * 🟢 SHARED LOGIC: handleEmergencyDetection
@@ -53,12 +55,15 @@ export const handleEmergencyDetection = async (patientId: string, heartRate: num
                 Subject: `MEDICONNECT EMERGENCY [${region.toUpperCase()}]`
             }));
         } else {
-            console.warn(`⚠️ No SNS Topic configured for region: ${region}`);
+            safeLog(`⚠️ No SNS Topic configured for region: ${region}`);
         }
         
         // 🟢 HIPAA FIX: Immutable Audit Log for Emergency dispatch
         await writeAuditLog("SYSTEM_IOT", patientId, "EMERGENCY_DISPATCH", message, { region, heartRate });
-        
+
+        // Event bus: vital alert (critical)
+        publishEvent(EventType.VITAL_ALERT, { patientId, heartRate, type, appointmentId, severity: "CRITICAL" }, region).catch(() => {});
+
         return { success: true, appointmentId };
     }
     return { success: false, message: "Vitals within normal range." };

@@ -4,6 +4,7 @@ import fetch from 'node-fetch'; // Or native fetch in Node 20
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { PutCommand } from "@aws-sdk/lib-dynamodb";
 import { v4 as uuidv4 } from "uuid";
+import { writeAuditLog } from '../../../../shared/audit';
 
 // Multer should be attached in the router
 export const uploadDicom = async (req: Request, res: Response) => {
@@ -44,6 +45,11 @@ export const uploadDicom = async (req: Request, res: Response) => {
                 createdAt: new Date().toISOString()
             }
         }));
+
+        await writeAuditLog(user.sub, user.sub, "UPLOAD_DICOM", `DICOM imaging study uploaded`, {
+            region: user.region,
+            ipAddress: (req as any).ip
+        });
 
         res.status(200).json({ message: "Scan processed successfully", resource: data.fhirResource });
     } catch (err: any) {

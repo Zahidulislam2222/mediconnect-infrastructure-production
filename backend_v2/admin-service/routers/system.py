@@ -81,7 +81,7 @@ async def check_all_services(
             "latencyMs": latency_ms,
         })
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], "SYSTEM", "ADMIN_HEALTH_CHECK",
         "Admin ran platform-wide health check", "us-east-1"
     )

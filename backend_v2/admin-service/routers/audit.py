@@ -61,7 +61,7 @@ async def get_audit_logs(
     items = response.get("Items", [])
     items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], "SYSTEM", "ADMIN_VIEW_AUDIT_LOGS",
         f"Admin queried audit logs (filters: actor={actor_id}, action={action})",
         region
@@ -122,7 +122,7 @@ async def get_user_audit_trail(
     items = response.get("Items", [])
     items.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
 
-    write_audit_log(
+    await write_audit_log(
         admin["id"], user_id, "ADMIN_VIEW_USER_AUDIT_TRAIL",
         f"Admin viewed audit trail for user {user_id[:8]}...",
         region

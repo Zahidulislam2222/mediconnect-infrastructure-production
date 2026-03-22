@@ -1,4 +1,12 @@
 /**
+ * SQS Event Bus — INTEGRATED
+ * Cross-service event publishing via SQS with DLQ support.
+ * Imported by: audit.ts, breach-detection.ts, booking-service, doctor-service,
+ * patient-service, communication-service (20 integration points).
+ * Graceful degradation: logs locally if SQS queue unavailable.
+ */
+
+/**
  * SQS Event Pipeline — Async cross-service event bus
  * Replaces direct SNS calls with a queued, dead-letter-aware pipeline.
  *
@@ -48,6 +56,7 @@ export enum EventType {
     // Clinical Events
     PRESCRIPTION_ISSUED = "clinical.prescription_issued",
     PRESCRIPTION_DISPENSED = "clinical.prescription_dispensed",
+    PRESCRIPTION_CANCELLED = "clinical.prescription_cancelled",
     DRUG_INTERACTION_DETECTED = "clinical.drug_interaction",
     LAB_RESULT_READY = "clinical.lab_result",
     VITAL_ALERT = "clinical.vital_alert",
@@ -67,6 +76,10 @@ export enum EventType {
     // HL7 Integration
     HL7_MESSAGE_RECEIVED = "hl7.message_received",
     HL7_MESSAGE_PROCESSED = "hl7.message_processed",
+
+    // Doctor Events
+    DOCTOR_REGISTERED = "patient.doctor_registered",
+    DOCTOR_DELETED = "patient.doctor_deleted",
 
     // System Events
     SERVICE_HEALTH_CHANGE = "system.health_change",

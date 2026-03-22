@@ -8,6 +8,7 @@ import { Request, Response } from 'express';
 import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
+import { safeError } from '../../../../shared/logger';
 
 const TABLE_PATIENTS = process.env.DYNAMO_TABLE || 'mediconnect-patients';
 const TABLE_ALLERGIES = process.env.TABLE_ALLERGIES || 'mediconnect-allergies';
@@ -399,7 +400,7 @@ export const invokeCDSHook = async (req: Request, res: Response) => {
         // Return in CDS Hooks spec format
         res.json({ cards });
     } catch (error: any) {
-        console.error('CDS Hook error:', error);
+        safeError('CDS Hook error:', error);
         res.status(500).json({ error: 'CDS Hook evaluation failed' });
     }
 };

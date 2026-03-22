@@ -5,10 +5,11 @@ import { getRegionalDB } from "../utils/db-adapter";
 import { getSSMParameter } from '../../../shared/aws-config';
 import { mapToFHIRDiagnosticReport, scrubPII } from "../utils/fhir-mapper";
 import { writeAuditLog } from "../../../shared/audit";
-import { logger } from "../../../shared/logger";
+import { safeLog, safeError } from "../../../shared/logger";
 import { jsPDF } from "jspdf";
 import { v4 as uuidv4 } from "uuid";
 import { GoogleAuth } from "google-auth-library";
+import { createHash } from "crypto";
 
 const aiService = new AICircuitBreaker();
 
@@ -78,7 +79,7 @@ export const checkSymptoms = async (req: Request, res: Response) => {
                 region: userRegion
             });
         } catch (dbError: any) {
-            logger.error("[SYMPTOM] Database save failed", { region: userRegion, error: dbError.message });
+            safeError("[SYMPTOM] Database save failed", { region: userRegion, error: dbError.message });
         }
 
         // --- 6. PROFESSIONAL CLINICAL PDF GENERATION ---
@@ -133,7 +134,7 @@ export const checkSymptoms = async (req: Request, res: Response) => {
         });
 
         // 8. BIGQUERY SYNC (Async)
-        pushToBigQuery(user.sub, symptoms as string[], analysis, aiResponse.provider, userRegion).catch(e => logger.error("[SYMPTOM] BigQuery sync failed", { error: e.message }));
+        pushToBigQuery(user.sub, symptoms as string[], analysis, aiResponse.provider, userRegion).catch(e => safeError("[SYMPTOM] BigQuery sync failed", { error: e.message }));
 
         res.json({
             success: true,
@@ -143,7 +144,7 @@ export const checkSymptoms = async (req: Request, res: Response) => {
         });
 
     } catch (error: any) {
-        logger.error("[SYMPTOM] Symptom check failed", { error: error.message });
+        safeError("[SYMPTOM] Symptom check failed", { error: error.message });
         res.status(500).json({ error: "Internal Server Error" });
     }
 };
@@ -171,7 +172,7 @@ async function pushToBigQuery(userId: string, symptoms: string[], analysis: any,
                 kind: "bigquery#tableDataInsertAllRequest",
                 rows:[{
                     json: {
-                        user_id: userId,
+                        user_id: createHash('sha256').update(userId + (process.env.HIPAA_SALT || 'mediconnect_salt')).digest('hex'),
                         timestamp: new Date().toISOString(),
                         symptoms: symptoms.join(", "),
                         risk_level: analysis.risk,
@@ -182,6 +183,6 @@ async function pushToBigQuery(userId: string, symptoms: string[], analysis: any,
             })
         });
     } catch (err: any) {
-        logger.error("[SYMPTOM] BigQuery sync failed", { error: err.message });
+        safeError("[SYMPTOM] BigQuery sync failed", { error: err.message });
     }
 }

@@ -1,7 +1,7 @@
 import winston from 'winston';
 
 /**
- * 🟢 GDPR & HIPAA COMPLIANT MASKING + ANTI-REDOS
+ * GDPR & HIPAA COMPLIANT MASKING + ANTI-REDOS
  * This covers the message, removes passwords, and truncates massive Base64 strings.
  */
 const maskPII = winston.format((info: any) => {
@@ -24,7 +24,7 @@ const maskPII = winston.format((info: any) => {
         info.message = scrubString(info.message);
     }
 
-    // 2. 🟢 SECURITY FIX: Deep clean the metadata object to prevent logging Base64 & Passwords
+    // 2. SECURITY FIX: Deep clean the metadata object to prevent logging Base64 & Passwords
     const deepClean = (obj: any): any => {
         if (!obj || typeof obj !== 'object') return obj;
         if (Array.isArray(obj)) return obj.map(deepClean);
@@ -32,12 +32,12 @@ const maskPII = winston.format((info: any) => {
         const cleaned = { ...obj };
         for (const key in cleaned) {
             const lowerKey = key.toLowerCase();
-            
-            // 🛑 Never log passwords or tokens
+
+            // Never log passwords or tokens
             if (lowerKey.includes('password') || lowerKey.includes('token')) {
                 cleaned[key] = '[REDACTED_SECURITY]';
             }
-            // 🛑 Truncate massive Base64 images to prevent CloudWatch crashing / High Bills
+            // Truncate massive Base64 images to prevent CloudWatch crashing / High Bills
             else if (lowerKey.includes('image') || lowerKey.includes('base64') || lowerKey === 'avatar') {
                 if (typeof cleaned[key] === 'string' && cleaned[key].length > 100) {
                     cleaned[key] = `[BASE64_TRUNCATED_LENGTH_${cleaned[key].length}]`;
@@ -68,7 +68,7 @@ export const logger = winston.createLogger({
     level: process.env.LOG_LEVEL || 'info',
     format: winston.format.combine(
         winston.format.timestamp(),
-        maskPII(), // 🟢 Run masking BEFORE JSON formatting
+        maskPII(), // Run masking BEFORE JSON formatting
         winston.format.json()
     ),
     transports: [
@@ -81,7 +81,7 @@ export const logger = winston.createLogger({
     ]
 });
 
-// Wrapper to replace console.log in legacy parts easily
+/** Create a named logger instance with PII masking. */
 export const createLogger = (serviceName: string) => {
     return {
         log: (message: string, ...meta: any[]) => logger.info(`[${serviceName}] ${message}`, ...meta),

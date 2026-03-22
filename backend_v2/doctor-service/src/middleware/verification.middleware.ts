@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { getRegionalClient } from '../../../shared/aws-config';
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
+import { safeError } from '../../../shared/logger';
 
 export const requireDoctorVerification = async (req: Request, res: Response, next: NextFunction) => {
     const user = (req as any).user;
@@ -28,7 +29,7 @@ export const requireDoctorVerification = async (req: Request, res: Response, nex
         
         next();
     } catch (error) {
-        console.error("Verification Middleware Error:", error);
+        safeError("Verification Middleware Error:", error);
         res.status(500).json({ error: "Security validation failed" });
     }
 };

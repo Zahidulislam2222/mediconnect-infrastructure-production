@@ -10,7 +10,8 @@ import { communicationRoutes } from "./routes/communication.routes";
 import { aiRoutes } from "./routes/ai.routes";
 import { authMiddleware } from './middleware/auth.middleware';
 import { getRegionalSSMClient } from '../../shared/aws-config';
-import { createRateLimitStore } from '../../shared/rate-limit-store'; // 🟢 FIX #9: Redis distributed rate limiting 
+import { createRateLimitStore } from '../../shared/rate-limit-store'; // 🟢 FIX #9: Redis distributed rate limiting
+import { safeLog, safeError } from '../../shared/logger';
 
 dotenv.config();
 
@@ -59,7 +60,7 @@ const corsOptions = {
         if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
         if (mobileOrigins.indexOf(origin) !== -1) return callback(null, true);
 
-        console.error("[CORS] Blocked request from unauthorized origin");
+        safeError("[CORS] Blocked request from unauthorized origin");
         callback(new Error('Strict CORS Policy: Origin not allowed'));
     },
     credentials: true,
@@ -138,7 +139,7 @@ async function loadSecrets() {
     const ssm = getRegionalSSMClient(region);
 
     try {
-        console.log(`🔐 Synchronizing Communication secrets with AWS Vault [${region}]...`);
+        safeLog(`Synchronizing Communication secrets with AWS Vault [${region}]...`);
 
         // 🟢 BATCH 1: Identity Only (This service doesn't need Stripe or DB Tables config)
         const cmd1 = new GetParametersCommand({
@@ -174,9 +175,9 @@ async function loadSecrets() {
         process.env.COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID_US;
         process.env.COGNITO_CLIENT_ID = process.env.COGNITO_CLIENT_ID_US_PATIENT;
 
-        console.log("✅ AWS Vault Sync Complete. All Communication Service keys mapped.");
+        safeLog("AWS Vault Sync Complete. All Communication Service keys mapped.");
     } catch (e: any) {
-        console.error(`❌ FATAL: Vault Sync Failed.`, e.message);
+        safeError(`FATAL: Vault Sync Failed.`, e.message);
         process.exit(1);
     }
 }
@@ -186,10 +187,10 @@ const startServer = async () => {
         await loadSecrets();
         app.listen(Number(PORT), '0.0.0.0', () => {
             isAppReady = true;
-            console.log(`🚀 Communication Service Production Ready on port ${PORT}`);
+            safeLog(`Communication Service Production Ready on port ${PORT}`);
         });
     } catch (error: any) {
-        console.error("❌ CRITICAL: Failed to start Communication Service:", error.message);
+        safeError("CRITICAL: Failed to start Communication Service:", error.message);
         process.exit(1);
     }
 };

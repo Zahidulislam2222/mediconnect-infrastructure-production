@@ -119,7 +119,7 @@ async function loadSecrets() {
     const region = process.env.AWS_REGION || 'us-east-1';
     const ssm = getRegionalSSMClient(region);
     try {
-        console.log(`🔐 Synchronizing Doctor secrets with AWS Vault...`);
+        safeLog(`Synchronizing Doctor secrets with AWS Vault...`);
         const cmd1 = new GetParametersCommand({
             Names: [
                 '/mediconnect/prod/cognito/user_pool_id', '/mediconnect/prod/cognito/client_id_doctor', '/mediconnect/prod/cognito/client_id_patient',
@@ -162,7 +162,7 @@ async function loadSecrets() {
         });
         process.env.COGNITO_USER_POOL_ID = process.env.COGNITO_USER_POOL_ID_US;
         process.env.COGNITO_CLIENT_ID = process.env.COGNITO_CLIENT_ID_US_DOCTOR;
-        console.log("✅ Doctor Vault Complete.");
+        safeLog("Doctor Vault Complete.");
     } catch (e: any) { process.exit(1); }
 }
 

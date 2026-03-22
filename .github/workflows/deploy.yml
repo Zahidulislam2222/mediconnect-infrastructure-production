@@ -49,6 +49,9 @@ jobs:
           cache: npm
           cache-dependency-path: backend_v2/package-lock.json
       - run: cd backend_v2 && npm ci
+      - name: Type check
+        run: npx tsc --noEmit
+        working-directory: backend_v2
       - run: cd backend_v2 && npm test --workspaces --if-present
 
       # --- Vulnerability Scanning (OWASP Dependency Check) ---

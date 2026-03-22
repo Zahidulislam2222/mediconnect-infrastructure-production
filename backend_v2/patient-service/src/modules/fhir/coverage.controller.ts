@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
+import { safeError } from '../../../../shared/logger';
 
 // =============================================================================
 // FHIR R4 Coverage Resource (Insurance / Coverage)
@@ -97,7 +98,7 @@ export const getCoverage = async (req: Request, res: Response) => {
             fhirResource: fhirCoverage
         });
     } catch (error: any) {
-        console.error('[Coverage] GET failed:', error);
+        safeError('[Coverage] GET failed:', error);
         return res.status(500).json({ error: 'Failed to retrieve coverage data' });
     }
 };

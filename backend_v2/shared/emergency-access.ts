@@ -18,6 +18,7 @@ import { PutCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient } from './aws-config';
 import { writeAuditLog } from './audit';
 import { checkForBreach } from './breach-detection';
+import { safeError } from './logger';
 
 const TABLE_EMERGENCY = process.env.TABLE_EMERGENCY_ACCESS || 'mediconnect-emergency-access';
 const DEFAULT_DURATION_MINUTES = 60;
@@ -159,7 +160,7 @@ export const requestEmergencyAccess = async (req: Request, res: Response) => {
         });
 
     } catch (error: any) {
-        console.error('Emergency access request error:', error);
+        safeError('Emergency access request error:', error);
         res.status(500).json({ error: 'Failed to process emergency access request' });
     }
 };
@@ -275,7 +276,7 @@ export const revokeEmergencyAccess = async (req: Request, res: Response) => {
         res.json({ message: 'Emergency access override revoked', overrideId });
 
     } catch (error: any) {
-        console.error('Revoke emergency access error:', error);
+        safeError('Revoke emergency access error:', error);
         res.status(500).json({ error: 'Failed to revoke emergency access' });
     }
 };

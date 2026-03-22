@@ -1,6 +1,8 @@
 import { getRegionalClient } from './aws-config';
 import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
+import { publishEvent, EventType } from './event-bus';
+import { safeError } from './logger';
 
 // In-memory rate tracking for breach detection
 const accessCounts: Map<string, { count: number; firstSeen: number }> = new Map();
@@ -28,6 +30,7 @@ export async function checkForBreach(
     // 1. Check if action is a known security event
     if (BREACH_ACTIONS.includes(action)) {
         await sendBreachAlert(actorId, action, details, 'SECURITY_EVENT', region);
+        publishEvent(EventType.BREACH_ALERT, { actorId, action, details, alertType: 'SECURITY_EVENT' }, region).catch(() => {});
         return;
     }
 
@@ -44,6 +47,7 @@ export async function checkForBreach(
             entry.count++;
             if (entry.count >= BREACH_THRESHOLD) {
                 await sendBreachAlert(actorId, action, `Excessive PHI access: ${entry.count} operations in ${Math.round((now - entry.firstSeen) / 1000)}s`, 'RATE_ANOMALY', region);
+                publishEvent(EventType.PHI_ACCESS, { actorId, action, accessCount: entry.count, alertType: 'RATE_ANOMALY' }, region).catch(() => {});
                 accessCounts.delete(key);
             }
         }
@@ -61,7 +65,7 @@ async function sendBreachAlert(
 ): Promise<void> {
     const snsTopicArn = process.env.BREACH_NOTIFICATION_SNS_ARN;
     if (!snsTopicArn) {
-        console.error('[BREACH ALERT] SNS not configured. Alert:', { actorId: actorId.substring(0, 8), action, alertType, details });
+        safeError('[BREACH ALERT] SNS not configured. Alert:', { actorId: actorId.substring(0, 8), action, alertType, details });
         return;
     }
 
@@ -81,6 +85,6 @@ async function sendBreachAlert(
             }, null, 2),
         }));
     } catch (err) {
-        console.error('[BREACH ALERT] Failed to send SNS notification:', err);
+        safeError('[BREACH ALERT] Failed to send SNS notification:', err);
     }
 }

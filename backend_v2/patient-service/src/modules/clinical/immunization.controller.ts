@@ -10,6 +10,7 @@ import { PutCommand, QueryCommand, GetCommand, UpdateCommand } from '@aws-sdk/li
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
 import { validateUSCore } from '../../../../shared/us-core-profiles';
+import { safeError } from '../../../../shared/logger';
 
 const TABLE = process.env.TABLE_IMMUNIZATIONS || 'mediconnect-immunizations';
 
@@ -256,7 +257,7 @@ export const recordImmunization = async (req: Request, res: Response) => {
 
         res.status(201).json(fhirResource);
     } catch (error: any) {
-        console.error('Record immunization error:', error);
+        safeError('Record immunization error:', error);
         res.status(500).json({ error: 'Failed to record immunization' });
     }
 };
@@ -304,7 +305,7 @@ export const getPatientImmunizations = async (req: Request, res: Response) => {
             groupedByVaccine: byGroup,
         });
     } catch (error: any) {
-        console.error('Get immunizations error:', error);
+        safeError('Get immunizations error:', error);
         res.status(500).json({ error: 'Failed to retrieve immunizations' });
     }
 };
@@ -364,7 +365,7 @@ export const updateImmunization = async (req: Request, res: Response) => {
 
         res.json(toFHIR(Attributes));
     } catch (error: any) {
-        console.error('Update immunization error:', error);
+        safeError('Update immunization error:', error);
         res.status(500).json({ error: 'Failed to update immunization' });
     }
 };

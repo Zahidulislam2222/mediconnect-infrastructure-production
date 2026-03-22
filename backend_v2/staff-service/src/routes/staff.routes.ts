@@ -19,8 +19,11 @@ import {
     createTask,
     getTasks,
     updateTask,
+    deleteTask,
     createAnnouncement,
     getAnnouncements,
+    updateAnnouncement,
+    deleteAnnouncement,
     getStaffDirectory,
 } from '../controllers/staff.controller';
 
@@ -68,6 +71,13 @@ const CreateAnnouncementBody = z.object({
     department: z.string().optional(),
 });
 
+const UpdateAnnouncementBody = z.object({
+    title: z.string().min(1).max(200).optional(),
+    content: z.string().min(1).max(5000).optional(),
+    priority: z.enum(['Low', 'Normal', 'High', 'Critical']).optional(),
+    category: z.string().max(100).optional(),
+});
+
 // =============================================================================
 // SHIFT MANAGEMENT (Staff/Admin only)
 // =============================================================================
@@ -84,6 +94,7 @@ router.delete('/shifts/:shiftId', authMiddleware, requireStaffOrAdmin, deleteShi
 router.post('/tasks', authMiddleware, requireStaffOrAdmin, validate({ body: CreateTaskBody }), createTask);
 router.get('/tasks', authMiddleware, requireStaffOrAdmin, getTasks);
 router.put('/tasks', authMiddleware, requireStaffOrAdmin, validate({ body: UpdateTaskBody }), updateTask);
+router.delete('/tasks/:taskId', authMiddleware, requireStaffOrAdmin, deleteTask);
 
 // =============================================================================
 // ANNOUNCEMENTS (Read: any auth user, Write: Staff/Admin only)
@@ -91,6 +102,8 @@ router.put('/tasks', authMiddleware, requireStaffOrAdmin, validate({ body: Updat
 
 router.post('/announcements', authMiddleware, requireStaffOrAdmin, validate({ body: CreateAnnouncementBody }), createAnnouncement);
 router.get('/announcements', authMiddleware, getAnnouncements);
+router.put('/announcements/:announcementId', authMiddleware, requireStaffOrAdmin, validate({ body: UpdateAnnouncementBody }), updateAnnouncement);
+router.delete('/announcements/:announcementId', authMiddleware, requireStaffOrAdmin, deleteAnnouncement);
 
 // =============================================================================
 // STAFF DIRECTORY (Any authenticated user can view)

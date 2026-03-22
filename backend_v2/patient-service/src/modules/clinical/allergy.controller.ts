@@ -9,6 +9,7 @@ import { PutCommand, QueryCommand, GetCommand, UpdateCommand, DeleteCommand } fr
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
 import { validateUSCore } from '../../../../shared/us-core-profiles';
+import { safeError } from '../../../../shared/logger';
 
 const TABLE = process.env.TABLE_ALLERGIES || 'mediconnect-allergies';
 
@@ -125,7 +126,7 @@ export const getPatientAllergies = async (req: Request, res: Response) => {
 
         res.json(bundle);
     } catch (error: any) {
-        console.error('Get allergies error:', error);
+        safeError('Get allergies error:', error);
         res.status(500).json({ error: 'Failed to retrieve allergies' });
     }
 };
@@ -201,7 +202,7 @@ export const createAllergy = async (req: Request, res: Response) => {
 
         res.status(201).json(fhirResource);
     } catch (error: any) {
-        console.error('Create allergy error:', error);
+        safeError('Create allergy error:', error);
         res.status(500).json({ error: 'Failed to create allergy record' });
     }
 };
@@ -263,7 +264,7 @@ export const updateAllergy = async (req: Request, res: Response) => {
 
         res.json(toFHIR(Attributes));
     } catch (error: any) {
-        console.error('Update allergy error:', error);
+        safeError('Update allergy error:', error);
         res.status(500).json({ error: 'Failed to update allergy record' });
     }
 };
@@ -301,7 +302,7 @@ export const deleteAllergy = async (req: Request, res: Response) => {
 
         res.json({ message: 'Allergy record deleted', id: allergyId });
     } catch (error: any) {
-        console.error('Delete allergy error:', error);
+        safeError('Delete allergy error:', error);
         res.status(500).json({ error: 'Failed to delete allergy record' });
     }
 };

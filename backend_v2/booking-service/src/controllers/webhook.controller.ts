@@ -1,9 +1,12 @@
 import { Request, Response } from 'express';
 import Stripe from 'stripe';
 import { getRegionalClient, getSSMParameter } from '../../../shared/aws-config';
-import { TransactWriteCommand, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
+import { TransactWriteCommand, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { createHash } from 'crypto';
 import { pushRevenueToBigQuery } from './billing.controller';
+import { writeAuditLog } from '../../../shared/audit';
+import { safeLog, safeError } from '../../../shared/logger';
+import { sendNotification } from '../../../shared/notifications';
 
 const STRIPE_SECRET_NAME = "/mediconnect/stripe/keys";
 const STRIPE_WEBHOOK_SECRET_NAME = "/mediconnect/stripe/webhook_secret";
@@ -62,16 +65,16 @@ async function claimWebhookEvent(
             ConditionExpression: "attribute_not_exists(eventId)",
         }));
 
-        console.log(`🔒 Webhook event claimed: ${eventId} (${eventType})`);
+        safeLog(`Webhook event claimed: ${eventId} (${eventType})`);
         return true;  // First time — proceed with processing
 
     } catch (err: any) {
         if (err.name === 'ConditionalCheckFailedException') {
-            console.log(`⚠️ Webhook duplicate skipped: ${eventId} (already processed)`);
+            safeLog(`Webhook duplicate skipped: ${eventId} (already processed)`);
             return false;  // Duplicate — safe to skip
         }
         // Unexpected error — log but allow processing to prevent lost events
-        console.error(`⚠️ Webhook idempotency check error for ${eventId}:`, err.message);
+        safeError(`Webhook idempotency check error for ${eventId}: ${err.message}`);
         return true;  // Fail-open: better to risk a duplicate than lose an event
     }
 }
@@ -85,7 +88,7 @@ export const handleStripeWebhook = async (req: Request, res: Response) => {
         if (unverifiedPayload.data?.object?.metadata?.region) {
             region = unverifiedPayload.data.object.metadata.region;
         }
-    } catch (e) { console.warn("Could not parse unverified webhook payload"); }
+    } catch (e) { safeLog("Could not parse unverified webhook payload"); }
 
     const regionalDb = getRegionalClient(region);
 
@@ -94,7 +97,7 @@ export const handleStripeWebhook = async (req: Request, res: Response) => {
         const webhookSecret = await getSSMParameter(STRIPE_WEBHOOK_SECRET_NAME, region, true);
 
         if (!stripeKey || !webhookSecret) {
-            console.error(`CRITICAL: Stripe secrets missing in SSM for region: ${region}`);
+            safeError(`CRITICAL: Stripe secrets missing in SSM for region: ${region}`);
             return res.status(500).send("Server Configuration Error");
         }
 
@@ -105,7 +108,7 @@ export const handleStripeWebhook = async (req: Request, res: Response) => {
         event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
 
     } catch (err: any) {
-        console.error(`⚠️ Webhook Signature Verification Failed: ${err.message}`);
+        safeError(`Webhook Signature Verification Failed: ${err.message}`);
         return res.status(400).send(`Webhook Error: ${err.message}`);
     }
 
@@ -120,21 +123,149 @@ export const handleStripeWebhook = async (req: Request, res: Response) => {
 
     if (event.type === 'payment_intent.succeeded') {
         const paymentIntent = event.data.object as Stripe.PaymentIntent;
-        console.log(`💰 Payment Captured: ${paymentIntent.id} in region ${region}`);
+        safeLog(`Payment Captured: ${paymentIntent.id} in region ${region}`);
         await handlePaymentSuccess(paymentIntent, regionalDb, region);
     } else if (event.type === 'payment_intent.payment_failed') {
         const paymentIntent = event.data.object as Stripe.PaymentIntent;
-        console.log(`❌ Payment Failed: ${paymentIntent.last_payment_error?.message}`);
+        await handlePaymentFailure(paymentIntent, regionalDb, region);
+    } else if (event.type === 'charge.refunded') {
+        const charge = event.data.object as Stripe.Charge;
+        await handleChargeRefunded(charge, regionalDb, region);
+    } else if (event.type === 'charge.dispute.created') {
+        const dispute = event.data.object as Stripe.Dispute;
+        await handleDisputeCreated(dispute, regionalDb, region);
     }
 
     res.json({ received: true });
 };
 
+// ─── FIX #3: Payment Failure Handler ────────────────────────────────────────
+async function handlePaymentFailure(paymentIntent: Stripe.PaymentIntent, regionalDb: any, region: string) {
+    const { billId, referenceId, type, patientId } = paymentIntent.metadata || {};
+    const failureMessage = paymentIntent.last_payment_error?.message || 'Unknown error';
+    const now = new Date().toISOString();
+
+    safeLog(`Payment Failed: ${paymentIntent.id} — ${failureMessage}`);
+
+    // 1. Atomic update: transaction + appointment in single TransactWrite
+    if (billId) {
+        const transactItems: any[] = [
+            {
+                Update: {
+                    TableName: TABLE_TRANSACTIONS,
+                    Key: { billId },
+                    UpdateExpression: "SET #s = :s, failureReason = :fr, failedAt = :now, paymentIntentId = :pid",
+                    ExpressionAttributeNames: { "#s": "status" },
+                    ExpressionAttributeValues: {
+                        ":s": "FAILED",
+                        ":fr": failureMessage,
+                        ":now": now,
+                        ":pid": paymentIntent.id
+                    }
+                }
+            }
+        ];
+
+        // Include appointment update in the same atomic transaction
+        if (type === 'BOOKING_FEE' && referenceId) {
+            transactItems.push({
+                Update: {
+                    TableName: TABLE_APPOINTMENTS,
+                    Key: { appointmentId: referenceId },
+                    UpdateExpression: "SET paymentStatus = :ps, #s = :s, lastUpdated = :now",
+                    ExpressionAttributeNames: { "#s": "status" },
+                    ExpressionAttributeValues: {
+                        ":ps": "failed",
+                        ":s": "PAYMENT_FAILED",
+                        ":now": now
+                    }
+                }
+            });
+        }
+
+        try {
+            await regionalDb.send(new TransactWriteCommand({ TransactItems: transactItems }));
+            safeLog(`Transaction ${billId} marked as FAILED${referenceId ? `, appointment ${referenceId} marked as PAYMENT_FAILED` : ''}`);
+        } catch (err: any) {
+            safeError(`Atomic payment failure update failed: ${err.message}`);
+        }
+    } else if (type === 'BOOKING_FEE' && referenceId) {
+        // No billId but has appointment — update appointment alone
+        try {
+            await regionalDb.send(new UpdateCommand({
+                TableName: TABLE_APPOINTMENTS,
+                Key: { appointmentId: referenceId },
+                UpdateExpression: "SET paymentStatus = :ps, #s = :s, lastUpdated = :now",
+                ExpressionAttributeNames: { "#s": "status" },
+                ExpressionAttributeValues: {
+                    ":ps": "failed",
+                    ":s": "PAYMENT_FAILED",
+                    ":now": now
+                }
+            }));
+        } catch (err: any) {
+            safeError(`Failed to update appointment ${referenceId} to PAYMENT_FAILED: ${err.message}`);
+        }
+    }
+
+    // 3. Audit log
+    try {
+        await writeAuditLog(
+            patientId || "SYSTEM",
+            patientId || "UNKNOWN",
+            "PAYMENT_FAILED",
+            `Payment failed for ${type || 'unknown'}: ${failureMessage}`,
+            {
+                region,
+                paymentIntentId: paymentIntent.id,
+                billId: billId || undefined,
+                appointmentId: referenceId || undefined,
+                failureReason: failureMessage
+            }
+        );
+    } catch (err: any) {
+        safeError(`Audit log failed for payment failure: ${err.message}`);
+    }
+
+    // Push payment failure to BigQuery revenue analytics
+    if (billId) {
+        try {
+            pushRevenueToBigQuery({
+                billId,
+                patientId: patientId || 'UNKNOWN',
+                doctorId: paymentIntent.metadata?.doctorId || "UNKNOWN",
+                amount: (paymentIntent.amount || 0) / 100,
+                status: "FAILED"
+            }, region).catch(e => safeError("BigQuery revenue failure sync failed"));
+        } catch {}
+    }
+
+    // 4. Fire-and-forget payment failure notification
+    if (patientId) {
+        try {
+            const patientRecord = await regionalDb.send(new GetCommand({
+                TableName: TABLE_APPOINTMENTS,
+                Key: { appointmentId: referenceId }
+            }));
+            sendNotification({
+                region,
+                recipientEmail: patientRecord.Item?.patientEmail,
+                subject: 'Payment Failed',
+                message: `Your payment for ${type || 'a service'} could not be processed: ${failureMessage}. Please update your payment method or try again.`,
+                type: 'PAYMENT_FAILED',
+                metadata: { billId: billId || '', appointmentId: referenceId || '' }
+            }).catch(() => {});
+        } catch {
+            // Non-critical: notification lookup failed
+        }
+    }
+}
+
 async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regionalDb: any, region: string) {
     const { billId, referenceId, type, pharmacyId, medication } = paymentIntent.metadata || {};
 
     if (!billId) {
-        console.warn("Skipping Webhook: Missing 'billId' in metadata.");
+        safeLog("Skipping Webhook: Missing 'billId' in metadata.");
         return;
     }
 
@@ -150,11 +281,11 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
 
         if (existingTxItem && existingTxItem.status === 'PAID') {
 
-            console.log(`⚠️ Idempotency Check: Transaction ${billId} is already PAID. Skipping.`);
+            safeLog(`Idempotency Check: Transaction ${billId} is already PAID. Skipping.`);
             return; // STOP EXECUTION HERE
         }
     } catch (err) {
-        console.warn("Idempotency check failed, proceeding cautiously...", err);
+        safeLog("Idempotency check failed, proceeding cautiously...");
     }
 
     const timestamp = new Date().toISOString();
@@ -205,21 +336,204 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
 
     try {
         await regionalDb.send(new TransactWriteCommand({ TransactItems: transactItems }));
-        console.log(`✅ DATABASE SYNCED: Transaction ${billId} + ${type} Record`);
+        safeLog(`DATABASE SYNCED: Transaction ${billId} + ${type} Record`);
 
-        // 🟢 HIPAA FIX: Pseudonymize Patient ID before sending to Analytics
+        // Push revenue to BigQuery (patientId hashed internally by pushRevenueToBigQuery)
         const existingTxData = existingTxItem;
         if (existingTxData && existingTxData.patientId) {
-            const hashedPatientId = createHash('sha256').update(existingTxData.patientId + process.env.HIPAA_SALT).digest('hex');
-
             pushRevenueToBigQuery({
                 billId,
-                patientId: hashedPatientId, // 🛡️ SECURE
+                patientId: existingTxData.patientId,
                 doctorId: existingTxData.doctorId || "UNKNOWN",
                 amount: existingTxData.amount
-            }, region).catch(e => console.error("BigQuery sync failed", e));
+            }, region).catch(e => safeError("BigQuery sync failed"));
         }
+
+        // FIX #9: Audit log for successful payment
+        try {
+            const txPatientId = existingTxItem?.patientId || paymentIntent.metadata?.patientId || "UNKNOWN";
+            await writeAuditLog(
+                txPatientId,
+                txPatientId,
+                "PAYMENT_SUCCESS",
+                `Payment succeeded for ${type || 'unknown'}: transaction ${billId}`,
+                {
+                    region,
+                    transactionId: billId,
+                    amount: existingTxItem?.amount || (paymentIntent.amount / 100),
+                    appointmentId: referenceId || undefined,
+                    paymentIntentId: paymentIntent.id
+                }
+            );
+        } catch (auditErr: any) {
+            safeError(`Audit log failed for payment success: ${auditErr.message}`);
+        }
+
+        // Fire-and-forget payment success notification
+        sendNotification({
+            region,
+            recipientEmail: existingTxItem?.patientEmail,
+            subject: 'Payment Successful',
+            message: `Your payment of $${existingTxItem?.amount || (paymentIntent.amount / 100)} for ${type || 'a service'} has been successfully processed. Transaction ID: ${billId}.`,
+            type: 'PAYMENT_SUCCESS',
+            metadata: { billId, appointmentId: referenceId || '' }
+        }).catch(() => {});
     } catch (error) {
-        console.error("CRITICAL DB ERROR: Webhook failed to write to Regional DynamoDB", error);
+        safeError("CRITICAL DB ERROR: Webhook failed to write to Regional DynamoDB");
     }
+}
+
+async function handleChargeRefunded(charge: Stripe.Charge, regionalDb: any, region: string) {
+    const billId = charge.metadata?.billId;
+    const patientId = charge.metadata?.patientId;
+
+    safeLog(`Charge Refunded: ${charge.id}, billId: ${billId || 'unknown'}`);
+
+    // Atomic update: transaction + appointment refund status
+    const appointmentId = charge.metadata?.appointmentId || charge.metadata?.referenceId;
+    const refundNow = new Date().toISOString();
+
+    try {
+        const transactItems: any[] = [];
+
+        if (billId) {
+            transactItems.push({
+                Update: {
+                    TableName: TABLE_TRANSACTIONS,
+                    Key: { billId },
+                    UpdateExpression: "SET #s = :s, refundedAt = :now, refundId = :rid",
+                    ExpressionAttributeNames: { "#s": "status" },
+                    ExpressionAttributeValues: { ":s": "REFUNDED", ":now": refundNow, ":rid": charge.id }
+                }
+            });
+        }
+
+        if (appointmentId) {
+            transactItems.push({
+                Update: {
+                    TableName: TABLE_APPOINTMENTS,
+                    Key: { appointmentId },
+                    UpdateExpression: 'SET #status = :s, paymentStatus = :ps, lastUpdated = :now',
+                    ExpressionAttributeNames: { '#status': 'status' },
+                    ExpressionAttributeValues: { ':s': 'REFUNDED', ':ps': 'refunded', ':now': refundNow }
+                }
+            });
+        }
+
+        if (transactItems.length > 0) {
+            await regionalDb.send(new TransactWriteCommand({ TransactItems: transactItems }));
+        }
+    } catch (err: any) {
+        safeError(`Failed atomic refund update (billId: ${billId}, appointmentId: ${appointmentId}): ${err.message}`);
+    }
+
+    // Audit log
+    try {
+        await writeAuditLog(
+            patientId || "SYSTEM",
+            patientId || "UNKNOWN",
+            "CHARGE_REFUNDED",
+            `Stripe charge ${charge.id} refunded. Amount: ${(charge.amount_refunded || 0) / 100}`,
+            { region, chargeId: charge.id, billId: billId || undefined, appointmentId: appointmentId || undefined }
+        );
+    } catch (err: any) {
+        safeError(`Audit log failed for charge refund: ${err.message}`);
+    }
+
+    // Push refund to BigQuery revenue analytics (patientId hashed internally)
+    if (billId) {
+        try {
+            pushRevenueToBigQuery({
+                billId,
+                patientId: patientId || 'UNKNOWN',
+                doctorId: charge.metadata?.doctorId || 'UNKNOWN',
+                amount: (charge.amount_refunded || 0) / 100,
+                status: 'REFUNDED'
+            }, region).catch(e => safeError('BigQuery revenue refund sync failed'));
+        } catch (bqErr) {
+            // Non-blocking: log but don't fail
+        }
+    }
+
+    // Notify patient of refund
+    if (patientId) {
+        try {
+            const patientRecord = await regionalDb.send(new GetCommand({
+                TableName: TABLE_APPOINTMENTS,
+                Key: { appointmentId: charge.metadata?.appointmentId || charge.metadata?.referenceId }
+            }));
+            sendNotification({
+                region,
+                recipientEmail: patientRecord.Item?.patientEmail || charge.metadata?.patientEmail,
+                subject: 'Refund Processed',
+                message: `Your refund of $${((charge.amount_refunded || 0) / 100).toFixed(2)} has been processed successfully.`,
+                type: 'GENERAL',
+                metadata: { billId: billId || '', refundId: charge.id }
+            }).catch(() => {});
+        } catch { /* Non-blocking */ }
+    }
+}
+
+async function handleDisputeCreated(dispute: Stripe.Dispute, regionalDb: any, region: string) {
+    const chargeId = typeof dispute.charge === 'string' ? dispute.charge : dispute.charge?.id;
+    const billId = dispute.metadata?.billId;
+
+    safeLog(`Dispute Created: ${dispute.id}, charge: ${chargeId || 'unknown'}, reason: ${dispute.reason}`);
+
+    // Update transaction status to DISPUTED
+    if (billId) {
+        try {
+            await regionalDb.send(new UpdateCommand({
+                TableName: TABLE_TRANSACTIONS,
+                Key: { billId },
+                UpdateExpression: 'SET #s = :s, disputeId = :did, disputeReason = :reason, disputedAt = :now',
+                ExpressionAttributeNames: { '#s': 'status' },
+                ExpressionAttributeValues: {
+                    ':s': 'DISPUTED',
+                    ':did': dispute.id,
+                    ':reason': dispute.reason,
+                    ':now': new Date().toISOString()
+                }
+            }));
+        } catch (err: any) {
+            safeError(`Failed to update transaction ${billId} for dispute: ${err.message}`);
+        }
+    }
+
+    // Push disputed revenue to BigQuery
+    try {
+        pushRevenueToBigQuery({
+            billId: billId || dispute.id,
+            patientId: dispute.metadata?.patientId || 'UNKNOWN',
+            doctorId: dispute.metadata?.doctorId || 'UNKNOWN',
+            amount: (dispute.amount || 0) / 100,
+            status: 'DISPUTED',
+            type: 'DISPUTE',
+        }, region).catch(() => {});
+    } catch { /* Non-blocking */ }
+
+    // Audit log with high severity
+    try {
+        await writeAuditLog(
+            "SYSTEM",
+            "STRIPE",
+            "CHARGE_DISPUTED",
+            `Stripe dispute ${dispute.id} created. Reason: ${dispute.reason}. Amount: ${(dispute.amount || 0) / 100}`,
+            { region, disputeId: dispute.id, chargeId: chargeId || undefined, billId: billId || undefined, reason: dispute.reason }
+        );
+    } catch (err: any) {
+        safeError(`Audit log failed for dispute: ${err.message}`);
+    }
+
+    // Notify admin about dispute
+    try {
+        sendNotification({
+            region,
+            recipientEmail: process.env.ADMIN_EMAIL || '',
+            subject: 'Payment Dispute Alert',
+            message: `A payment dispute has been filed. Dispute ID: ${dispute.id}. Reason: ${dispute.reason}. Amount: $${((dispute.amount || 0) / 100).toFixed(2)}.`,
+            type: 'GENERAL',
+            metadata: { disputeId: dispute.id, billId: billId || '' }
+        }).catch(() => {});
+    } catch { /* Non-blocking */ }
 }
