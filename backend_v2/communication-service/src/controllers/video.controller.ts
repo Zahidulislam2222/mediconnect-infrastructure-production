@@ -7,6 +7,8 @@ import { v4 as uuidv4 } from "uuid";
 import { writeAuditLog } from "../../../shared/audit";
 import { safeLog, safeError } from "../../../shared/logger";
 import { publishEvent, EventType } from '../../../shared/event-bus';
+import { GoogleAuth } from "google-auth-library";
+import { createHash } from "crypto";
 
 const catchAsync = (fn: any) => (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(fn(req, res, next)).catch(next);
@@ -122,6 +124,43 @@ export const createOrJoinSession = catchAsync(async (req: Request, res: Response
     }
 });
 
+// BigQuery: push appointment COMPLETED status when video session ends
+async function pushAppointmentCompletedToBigQuery(aptData: { appointmentId: string; doctorId: string; patientId: string; specialization?: string }, region: string) {
+    try {
+        const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+        const client = await auth.getClient();
+        const accessToken = (await client.getAccessToken()).token;
+        const projectId = await auth.getProjectId();
+
+        const dataset = region.toUpperCase() === 'EU' ? 'mediconnect_analytics_eu' : 'mediconnect_analytics';
+        const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/datasets/${dataset}/tables/appointments_stream/insertAll`;
+
+        const safePatientId = createHash('sha256').update(aptData.patientId + (process.env.HIPAA_SALT || 'mediconnect_salt')).digest('hex');
+
+        await fetch(url, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                kind: 'bigquery#tableDataInsertAllRequest',
+                rows: [{
+                    json: {
+                        appointment_id: aptData.appointmentId,
+                        doctor_id: aptData.doctorId,
+                        patient_id: safePatientId,
+                        timestamp: new Date().toISOString(),
+                        specialization: aptData.specialization || 'General',
+                        status: 'COMPLETED',
+                        notes: 'Video consultation completed',
+                        cost: 0
+                    }
+                }]
+            })
+        });
+    } catch (e: any) {
+        safeError('[VIDEO] BigQuery appointment COMPLETED sync failed', { error: e.message });
+    }
+}
+
 export const endSession = catchAsync(async (req: Request, res: Response) => {
     const region = extractRegion(req);
     const regionalDb = getRegionalClient(region);
@@ -171,6 +210,14 @@ export const endSession = catchAsync(async (req: Request, res: Response) => {
             }));
 
             await writeAuditLog(userId, userId, "VIDEO_SESSION_ENDED", `Meeting ${appointmentId} ended`, { region, ipAddress: req.ip });
+
+            // BigQuery: stream COMPLETED status for analytics (fire-and-forget)
+            pushAppointmentCompletedToBigQuery({
+                appointmentId,
+                doctorId: aptRes.Item.doctorId,
+                patientId: aptRes.Item.patientId,
+                specialization: aptRes.Item.specialization
+            }, region).catch(e => safeError('[VIDEO] BigQuery appointment sync failed', { error: (e as Error).message }));
 
             // Event bus: appointment completed via video session end
             publishEvent(EventType.APPOINTMENT_COMPLETED, { appointmentId, userId, status: "COMPLETED" }, region).catch(() => {});

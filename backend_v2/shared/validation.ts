@@ -250,3 +250,34 @@ export const ChatWsEventBody = z.object({
 export const VideoSessionBody = z.object({
     appointmentId: z.string().min(1, 'Appointment ID is required'),
 });
+
+// ─── REGION ENFORCEMENT (SOC 2 P1 / GDPR Art 44-49) ────────────────────
+
+/**
+ * Middleware that requires x-user-region header on all requests.
+ * Prevents data from being processed in the wrong jurisdiction.
+ * Applied globally — health/ready endpoints should be mounted BEFORE this middleware.
+ */
+export function requireRegionHeader() {
+    return (req: Request, res: Response, next: NextFunction) => {
+        // Skip health checks and public FHIR metadata
+        if (req.path === '/health' || req.path === '/ready' || req.path === '/fhir/metadata' || req.path === '/.well-known/smart-configuration') {
+            return next();
+        }
+        const region = req.headers['x-user-region'];
+        if (!region) {
+            return res.status(400).json({
+                error: 'Missing x-user-region header',
+                message: 'All requests must include x-user-region header for data residency compliance'
+            });
+        }
+        const normalized = Array.isArray(region) ? region[0] : region;
+        if (!['us-east-1', 'eu-central-1', 'US', 'EU', 'us', 'eu'].includes(normalized)) {
+            return res.status(400).json({
+                error: 'Invalid x-user-region header',
+                message: 'Supported regions: US, EU, us-east-1, eu-central-1'
+            });
+        }
+        next();
+    };
+}

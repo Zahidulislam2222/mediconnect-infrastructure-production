@@ -248,6 +248,20 @@ export const updateAllergy = async (req: Request, res: Response) => {
             return res.status(400).json({ error: 'No valid fields to update' });
         }
 
+        // US Core validation before write: merge existing record with proposed updates
+        const merged = { ...Item };
+        for (const field of allowedFields) {
+            if (req.body[field] !== undefined) merged[field] = req.body[field];
+        }
+        const preValidation = validateUSCore(toFHIR(merged));
+        if (!preValidation.valid) {
+            return res.status(422).json({
+                error: 'US Core AllergyIntolerance validation failed',
+                profile: preValidation.profile,
+                issues: preValidation.errors,
+            });
+        }
+
         updates.push('#updatedAt = :now');
         names['#updatedAt'] = 'updatedAt';
 

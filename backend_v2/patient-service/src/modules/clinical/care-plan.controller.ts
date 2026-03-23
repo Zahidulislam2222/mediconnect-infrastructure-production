@@ -266,6 +266,23 @@ export const updateCarePlan = async (req: Request, res: Response) => {
         if (careTeam) { updates.push('careTeam = :ct'); values[':ct'] = careTeam; }
         if (notes !== undefined) { updates.push('notes = :n'); values[':n'] = notes; }
 
+        // US Core validation before write: merge existing record with proposed updates
+        const merged = { ...existing };
+        if (status) merged.status = status;
+        if (title) merged.title = title;
+        if (description !== undefined) merged.description = description;
+        if (conditions) merged.conditions = conditions;
+        if (goals) merged.goals = goals;
+        if (activities) merged.activities = activities;
+        const preValidation = validateUSCore(toFHIRCarePlan(merged));
+        if (!preValidation.valid) {
+            return res.status(422).json({
+                error: 'US Core CarePlan validation failed',
+                profile: preValidation.profile,
+                issues: preValidation.errors,
+            });
+        }
+
         await db.send(new UpdateCommand({
             TableName: TABLE_CAREPLANS,
             Key: { carePlanId },

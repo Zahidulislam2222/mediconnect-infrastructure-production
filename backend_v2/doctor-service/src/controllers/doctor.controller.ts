@@ -15,6 +15,7 @@ import jwt from 'jsonwebtoken';
 import { GoogleAuth } from "google-auth-library";
 import { SendEmailCommand } from "@aws-sdk/client-ses";
 import { AdminDeleteUserCommand } from "@aws-sdk/client-cognito-identity-provider";
+import { createHash } from 'crypto';
 import { safeLog, safeError } from '../../../shared/logger';
 import { publishEvent, EventType } from '../../../shared/event-bus';
 
@@ -614,6 +615,12 @@ export const getCalendarStatus = catchAsync(async (req: Request, res: Response) 
 
 export const connectGoogleCalendar = catchAsync(async (req: Request, res: Response) => {
     const { id } = req.query;
+    const authUser = (req as any).user;
+
+    // Ownership check: only the doctor themselves can initiate Google Calendar connection
+    if (!authUser || (authUser.id !== id && authUser.sub !== id)) {
+        return res.status(403).json({ error: "You can only connect Google Calendar for your own account." });
+    }
 
     const doctorBase = process.env.API_PUBLIC_URL || "http://localhost:8082";
     const redirectUri = `${doctorBase.replace(/\/$/, '')}/doctors/auth/google/callback`;
@@ -842,7 +849,9 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
                             rows: [{ json: {
                                 appointment_id: apt.appointmentId,
                                 doctor_id: "ANONYMIZED_PRACTITIONER",
-                                patient_id: apt.patientId,
+                                patient_id: apt.patientId === "ANONYMIZED_GDPR"
+                                    ? "ANONYMIZED_GDPR"
+                                    : createHash('sha256').update(apt.patientId + (process.env.HIPAA_SALT || 'mediconnect_salt')).digest('hex'),
                                 status: "DOCTOR_DELETED",
                                 timestamp: new Date().toISOString()
                             }}]
@@ -1068,6 +1077,111 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
         }
     } catch (chatErr) {
         safeError("Failed to anonymize doctor chat history", chatErr);
+    }
+
+    // ─── eCR reports anonymization ────────────────────────────────────────
+    try {
+        const ecrTable = process.env.TABLE_ECR || 'mediconnect-ecr-reports';
+        const ecrResult = await docClient.send(new ScanCommand({
+            TableName: ecrTable,
+            FilterExpression: 'submittingDoctorId = :did',
+            ExpressionAttributeValues: { ':did': id }
+        }));
+        const ecrReports = ecrResult.Items || [];
+        for (const ecr of ecrReports) {
+            await docClient.send(new UpdateCommand({
+                TableName: ecrTable,
+                Key: { reportId: (ecr as any).reportId },
+                UpdateExpression: 'SET submittingDoctorId = :anonId, submittingDoctorName = :anon, lastUpdated = :now',
+                ExpressionAttributeValues: {
+                    ':anonId': 'ANONYMIZED',
+                    ':anon': 'ANONYMIZED_DOCTOR',
+                    ':now': new Date().toISOString()
+                }
+            }));
+        }
+        safeLog(`[GDPR] Anonymized ${ecrReports.length} eCR report records.`);
+    } catch (ecrErr) {
+        safeError("eCR Report Anonymization Failed", ecrErr);
+    }
+
+    // ─── ELR reports anonymization ────────────────────────────────────────
+    try {
+        const elrTable = process.env.TABLE_ELR || 'mediconnect-elr-reports';
+        const elrResult = await docClient.send(new ScanCommand({
+            TableName: elrTable,
+            FilterExpression: 'orderingProviderId = :did',
+            ExpressionAttributeValues: { ':did': id }
+        }));
+        const elrReports = elrResult.Items || [];
+        for (const elr of elrReports) {
+            await docClient.send(new UpdateCommand({
+                TableName: elrTable,
+                Key: { reportId: (elr as any).reportId },
+                UpdateExpression: 'SET orderingProviderId = :anonId, orderingProviderName = :anon, lastUpdated = :now',
+                ExpressionAttributeValues: {
+                    ':anonId': 'ANONYMIZED',
+                    ':anon': 'ANONYMIZED_DOCTOR',
+                    ':now': new Date().toISOString()
+                }
+            }));
+        }
+        safeLog(`[GDPR] Anonymized ${elrReports.length} ELR report records.`);
+    } catch (elrErr) {
+        safeError("ELR Report Anonymization Failed", elrErr);
+    }
+
+    // ─── BigQuery analytics_revenue + doctor_onboarding_logs cleanup ─────
+    try {
+        const bqAuth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+        const bqClient = await bqAuth.getClient();
+        const bqToken = (await bqClient.getAccessToken()).token;
+        const bqProject = await bqAuth.getProjectId();
+
+        if (bqToken && bqProject) {
+            const bqDataset = region.toUpperCase() === 'EU' ? 'mediconnect_analytics_eu' : 'mediconnect_analytics';
+            const bqHeaders = { "Authorization": `Bearer ${bqToken}`, "Content-Type": "application/json" };
+
+            // Delete doctor revenue records from analytics_revenue
+            const revenueResponse = await fetch(`https://bigquery.googleapis.com/bigquery/v2/projects/${bqProject}/queries`, {
+                method: "POST",
+                headers: bqHeaders,
+                body: JSON.stringify({
+                    query: `DELETE FROM \`${bqProject}.${bqDataset}.analytics_revenue\` WHERE doctor_id = @doctorId`,
+                    useLegacySql: false,
+                    parameterMode: "NAMED",
+                    queryParameters: [{
+                        name: "doctorId",
+                        parameterType: { type: "STRING" },
+                        parameterValue: { value: id }
+                    }]
+                })
+            });
+            if (revenueResponse.ok) {
+                safeLog(`[GDPR] Deleted doctor ${id} revenue records from BigQuery analytics_revenue.`);
+            } else {
+                safeError("BigQuery analytics_revenue DML DELETE failed", await revenueResponse.text());
+            }
+
+            // Delete doctor onboarding logs
+            await fetch(`https://bigquery.googleapis.com/bigquery/v2/projects/${bqProject}/queries`, {
+                method: "POST",
+                headers: bqHeaders,
+                body: JSON.stringify({
+                    query: `DELETE FROM \`${bqProject}.${bqDataset}.doctor_onboarding_logs\` WHERE doctor_id = @doctorId`,
+                    useLegacySql: false,
+                    parameterMode: "NAMED",
+                    queryParameters: [{
+                        name: "doctorId",
+                        parameterType: { type: "STRING" },
+                        parameterValue: { value: id }
+                    }]
+                })
+            });
+            safeLog(`[GDPR] Deleted doctor ${id} onboarding logs from BigQuery.`);
+        }
+    } catch (bqErr) {
+        safeError("BigQuery doctor data cleanup failed", bqErr);
     }
 
     const regionalS3 = getRegionalS3Client(region);

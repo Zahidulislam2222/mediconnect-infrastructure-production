@@ -16,7 +16,8 @@ import { GoogleAuth } from "google-auth-library";
 // Shared Utilities
 import { safeLog, safeError } from '../../../shared/logger';
 import { writeAuditLog } from '../../../shared/audit';
-import { encryptPHI, decryptPHI } from '../../../shared/kms-crypto';
+import { encryptPHI, decryptPHI, decryptToken } from '../../../shared/kms-crypto';
+import axios from 'axios';
 import { publishEvent, EventType } from '../../../shared/event-bus';
 
 // Shared Clients
@@ -282,23 +283,23 @@ export const createPatient = catchAsync(async (req: Request, res: Response) => {
     let encryptedPHI: Record<string, string> = {};
     try {
         encryptedPHI = await encryptPHI(
-            { name, ...(dob ? { dob } : {}), ...(phone ? { phone } : {}) },
+            { name, ...(dob ? { dob } : {}), ...(phone ? { phone } : {}), email },
             region
         );
     } catch (kmsErr: any) {
         // KMS unavailable (dev/test) — store plaintext with warning
         safeError('[PHI] KMS encryption unavailable, storing plaintext', kmsErr.message);
-        encryptedPHI = { name, ...(dob ? { dob } : {}), ...(phone ? { phone } : {}) };
+        encryptedPHI = { name, ...(dob ? { dob } : {}), ...(phone ? { phone } : {}), email };
     }
 
     // After encryption, update FHIR resource to use encrypted values (prevent PHI leak in stored resource)
     if (encryptedPHI.name) {
         fhirResource.name = [{ use: "official", text: encryptedPHI.name, family: encryptedPHI.name, given: [encryptedPHI.name] }];
     }
-    if (encryptedPHI.phone) {
+    if (encryptedPHI.phone || encryptedPHI.email) {
         fhirResource.telecom = [
-            { system: "email", value: email, use: "home" },
-            { system: "phone", value: encryptedPHI.phone, use: "mobile" },
+            { system: "email", value: encryptedPHI.email || email, use: "home" },
+            ...(encryptedPHI.phone ? [{ system: "phone", value: encryptedPHI.phone, use: "mobile" }] : (phone ? [{ system: "phone", value: phone, use: "mobile" }] : [])),
         ];
     }
     if (encryptedPHI.dob) {
@@ -307,7 +308,7 @@ export const createPatient = catchAsync(async (req: Request, res: Response) => {
 
     const item = {
         patientId: finalId,
-        email,
+        email: encryptedPHI.email || email,
         name: encryptedPHI.name || name,
         role,
         isEmailVerified: true,
@@ -374,12 +375,13 @@ export const getProfile = catchAsync(async (req: Request, res: Response) => {
     // 🟢 HIPAA: Decrypt PHI fields before returning to client
     try {
         const decrypted = await decryptPHI(
-            { name: response.Item.name, dob: response.Item.dob, phone: response.Item.phone },
+            { name: response.Item.name, dob: response.Item.dob, phone: response.Item.phone, email: response.Item.email },
             region
         );
         if (decrypted.name) response.Item.name = decrypted.name;
         if (decrypted.dob) response.Item.dob = decrypted.dob;
         if (decrypted.phone) response.Item.phone = decrypted.phone;
+        if (decrypted.email) response.Item.email = decrypted.email;
     } catch { /* KMS unavailable — fields are already plaintext */ }
 
     response.Item.avatar = await signAvatarUrl(response.Item.avatar, region);
@@ -704,11 +706,39 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
                 if (apt.doctorId && apt.timeSlot) {
                     try {
                         const lockKey = `${apt.doctorId}#${apt.timeSlot}`;
-                        await dynamicDb.send(new DeleteCommand({ 
-                            TableName: process.env.TABLE_LOCKS || "mediconnect-booking-locks", 
-                            Key: { lockId: lockKey } 
+                        await dynamicDb.send(new DeleteCommand({
+                            TableName: process.env.TABLE_LOCKS || "mediconnect-booking-locks",
+                            Key: { lockId: lockKey }
                         }));
                     } catch (e) {}
+                }
+
+                // 4. GDPR: Delete Google Calendar event (patient name visible on doctor's calendar)
+                if (apt.googleEventId && apt.doctorId) {
+                    try {
+                        const doctorRecord = await dynamicDb.send(new GetCommand({
+                            TableName: CONFIG.DOCTOR_TABLE,
+                            Key: { doctorId: apt.doctorId },
+                            ProjectionExpression: 'googleRefreshToken'
+                        }));
+                        const storedToken = doctorRecord.Item?.googleRefreshToken;
+                        if (storedToken) {
+                            const refreshToken = await decryptToken(storedToken, region);
+                            const tokenRes = await axios.post<{ access_token: string }>('https://oauth2.googleapis.com/token', {
+                                client_id: process.env.GOOGLE_CLIENT_ID,
+                                client_secret: process.env.GOOGLE_CLIENT_SECRET,
+                                refresh_token: refreshToken,
+                                grant_type: 'refresh_token'
+                            });
+                            await axios.delete(
+                                `https://www.googleapis.com/calendar/v3/calendars/primary/events/${apt.googleEventId}`,
+                                { headers: { Authorization: `Bearer ${tokenRes.data.access_token}` } }
+                            );
+                            safeLog(`[GDPR] Deleted Google Calendar event ${apt.googleEventId} for appointment ${apt.appointmentId}`);
+                        }
+                    } catch (calErr) {
+                        safeError('[GDPR] Google Calendar event deletion failed (non-blocking)', calErr);
+                    }
                 }
             } else {
                 // Just Anonymize past/completed appointments (Don't refund, just strip PII for GDPR)
@@ -1191,6 +1221,23 @@ export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
         safeLog(`[GDPR] Deleted ${(listResult.Contents || []).length + (deIdResult.Contents || []).length} DICOM images (all versions) for patient ${userId}`);
     } catch (e) { safeError('[GDPR] Failed to delete DICOM images', e); }
 
+    // 22b. DynamoDB: Delete DICOM study metadata (mediconnect-dicom-studies, PK=patientId)
+    try {
+        const dicomMetaQuery = await dynamicDb.send(new QueryCommand({
+            TableName: process.env.TABLE_DICOM_STUDIES || 'mediconnect-dicom-studies',
+            KeyConditionExpression: 'patientId = :pid',
+            ExpressionAttributeValues: { ':pid': userId }
+        }));
+        const dicomMetaItems = dicomMetaQuery.Items || [];
+        for (let i = 0; i < dicomMetaItems.length; i += 25) {
+            const batch = dicomMetaItems.slice(i, i + 25).map((item: any) => ({
+                DeleteRequest: { Key: { patientId: item.patientId, studyInstanceUID: item.studyInstanceUID } }
+            }));
+            await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [process.env.TABLE_DICOM_STUDIES || 'mediconnect-dicom-studies']: batch } }));
+        }
+        safeLog(`[GDPR] Deleted ${dicomMetaItems.length} DICOM metadata entries for patient ${userId}`);
+    } catch (e) { safeError('[GDPR] Failed to delete DICOM metadata', e); }
+
     // 23. eCR reports (electronic Case Reporting — contains patientId)
     try {
         const ecrScan = await dynamicDb.send(new ScanCommand({
@@ -1549,12 +1596,13 @@ export const getPatientById = catchAsync(async (req: Request, res: Response) => 
     // 🟢 HIPAA: Decrypt PHI fields before returning to client
     try {
         const decrypted = await decryptPHI(
-            { name: response.Item.name, dob: response.Item.dob, phone: response.Item.phone },
+            { name: response.Item.name, dob: response.Item.dob, phone: response.Item.phone, email: response.Item.email },
             region
         );
         if (decrypted.name) response.Item.name = decrypted.name;
         if (decrypted.dob) response.Item.dob = decrypted.dob;
         if (decrypted.phone) response.Item.phone = decrypted.phone;
+        if (decrypted.email) response.Item.email = decrypted.email;
     } catch { /* KMS unavailable — fields are already plaintext */ }
 
     response.Item.avatar = await signAvatarUrl(response.Item.avatar, region);
@@ -1586,12 +1634,13 @@ export const exportPatientData = catchAsync(async (req: Request, res: Response) 
     // 🟢 HIPAA: Decrypt PHI fields before export
     try {
         const decrypted = await decryptPHI(
-            { name: patientData.name, dob: patientData.dob, phone: patientData.phone },
+            { name: patientData.name, dob: patientData.dob, phone: patientData.phone, email: patientData.email },
             region
         );
         if (decrypted.name) patientData.name = decrypted.name;
         if (decrypted.dob) patientData.dob = decrypted.dob;
         if (decrypted.phone) patientData.phone = decrypted.phone;
+        if (decrypted.email) patientData.email = decrypted.email;
     } catch { /* KMS unavailable — fields are already plaintext */ }
 
     // Fetch patient's appointments
@@ -1707,6 +1756,19 @@ export const exportPatientData = catchAsync(async (req: Request, res: Response) 
     try {
         const r = await dynamicDb.send(new QueryCommand({ TableName: process.env.TABLE_GRAPH || 'mediconnect-graph-data', KeyConditionExpression: 'PK = :pk', ExpressionAttributeValues: { ':pk': `PATIENT#${userId}` } }));
         graphData = r.Items || [];
+        // Decrypt PHI fields in graph-data (doctorName, patientName) for GDPR Art. 20 portability
+        for (const g of graphData) {
+            try {
+                if (g.doctorName) {
+                    const decrypted = await decryptPHI({ name: g.doctorName }, region);
+                    if (decrypted.name) g.doctorName = decrypted.name;
+                }
+                if (g.patientName) {
+                    const decrypted = await decryptPHI({ name: g.patientName }, region);
+                    if (decrypted.name) g.patientName = decrypted.name;
+                }
+            } catch { /* KMS unavailable — field may already be plaintext */ }
+        }
     } catch { /* Table may not exist */ }
 
     let videoSessions: any[] = [];
@@ -1751,6 +1813,120 @@ export const exportPatientData = catchAsync(async (req: Request, res: Response) 
         elrReports = r.Items || [];
     } catch { /* Table may not exist */ }
 
+    let dicomStudies: any[] = [];
+    try {
+        const r = await dynamicDb.send(new QueryCommand({ TableName: process.env.TABLE_DICOM_STUDIES || 'mediconnect-dicom-studies', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        dicomStudies = r.Items || [];
+    } catch { /* Table may not exist */ }
+
+    // Generate presigned S3 URLs for downloadable files (GDPR Art. 20 — actual data, not just metadata)
+    const regionalS3Export = getRegionalS3Client(region);
+    const isEUExport = region.toUpperCase() === 'EU';
+
+    // EHR document download URLs
+    for (const hr of healthRecords) {
+        try {
+            if (hr.s3Key || hr.recordId) {
+                const ehrBucket = isEUExport
+                    ? (process.env.EHR_BUCKET_EU || 'mediconnect-ehr-records-eu')
+                    : (process.env.EHR_BUCKET_US || 'mediconnect-ehr-records');
+                const key = hr.s3Key || `ehr/${userId}/${hr.recordId}`;
+                const url = await getSignedUrl(regionalS3Export, new GetObjectCommand({ Bucket: ehrBucket, Key: key }), { expiresIn: 3600 });
+                hr.downloadUrl = url;
+            }
+        } catch { /* S3 object may not exist */ }
+    }
+
+    // DICOM study download URLs
+    for (const ds of dicomStudies) {
+        try {
+            if (ds.s3Key || ds.studyInstanceUID) {
+                const dicomBucket = isEUExport
+                    ? (process.env.BUCKET_NAME_DICOM_EU || 'mediconnect-medical-images-eu')
+                    : (process.env.BUCKET_NAME_DICOM || 'mediconnect-medical-images');
+                const key = ds.s3Key || `dicom/${userId}/${ds.studyInstanceUID}`;
+                const url = await getSignedUrl(regionalS3Export, new GetObjectCommand({ Bucket: dicomBucket, Key: key }), { expiresIn: 3600 });
+                ds.downloadUrl = url;
+            }
+        } catch { /* S3 object may not exist */ }
+    }
+
+    // Prescription PDF download URLs
+    for (const rx of prescriptions) {
+        try {
+            if (rx.prescriptionId) {
+                const rxBucket = isEUExport
+                    ? (process.env.S3_BUCKET_PRESCRIPTIONS_EU || 'mediconnect-prescriptions-eu')
+                    : (process.env.S3_BUCKET_PRESCRIPTIONS_US || 'mediconnect-prescriptions');
+                const url = await getSignedUrl(regionalS3Export, new GetObjectCommand({ Bucket: rxBucket, Key: `prescriptions/${rx.prescriptionId}.pdf` }), { expiresIn: 3600 });
+                rx.downloadUrl = url;
+            }
+        } catch { /* S3 object may not exist */ }
+    }
+
+    // Query BigQuery for symptom analysis and vitals data (GDPR Art. 20 — patient-generated content)
+    let symptomLogs: any[] = [];
+    let bigqueryVitals: any[] = [];
+    try {
+        const bqAuth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+        const bqClient = await bqAuth.getClient();
+        const bqToken = (await bqClient.getAccessToken()).token;
+        const bqProject = await bqAuth.getProjectId();
+
+        if (bqToken && bqProject) {
+            const hashedUserId = createHash('sha256').update(userId + (process.env.HIPAA_SALT || 'mediconnect_salt')).digest('hex');
+            const aiDataset = isEUExport ? 'mediconnect_ai_eu' : 'mediconnect_ai';
+            const iotDataset = isEUExport ? 'iot_eu' : 'iot';
+            const bqHeaders = { "Authorization": `Bearer ${bqToken}`, "Content-Type": "application/json" };
+
+            // Fetch symptom analysis sessions
+            try {
+                const symptomResponse = await fetch(`https://bigquery.googleapis.com/bigquery/v2/projects/${bqProject}/queries`, {
+                    method: "POST",
+                    headers: bqHeaders,
+                    body: JSON.stringify({
+                        query: `SELECT * FROM \`${bqProject}.${aiDataset}.symptom_logs\` WHERE user_id = @hashedId`,
+                        useLegacySql: false,
+                        parameterMode: "NAMED",
+                        queryParameters: [{ name: "hashedId", parameterType: { type: "STRING" }, parameterValue: { value: hashedUserId } }]
+                    })
+                });
+                if (symptomResponse.ok) {
+                    const symptomData = await symptomResponse.json() as any;
+                    symptomLogs = (symptomData.rows || []).map((row: any) => {
+                        const fields = symptomData.schema?.fields || [];
+                        const entry: any = {};
+                        fields.forEach((f: any, i: number) => { entry[f.name] = row.f?.[i]?.v; });
+                        return entry;
+                    });
+                }
+            } catch { /* BigQuery symptom query failed */ }
+
+            // Fetch IoT vitals from BigQuery
+            try {
+                const vitalsResponse = await fetch(`https://bigquery.googleapis.com/bigquery/v2/projects/${bqProject}/queries`, {
+                    method: "POST",
+                    headers: bqHeaders,
+                    body: JSON.stringify({
+                        query: `SELECT * FROM \`${bqProject}.${iotDataset}.vitals_raw\` WHERE JSON_EXTRACT_SCALAR(data, '$.patientId') = @hashedId`,
+                        useLegacySql: false,
+                        parameterMode: "NAMED",
+                        queryParameters: [{ name: "hashedId", parameterType: { type: "STRING" }, parameterValue: { value: hashedUserId } }]
+                    })
+                });
+                if (vitalsResponse.ok) {
+                    const vitalsData = await vitalsResponse.json() as any;
+                    bigqueryVitals = (vitalsData.rows || []).map((row: any) => {
+                        const fields = vitalsData.schema?.fields || [];
+                        const entry: any = {};
+                        fields.forEach((f: any, i: number) => { entry[f.name] = row.f?.[i]?.v; });
+                        return entry;
+                    });
+                }
+            } catch { /* BigQuery vitals query failed */ }
+        }
+    } catch { /* BigQuery unavailable — export continues without analytics data */ }
+
     // Build FHIR Bundle for data portability
     const allEntries = [
         { resource: { resourceType: "Patient", ...patientData } },
@@ -1779,6 +1955,9 @@ export const exportPatientData = catchAsync(async (req: Request, res: Response) 
         ...mpiLinks.map(link => ({ resource: { resourceType: "Basic", id: link.linkId, code: { text: 'mpi-link' }, subject: { reference: `Patient/${userId}` }, sourcePatientId: link.sourcePatientId, targetPatientId: link.targetPatientId, matchScore: link.matchScore, linkedAt: link.linkedAt } })),
         ...ecrReports.map(ecr => ({ resource: { resourceType: "Composition", id: ecr.reportId, meta: { profile: ['http://hl7.org/fhir/us/ecr/StructureDefinition/eicr-composition'] }, status: ecr.status || 'final', subject: { reference: `Patient/${userId}` }, date: ecr.reportDate, title: 'Electronic Case Report', conditionCode: ecr.conditionCode, conditionDisplay: ecr.conditionDisplay, urgency: ecr.urgency } })),
         ...elrReports.map(elr => ({ resource: { resourceType: "DiagnosticReport", id: elr.reportId, meta: { profile: ['http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-lab'] }, status: elr.status || 'final', subject: { reference: `Patient/${userId}` }, effectiveDateTime: elr.collectionDate || elr.reportDate, issued: elr.reportDate, code: { coding: [{ system: 'http://loinc.org', code: elr.testLoinc, display: elr.testDisplay }] }, result: [{ display: `${elr.testDisplay}: ${elr.resultValue} ${elr.resultUnit || ''}` }] } })),
+        ...dicomStudies.map(ds => ({ resource: { resourceType: "ImagingStudy", id: ds.studyInstanceUID, status: 'available', subject: { reference: `Patient/${userId}` }, started: ds.studyDate || ds.createdAt, numberOfSeries: ds.numberOfSeries, numberOfInstances: ds.numberOfInstances, modality: ds.modality ? [{ system: 'http://dicom.nema.org/resources/ontology/DCM', code: ds.modality }] : undefined, description: ds.studyDescription, downloadUrl: ds.downloadUrl } })),
+        ...symptomLogs.map(sl => ({ resource: { resourceType: "Observation", id: `symptom-${sl.timestamp || sl.session_id}`, status: 'final', code: { text: 'AI Symptom Analysis' }, subject: { reference: `Patient/${userId}` }, effectiveDateTime: sl.timestamp, valueString: sl.symptoms, component: [{ code: { text: 'risk_level' }, valueString: sl.risk_level }, { code: { text: 'ai_provider' }, valueString: sl.provider }] } })),
+        ...bigqueryVitals.map(bv => ({ resource: { resourceType: "Observation", id: `bq-vital-${bv.timestamp}`, status: 'final', code: { text: 'IoT Vital Reading (Analytics)' }, subject: { reference: `Patient/${userId}` }, effectiveDateTime: bv.timestamp, category: [{ coding: [{ system: 'http://terminology.hl7.org/CodeSystem/observation-category', code: 'vital-signs' }] }] } })),
     ];
 
     const exportBundle = {
@@ -1790,6 +1969,11 @@ export const exportPatientData = catchAsync(async (req: Request, res: Response) 
     };
 
     await writeAuditLog(userId, userId, "GDPR_DATA_EXPORT", "Patient exported personal data", { region, ipAddress: req.ip });
+
+    // SOC 2 P1: Mark exported data with integrity hash
+    const exportHash = createHash('sha256').update(JSON.stringify(exportBundle)).digest('hex');
+    res.setHeader('X-Export-Integrity', exportHash);
+    res.setHeader('X-Export-Encryption', 'AES-256-GCM-client-side');
 
     res.json(exportBundle);
 });

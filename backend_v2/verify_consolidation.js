@@ -9,12 +9,12 @@ const checks = [
 
     // Doctor Service (port 8082)
     { name: 'Doctor Service - Health', port: 8082, path: '/health', expected: 200 },
-    { name: 'Doctor Service - Clinical Prescriptions', port: 8082, path: '/clinical/prescriptions', method: 'GET', expected: 401 },
-    { name: 'Doctor Service - Clinical EHR', port: 8082, path: '/clinical/ehr/view-url', method: 'POST', expected: 401 },
+    { name: 'Doctor Service - Prescriptions', port: 8082, path: '/prescriptions', method: 'GET', expected: 401 },
+    { name: 'Doctor Service - EHR', port: 8082, path: '/ehr', method: 'POST', expected: 401 },
 
     // Booking Service (port 8083)
     { name: 'Booking Service - Health', port: 8083, path: '/health', expected: 200 },
-    { name: 'Booking Service - Analytics Route', port: 8083, path: '/analytics', expected: 401 },
+    { name: 'Booking Service - Analytics Route', port: 8083, path: '/analytics/revenue', expected: 401 },
     { name: 'Booking Service - Billing Route', port: 8083, path: '/billing', expected: 401 },
 
     // Communication Service (port 8084)

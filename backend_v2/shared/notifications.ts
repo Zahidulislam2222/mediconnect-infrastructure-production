@@ -1,5 +1,4 @@
-import { getRegionalSNSClient, getRegionalSESClient } from './aws-config';
-import { PublishCommand } from '@aws-sdk/client-sns';
+import { getRegionalSESClient } from './aws-config';
 import { SendEmailCommand } from '@aws-sdk/client-ses';
 import { safeLog, safeError } from './logger';
 
@@ -51,27 +50,3 @@ export async function sendNotification(options: NotificationOptions): Promise<vo
   }
 }
 
-/**
- * Publish an internal event via SNS for cross-service awareness.
- * Non-blocking: failures are logged but never thrown.
- */
-export async function publishNotificationEvent(
-  region: string,
-  topicArn: string,
-  eventType: string,
-  payload: Record<string, unknown>
-): Promise<void> {
-  try {
-    const snsClient = getRegionalSNSClient(region);
-    await snsClient.send(new PublishCommand({
-      TopicArn: topicArn,
-      Message: JSON.stringify({ eventType, ...payload, timestamp: new Date().toISOString() }),
-      MessageAttributes: {
-        eventType: { DataType: 'String', StringValue: eventType }
-      }
-    }));
-    safeLog('Event published', { eventType });
-  } catch (error) {
-    safeError('Failed to publish event', { eventType, error: (error as Error).message });
-  }
-}

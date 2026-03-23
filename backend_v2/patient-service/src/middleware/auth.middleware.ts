@@ -62,16 +62,19 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
         const groups = (payload['cognito:groups'] as string[]) || [];
         const isDoctor = groups.some((g: string) => g.toLowerCase() === 'doctor');
 
-        (req as any).user = { 
+        (req as any).user = {
             id: payload.sub,
             sub: payload.sub,
             email: payload.email,
-            fhirId: payload["custom:fhir_id"] || payload.sub, 
+            fhirId: payload["custom:fhir_id"] || payload.sub,
             region: userRegion,
             isDoctor,
-            isPatient: !isDoctor
+            isPatient: !isDoctor,
+            mfaVerified: payload['custom:mfa_verified'] === 'true' ||
+                         (payload.amr && Array.isArray(payload.amr) && payload.amr.includes('mfa')),
+            authTime: payload.auth_time,
         };
-        
+
         next();
 
     } catch (err: any) {
@@ -80,4 +83,25 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
         res.status(401).json({ error: "Unauthorized: Invalid or expired token" });
         return;
     }
+};
+
+/**
+ * HIPAA §164.312(d): MFA enforcement for sensitive operations.
+ * Apply after authMiddleware on routes that access PHI.
+ */
+export const requireMFA = (req: Request, res: Response, next: NextFunction) => {
+    const user = (req as any).user;
+    if (!user) {
+        return res.status(401).json({ error: 'Unauthorized: Authentication required' });
+    }
+    // In production, Cognito enforces MFA at pool level.
+    // This middleware verifies the MFA claim is present in the token.
+    // Skip enforcement in non-production to allow local development.
+    if (process.env.NODE_ENV === 'production' && !user.mfaVerified) {
+        return res.status(403).json({
+            error: 'MFA required',
+            message: 'Multi-factor authentication is required for this operation. Please enable MFA in your account settings.'
+        });
+    }
+    next();
 };

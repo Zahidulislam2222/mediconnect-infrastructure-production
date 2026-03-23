@@ -251,6 +251,9 @@ export const handleWebSocketEvent = async (event: any) => {
 
         case "$disconnect":
             await regionalDb.send(new DeleteCommand({ TableName: DB_TABLES.CONNECTIONS, Key: { connectionId } }));
+            try {
+                await writeAuditLog(userId || "unknown", "SYSTEM", "WS_DISCONNECT", `WebSocket disconnected: ${connectionId}`, { region, connectionId });
+            } catch { /* Non-blocking audit */ }
             return { statusCode: 200, body: {} };
 
         default:

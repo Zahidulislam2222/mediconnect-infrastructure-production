@@ -22,10 +22,11 @@ interface ConsentRecord {
     patientId: string;
     policyVersion: string;
     consentType: string;
-    status: 'granted' | 'withdrawn';
+    status: 'granted' | 'withdrawn' | 'expired';
     timestamp: string;
     ipAddress: string;
     userAgent: string;
+    expiresAt?: string; // ISO 8601 — GDPR Art 7: consent must not be indefinite
 }
 
 /**
@@ -71,8 +72,12 @@ export const getConsent = async (req: Request, res: Response) => {
             }
         }
 
+        const now = new Date().toISOString();
         const activeConsents = Array.from(latestByType.values()).filter(
-            (r) => r.status === 'granted'
+            (r) => r.status === 'granted' && (!r.expiresAt || r.expiresAt > now)
+        );
+        const expiredConsents = Array.from(latestByType.values()).filter(
+            (r) => r.status === 'granted' && r.expiresAt && r.expiresAt <= now
         );
 
         // FHIR R4: Map each active consent to a FHIR Consent resource
@@ -102,6 +107,7 @@ export const getConsent = async (req: Request, res: Response) => {
 
         return res.json({
             activeConsents,
+            expiredConsents,
             fhirConsents,
             history
         });
@@ -135,6 +141,11 @@ export const updateConsent = async (req: Request, res: Response) => {
             return res.status(400).json({ error: 'Missing required fields: policyVersion, consentType' });
         }
 
+        // GDPR Art 7: Consent should have a defined validity period
+        // Default: 365 days. Can be overridden via expiresInDays in request body.
+        const expiresInDays = req.body.expiresInDays || 365;
+        const expiresAt = new Date(Date.now() + expiresInDays * 24 * 60 * 60 * 1000).toISOString();
+
         const consentRecord: ConsentRecord = {
             consentId: randomUUID(),
             patientId,
@@ -143,7 +154,8 @@ export const updateConsent = async (req: Request, res: Response) => {
             status: 'granted',
             timestamp: new Date().toISOString(),
             ipAddress: req.ip || '0.0.0.0',
-            userAgent: req.headers['user-agent'] || 'unknown'
+            userAgent: req.headers['user-agent'] || 'unknown',
+            expiresAt
         };
 
         // Append-only: always a PutCommand, never an UpdateCommand on old rows

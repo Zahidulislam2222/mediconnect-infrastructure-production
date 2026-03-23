@@ -248,6 +248,120 @@ function mapRDS_O13(msg: HL7Message): { patient: any; medicationDispense: any } 
     return { patient, medicationDispense };
 }
 
+// ORM^O01 → FHIR ServiceRequest (General Order)
+function mapORM_O01(msg: HL7Message): { patient: any; serviceRequest: any } {
+    const patient = parsePID(msg);
+    const orc = getSegment(msg, "ORC");
+    const obr = getSegment(msg, "OBR");
+
+    const orderCode = getField(obr, 4); // OBR.4 (code^description)
+    const [code, display] = orderCode.split("^");
+    const orderStatus = getField(orc, 5); // ORC.5
+
+    const statusMap: Record<string, string> = {
+        "NW": "active", "CA": "revoked", "DC": "revoked",
+        "CM": "completed", "HD": "on-hold", "SC": "active"
+    };
+
+    const serviceRequest = {
+        resourceType: "ServiceRequest",
+        id: uuidv4(),
+        status: statusMap[orderStatus] || "active",
+        intent: "order",
+        code: {
+            coding: [{ system: "http://loinc.org", code: code, display: display || code }],
+            text: display || code
+        },
+        subject: { reference: `Patient/${patient?.id}` },
+        requester: orc ? { reference: `Practitioner/${getField(orc, 12).split("^")[0]}` } : undefined,
+        authoredOn: new Date().toISOString(),
+        priority: getField(orc, 7)?.includes("S") ? "stat" : "routine"
+    };
+
+    return { patient, serviceRequest };
+}
+
+// ORU^R01 → FHIR DiagnosticReport + Observation (Lab Result)
+function mapORU_R01(msg: HL7Message): { patient: any; diagnosticReport: any; observations: any[] } {
+    const patient = parsePID(msg);
+    const obr = getSegment(msg, "OBR");
+    const obxSegments = msg.segments.filter(s => s.name === "OBX");
+
+    const testCode = getField(obr, 4);
+    const [code, display] = testCode.split("^");
+
+    const observations = obxSegments.map((obx, i) => {
+        const valueType = getField(obx, 2); // OBX.2
+        const obsId = getField(obx, 3); // OBX.3
+        const [obsCode, obsDisplay] = obsId.split("^");
+        const value = getField(obx, 5); // OBX.5
+        const units = getField(obx, 6); // OBX.6
+        const refRange = getField(obx, 7); // OBX.7
+        const abnormalFlag = getField(obx, 8); // OBX.8
+        const obsStatus = getField(obx, 11); // OBX.11
+
+        const statusMap: Record<string, string> = { "F": "final", "P": "preliminary", "C": "corrected" };
+
+        return {
+            resourceType: "Observation",
+            id: uuidv4(),
+            status: statusMap[obsStatus] || "final",
+            code: {
+                coding: [{ system: "http://loinc.org", code: obsCode, display: obsDisplay || obsCode }],
+                text: obsDisplay || obsCode
+            },
+            subject: { reference: `Patient/${patient?.id}` },
+            valueQuantity: valueType === "NM" ? { value: parseFloat(value) || 0, unit: units?.split("^")[0] || "" } : undefined,
+            valueString: valueType !== "NM" ? value : undefined,
+            referenceRange: refRange ? [{ text: refRange }] : [],
+            interpretation: abnormalFlag ? [{
+                coding: [{ system: "http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation", code: abnormalFlag }]
+            }] : []
+        };
+    });
+
+    const diagnosticReport = {
+        resourceType: "DiagnosticReport",
+        id: uuidv4(),
+        status: "final",
+        code: {
+            coding: [{ system: "http://loinc.org", code: code, display: display || code }],
+            text: display || code
+        },
+        subject: { reference: `Patient/${patient?.id}` },
+        issued: new Date().toISOString(),
+        result: observations.map(o => ({ reference: `Observation/${o.id}` }))
+    };
+
+    return { patient, diagnosticReport, observations };
+}
+
+// SIU^S12 → FHIR Appointment (Scheduling)
+function mapSIU_S12(msg: HL7Message): { patient: any; appointment: any } {
+    const patient = parsePID(msg);
+    const sch = getSegment(msg, "SCH");
+    const aig = getSegment(msg, "AIG");
+
+    const startTime = getField(sch, 11); // SCH.11
+    const duration = getField(sch, 9); // SCH.9
+    const reason = getField(sch, 7); // SCH.7
+
+    const appointment = {
+        resourceType: "Appointment",
+        id: uuidv4(),
+        status: "booked",
+        start: startTime ? formatHL7Date(startTime) : new Date().toISOString(),
+        minutesDuration: parseInt(duration) || 30,
+        participant: [
+            { actor: { reference: `Patient/${patient?.id}` }, status: "accepted" },
+            ...(aig ? [{ actor: { reference: `Practitioner/${getField(aig, 3).split("^")[0]}` }, status: "accepted" }] : [])
+        ],
+        reasonCode: reason ? [{ text: reason.split("^")[1] || reason }] : []
+    };
+
+    return { patient, appointment };
+}
+
 // =============================================================================
 // CONTROLLERS
 // =============================================================================
@@ -306,6 +420,18 @@ export const receiveHL7Message = async (req: Request, res: Response) => {
             case "RDS^O13":
                 fhirResources = mapRDS_O13(msg);
                 processedType = "Dispense";
+                break;
+            case "ORM^O01":
+                fhirResources = mapORM_O01(msg);
+                processedType = "General Order";
+                break;
+            case "ORU^R01":
+                fhirResources = mapORU_R01(msg);
+                processedType = "Lab Result";
+                break;
+            case "SIU^S12":
+                fhirResources = mapSIU_S12(msg);
+                processedType = "Scheduling";
                 break;
             default:
                 const nak = generateACK(msg, "AR", `Unsupported message type: ${messageKey}`);
@@ -436,6 +562,24 @@ export const getSupportedTypes = async (_req: Request, res: Response) => {
                 name: "Pharmacy/Treatment Dispense",
                 description: "Medication dispense creates FHIR MedicationDispense",
                 fhirMapping: ["MedicationDispense", "Patient"]
+            },
+            {
+                type: "ORM^O01",
+                name: "General Order",
+                description: "General order creates FHIR ServiceRequest resource",
+                fhirMapping: ["ServiceRequest", "Patient"]
+            },
+            {
+                type: "ORU^R01",
+                name: "Observation Result",
+                description: "Lab/observation result creates FHIR DiagnosticReport + Observation resources",
+                fhirMapping: ["DiagnosticReport", "Observation", "Patient"]
+            },
+            {
+                type: "SIU^S12",
+                name: "Notification of New Appointment Booking",
+                description: "Scheduling notification creates FHIR Appointment resource",
+                fhirMapping: ["Appointment", "Patient"]
             }
         ],
         endpoint: "POST /hl7/receive",

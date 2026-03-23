@@ -27,9 +27,15 @@ export function getRedisClient(): Redis | null {
         return null;
     }
 
+    // SOC 2 C1: Enable TLS for encrypted Redis connections
+    // Redis URLs starting with "rediss://" auto-enable TLS via ioredis.
+    // REDIS_TLS=true forces TLS even for redis:// URLs (e.g., ElastiCache in-transit encryption).
+    const enableTLS = redisUrl.startsWith('rediss://') || process.env.REDIS_TLS === 'true';
+
     redisClient = new Redis(redisUrl, {
         maxRetriesPerRequest: null, // Required by rate-limit-redis
         enableReadyCheck: true,
+        ...(enableTLS && { tls: { rejectUnauthorized: process.env.REDIS_TLS_REJECT_UNAUTHORIZED !== 'false' } }),
         retryStrategy(times) {
             if (times > 10) {
                 safeError('Redis: Max reconnection attempts reached. Falling back to in-memory.');

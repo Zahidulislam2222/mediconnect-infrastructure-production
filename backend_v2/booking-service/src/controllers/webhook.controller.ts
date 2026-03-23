@@ -3,7 +3,7 @@ import Stripe from 'stripe';
 import { getRegionalClient, getSSMParameter } from '../../../shared/aws-config';
 import { TransactWriteCommand, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { createHash } from 'crypto';
-import { pushRevenueToBigQuery } from './billing.controller';
+import { pushRevenueToBigQuery, pushAppointmentToBigQuery } from './billing.controller';
 import { writeAuditLog } from '../../../shared/audit';
 import { safeLog, safeError } from '../../../shared/logger';
 import { sendNotification } from '../../../shared/notifications';
@@ -134,6 +134,9 @@ export const handleStripeWebhook = async (req: Request, res: Response) => {
     } else if (event.type === 'charge.dispute.created') {
         const dispute = event.data.object as Stripe.Dispute;
         await handleDisputeCreated(dispute, regionalDb, region);
+    } else if (event.type === 'charge.dispute.closed') {
+        const dispute = event.data.object as Stripe.Dispute;
+        await handleDisputeClosed(dispute, regionalDb, region);
     }
 
     res.json({ received: true });
@@ -238,6 +241,17 @@ async function handlePaymentFailure(paymentIntent: Stripe.PaymentIntent, regiona
                 status: "FAILED"
             }, region).catch(e => safeError("BigQuery revenue failure sync failed"));
         } catch {}
+    }
+
+    // Push appointment status to BigQuery (tracks PAYMENT_FAILED status from webhook)
+    if (referenceId) {
+        pushAppointmentToBigQuery({
+            appointmentId: referenceId,
+            doctorId: paymentIntent.metadata?.doctorId || "UNKNOWN",
+            patientId: patientId || "UNKNOWN",
+            status: "PAYMENT_FAILED",
+            specialization: paymentIntent.metadata?.specialization || "General"
+        }, region).catch(e => safeError("BigQuery appointment sync failed on payment failure"));
     }
 
     // 4. Fire-and-forget payment failure notification
@@ -349,6 +363,17 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
             }, region).catch(e => safeError("BigQuery sync failed"));
         }
 
+        // Push appointment status to BigQuery (tracks CONFIRMED status from webhook)
+        if (type === 'BOOKING_FEE' && referenceId) {
+            pushAppointmentToBigQuery({
+                appointmentId: referenceId,
+                doctorId: existingTxItem?.doctorId || "UNKNOWN",
+                patientId: existingTxItem?.patientId || "UNKNOWN",
+                status: "CONFIRMED",
+                specialization: existingTxItem?.specialization || "General"
+            }, region).catch(e => safeError("BigQuery appointment sync failed on payment success"));
+        }
+
         // FIX #9: Audit log for successful payment
         try {
             const txPatientId = existingTxItem?.patientId || paymentIntent.metadata?.patientId || "UNKNOWN";
@@ -455,6 +480,18 @@ async function handleChargeRefunded(charge: Stripe.Charge, regionalDb: any, regi
         }
     }
 
+    // Push appointment status to BigQuery (tracks REFUNDED status from webhook)
+    const refundedAppointmentId = charge.metadata?.appointmentId || charge.metadata?.referenceId;
+    if (refundedAppointmentId) {
+        pushAppointmentToBigQuery({
+            appointmentId: refundedAppointmentId,
+            doctorId: charge.metadata?.doctorId || "UNKNOWN",
+            patientId: patientId || "UNKNOWN",
+            status: "REFUNDED",
+            specialization: charge.metadata?.specialization || "General"
+        }, region).catch(e => safeError("BigQuery appointment sync failed on charge refund"));
+    }
+
     // Notify patient of refund
     if (patientId) {
         try {
@@ -534,6 +571,70 @@ async function handleDisputeCreated(dispute: Stripe.Dispute, regionalDb: any, re
             message: `A payment dispute has been filed. Dispute ID: ${dispute.id}. Reason: ${dispute.reason}. Amount: $${((dispute.amount || 0) / 100).toFixed(2)}.`,
             type: 'GENERAL',
             metadata: { disputeId: dispute.id, billId: billId || '' }
+        }).catch(() => {});
+    } catch { /* Non-blocking */ }
+}
+
+async function handleDisputeClosed(dispute: Stripe.Dispute, regionalDb: any, region: string) {
+    const billId = dispute.metadata?.billId;
+    const disputeWon = dispute.status === 'won';
+    const resolvedStatus = disputeWon ? 'PAID' : 'REFUNDED';
+
+    safeLog(`Dispute Closed: ${dispute.id}, status: ${dispute.status}, resolved as: ${resolvedStatus}`);
+
+    // Update transaction status based on dispute outcome
+    if (billId) {
+        try {
+            await regionalDb.send(new UpdateCommand({
+                TableName: TABLE_TRANSACTIONS,
+                Key: { billId },
+                UpdateExpression: 'SET #s = :s, disputeResolvedAt = :now, disputeOutcome = :outcome',
+                ExpressionAttributeNames: { '#s': 'status' },
+                ExpressionAttributeValues: {
+                    ':s': resolvedStatus,
+                    ':now': new Date().toISOString(),
+                    ':outcome': dispute.status
+                }
+            }));
+        } catch (err: any) {
+            safeError(`Failed to update transaction ${billId} for dispute closure: ${err.message}`);
+        }
+    }
+
+    // Push resolved revenue to BigQuery
+    try {
+        pushRevenueToBigQuery({
+            billId: billId || dispute.id,
+            patientId: dispute.metadata?.patientId || 'UNKNOWN',
+            doctorId: dispute.metadata?.doctorId || 'UNKNOWN',
+            amount: (dispute.amount || 0) / 100,
+            status: resolvedStatus,
+            type: 'DISPUTE_RESOLVED',
+        }, region).catch(() => {});
+    } catch { /* Non-blocking */ }
+
+    // Audit log
+    try {
+        await writeAuditLog(
+            "SYSTEM",
+            "STRIPE",
+            "CHARGE_DISPUTE_CLOSED",
+            `Stripe dispute ${dispute.id} closed. Outcome: ${dispute.status}. Amount: ${(dispute.amount || 0) / 100}`,
+            { region, disputeId: dispute.id, billId: billId || undefined, outcome: dispute.status }
+        );
+    } catch (err: any) {
+        safeError(`Audit log failed for dispute closure: ${err.message}`);
+    }
+
+    // Notify admin about resolution
+    try {
+        sendNotification({
+            region,
+            recipientEmail: process.env.ADMIN_EMAIL || '',
+            subject: `Payment Dispute ${disputeWon ? 'Won' : 'Lost'}`,
+            message: `Dispute ${dispute.id} has been ${disputeWon ? 'won — funds retained' : 'lost — funds returned to customer'}. Amount: $${((dispute.amount || 0) / 100).toFixed(2)}.`,
+            type: 'GENERAL',
+            metadata: { disputeId: dispute.id, billId: billId || '', outcome: dispute.status }
         }).catch(() => {});
     } catch { /* Non-blocking */ }
 }

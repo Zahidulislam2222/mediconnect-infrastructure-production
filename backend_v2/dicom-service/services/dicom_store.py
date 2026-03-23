@@ -1,9 +1,12 @@
 
 import os
+import logging
 from pynetdicom import AE, StoragePresentationContexts
 from pynetdicom.sop_class import CTImageStorage, MRImageStorage
 from pydicom.dataset import FileDataset
 from pydicom.uid import ImplicitVRLittleEndian, ExplicitVRLittleEndian, ExplicitVRBigEndian
+
+logger = logging.getLogger("dicom-pacs-store")
 
 # 🟢 IHE Cardiology Profile Conformance:
 # Complies with IHE ITI TF-2a (Transactions) - Ensures robust syntax negotiation 
@@ -37,5 +40,5 @@ def send_to_pacs(dataset: FileDataset) -> bool:
         assoc.release()
         return status and status.Status == 0x0000
     else:
-        print("Association with PACS rejected or timed out.")
+        logger.error("Association with PACS rejected or timed out.")
         return False

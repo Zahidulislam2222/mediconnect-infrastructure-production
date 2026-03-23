@@ -7,6 +7,7 @@
 
 import { Request, Response } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import { createHmac } from 'crypto';
 import { PutCommand, GetCommand, UpdateCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
@@ -59,11 +60,15 @@ export const startBlueButtonAuth = async (req: Request, res: Response) => {
             });
         }
 
-        const state = Buffer.from(JSON.stringify({
+        const statePayload = JSON.stringify({
             userId: user.id,
             nonce: uuidv4(),
             timestamp: Date.now(),
-        })).toString('base64');
+        });
+        const stateSignature = createHmac('sha256', getClientSecret())
+            .update(statePayload)
+            .digest('hex');
+        const state = Buffer.from(statePayload).toString('base64') + '.' + stateSignature;
 
         const authUrl = `${config.authUrl}?` + new URLSearchParams({
             response_type: 'code',
@@ -98,10 +103,26 @@ export const handleBlueButtonCallback = async (req: Request, res: Response) => {
             return res.status(400).json({ error: 'Missing code or state parameter' });
         }
 
-        // Decode state
+        // Decode and verify HMAC-signed state (CSRF protection)
         let stateData: any;
         try {
-            stateData = JSON.parse(Buffer.from(state as string, 'base64').toString());
+            const stateStr = state as string;
+            const dotIndex = stateStr.lastIndexOf('.');
+            if (dotIndex === -1) return res.status(400).json({ error: 'Invalid state format' });
+
+            const encodedPayload = stateStr.substring(0, dotIndex);
+            const receivedSignature = stateStr.substring(dotIndex + 1);
+            const payload = Buffer.from(encodedPayload, 'base64').toString();
+
+            // Verify HMAC signature to prevent state forgery
+            const expectedSignature = createHmac('sha256', getClientSecret())
+                .update(payload)
+                .digest('hex');
+            if (receivedSignature !== expectedSignature) {
+                return res.status(400).json({ error: 'Invalid state signature' });
+            }
+
+            stateData = JSON.parse(payload);
         } catch {
             return res.status(400).json({ error: 'Invalid state parameter' });
         }
@@ -109,6 +130,14 @@ export const handleBlueButtonCallback = async (req: Request, res: Response) => {
         // Verify state is not expired (10 minutes)
         if (Date.now() - stateData.timestamp > 600000) {
             return res.status(400).json({ error: 'Authorization state expired' });
+        }
+
+        // Verify the authenticated user owns this state (prevent account-linking hijack)
+        const authUser = (req as any).user;
+        if (!authUser || (authUser.id !== stateData.userId && authUser.sub !== stateData.userId)) {
+            await writeAuditLog(authUser?.id || 'unknown', stateData.userId, 'BLUEBUTTON_HIJACK_ATTEMPT',
+                'User attempted to link Blue Button tokens to another patient account', { region: extractRegion(req), ipAddress: req.ip });
+            return res.status(403).json({ error: 'State does not belong to authenticated user' });
         }
 
         const config = getConfig();

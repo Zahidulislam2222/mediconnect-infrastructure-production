@@ -695,15 +695,18 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
         });
     }
 
-    await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
-
-    // 3. Delete Lock
+    // Include lock release in the atomic transaction to prevent orphaned locks
     if (apt.doctorId && apt.timeSlot) {
-        try {
-            const lockKey = `${apt.doctorId}#${normalizeTimeSlot(apt.timeSlot)}`;
-            await docClient.send(new DeleteCommand({ TableName: TABLE_LOCKS, Key: { lockId: lockKey } }));
-        } catch (lockError: any) { logger.error("[BOOKING] Failed to release lock", { error: lockError.message }); }
+        const lockKey = `${apt.doctorId}#${normalizeTimeSlot(apt.timeSlot)}`;
+        transactItems.push({
+            Delete: {
+                TableName: TABLE_LOCKS,
+                Key: { lockId: lockKey }
+            }
+        });
     }
+
+    await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
 
     if (apt.googleEventId && apt.doctorId) {
         deleteFromGoogleCalendar(apt.doctorId, apt.googleEventId, region).catch(e => logger.error("[BOOKING] Calendar delete failed on user cancel", { error: e.message }));
@@ -955,12 +958,18 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
             });
         }
 
-        await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
-
+        // Include lock release in the atomic transaction to prevent orphaned locks
         if (apt.doctorId && apt.timeSlot) {
             const lockKey = `${apt.doctorId}#${normalizeTimeSlot(apt.timeSlot)}`;
-            await docClient.send(new DeleteCommand({ TableName: TABLE_LOCKS, Key: { lockId: lockKey } }));
+            transactItems.push({
+                Delete: {
+                    TableName: TABLE_LOCKS,
+                    Key: { lockId: lockKey }
+                }
+            });
         }
+
+        await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
 
         // 2. Google Calendar Cleanup (If connected)
         if (apt.googleEventId && apt.doctorId) {

@@ -1,7 +1,8 @@
 import { Router, Request, Response } from "express";
 import { PDFGenerator } from "../../utils/pdf-generator";
-import { getRegionalClient } from '../../../../shared/aws-config';
+import { getRegionalClient, getRegionalS3Client } from '../../../../shared/aws-config';
 import { PutCommand, QueryCommand, GetCommand, UpdateCommand, DeleteCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { v4 as uuidv4 } from "uuid";
 import { safeLog, safeError } from '../../../../shared/logger';
 import { writeAuditLog } from '../../../../shared/audit';
@@ -565,6 +566,20 @@ export const cancelPrescription = async (req: Request, res: Response) => {
             }));
         } catch (graphErr) {
             // Non-blocking
+        }
+
+        // Delete prescription PDF from S3
+        try {
+            const s3Bucket = userRegion.toUpperCase().includes('EU')
+                ? (process.env.S3_BUCKET_PRESCRIPTIONS_EU || 'mediconnect-prescriptions-eu')
+                : (process.env.S3_BUCKET_PRESCRIPTIONS_US || 'mediconnect-prescriptions');
+            const s3Client = getRegionalS3Client(userRegion);
+            await s3Client.send(new DeleteObjectCommand({
+                Bucket: s3Bucket,
+                Key: `prescriptions/${prescriptionId}.pdf`
+            }));
+        } catch (s3Err) {
+            // Non-blocking: PDF may not exist or S3 unavailable
         }
 
         // Write audit log
