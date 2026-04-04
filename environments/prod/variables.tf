@@ -20,14 +20,8 @@ variable "azure_subscription_id" {
   type        = string
 }
 
-variable "db_master_password" {
-  description = "Master password for all databases"
-  type        = string
-  sensitive   = true
-}
-
 variable "azure_location" {
   description = "The Azure Region for resources"
   type        = string
-  default     = "westus" # We change this to westus to bypass the East US crowd
+  default     = "westus"
 }

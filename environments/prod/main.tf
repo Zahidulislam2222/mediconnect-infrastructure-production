@@ -9,25 +9,17 @@ data "aws_subnets" "default" {
   }
 }
 
-module "gcp_data" {
-  source      = "../../modules/gcp/data"
-  project_id  = var.gcp_project_id
-  db_password = var.db_master_password
-}
-
 module "azure_data" {
   source              = "../../modules/azure/data"
   subscription_id     = var.azure_subscription_id
-  resource_group_name = "mediconnect-prod-rg" # Assuming RG exists or is managed elsewhere, otherwise should be resource. For now, hardcoding as per typical existing infra or assumed pre-req.
+  resource_group_name = "mediconnect-rg"
   location            = var.azure_location
 }
 
 module "aws_identity" {
-  source                  = "../../modules/aws/identity"
-  gcp_sql_connection_name = module.gcp_data.connection_name
-  db_password             = var.db_master_password
-  azure_cosmos_endpoint   = module.azure_data.endpoint
-  azure_cosmos_key        = module.azure_data.primary_key
+  source                = "../../modules/aws/identity"
+  azure_cosmos_endpoint = module.azure_data.endpoint
+  azure_cosmos_key      = module.azure_data.primary_key
 }
 
 module "migration_job" {
