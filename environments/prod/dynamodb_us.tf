@@ -8,13 +8,10 @@ module "dynamodb_us" {
   tables = {
     "mediconnect-appointments" = {
       hash_key               = "appointmentId"
+      deletion_protection    = true
       point_in_time_recovery = true
       stream_enabled         = true
       stream_view_type       = "NEW_AND_OLD_IMAGES"
-      tags = {
-        Environment = "Dev"
-        Project     = "MediConnect"
-      }
       global_secondary_indexes = [
         {
           name     = "StatusIndex"
@@ -34,21 +31,28 @@ module "dynamodb_us" {
 
     "mediconnect-audit-logs" = {
       hash_key               = "logId"
+      deletion_protection    = true
       point_in_time_recovery = true
       ttl_enabled            = true
       ttl_attribute          = "ttl"
     }
 
     "mediconnect-billing-audit" = {
-      hash_key = "auditId"
+      hash_key               = "auditId"
+      deletion_protection    = true
+      point_in_time_recovery = true
     }
 
     "mediconnect-booking-locks" = {
-      hash_key = "lockId"
+      hash_key               = "lockId"
+      deletion_protection    = true
+      point_in_time_recovery = true
     }
 
     "mediconnect-chat-connections" = {
-      hash_key = "connectionId"
+      hash_key               = "connectionId"
+      deletion_protection    = true
+      point_in_time_recovery = true
       global_secondary_indexes = [
         {
           name     = "UserIdIndex"
@@ -58,82 +62,105 @@ module "dynamodb_us" {
     }
 
     "mediconnect-chat-history" = {
-      hash_key  = "conversationId"
-      range_key = "timestamp"
+      hash_key               = "conversationId"
+      range_key              = "timestamp"
+      deletion_protection    = true
+      point_in_time_recovery = true
     }
 
     "mediconnect-clinical-notes" = {
-      hash_key  = "patientId"
-      range_key = "timestamp"
+      hash_key               = "patientId"
+      range_key              = "timestamp"
+      deletion_protection    = true
+      point_in_time_recovery = true
     }
 
     "mediconnect-content-cache" = {
-      hash_key      = "cacheKey"
-      ttl_enabled   = true
-      ttl_attribute = "ttl"
+      hash_key               = "cacheKey"
+      deletion_protection    = true
+      point_in_time_recovery = true
+      ttl_enabled            = true
+      ttl_attribute          = "ttl"
     }
 
     "mediconnect-doctor-schedules" = {
-      hash_key = "doctorId"
+      hash_key               = "doctorId"
+      deletion_protection    = true
+      point_in_time_recovery = true
     }
 
     "mediconnect-doctors" = {
-      hash_key = "doctorId"
+      hash_key               = "doctorId"
+      deletion_protection    = true
+      point_in_time_recovery = true
     }
 
     "mediconnect-drug-interactions" = {
-      hash_key = "drugName"
+      hash_key               = "drugName"
+      deletion_protection    = true
+      point_in_time_recovery = true
     }
 
     "mediconnect-graph-data" = {
-      hash_key  = "PK"
-      range_key = "SK"
+      hash_key               = "PK"
+      range_key              = "SK"
+      deletion_protection    = true
+      point_in_time_recovery = true
     }
 
     "mediconnect-health-records" = {
-      hash_key  = "patientId"
-      range_key = "recordId"
+      hash_key               = "patientId"
+      range_key              = "recordId"
+      deletion_protection    = true
+      point_in_time_recovery = true
     }
 
     "mediconnect-iot-vitals" = {
       hash_key               = "patientId"
       range_key              = "timestamp"
+      deletion_protection    = true
       point_in_time_recovery = true
     }
 
     "mediconnect-knowledge-base" = {
-      hash_key = "topic"
+      hash_key               = "topic"
+      deletion_protection    = true
+      point_in_time_recovery = true
     }
 
     "mediconnect-medical-records" = {
-      hash_key  = "patientId"
-      range_key = "recordId"
+      hash_key               = "patientId"
+      range_key              = "recordId"
+      deletion_protection    = true
+      point_in_time_recovery = true
     }
 
     "mediconnect-patients" = {
       hash_key               = "patientId"
+      deletion_protection    = true
       point_in_time_recovery = true
       stream_enabled         = true
       stream_view_type       = "NEW_AND_OLD_IMAGES"
-      tags = {
-        CreatedBy   = "Terraform"
-        Environment = "Dev"
-        Project     = "MediConnect"
-      }
     }
 
     "mediconnect-pharmacy-inventory" = {
-      hash_key  = "pharmacyId"
-      range_key = "drugId"
+      hash_key               = "pharmacyId"
+      range_key              = "drugId"
+      deletion_protection    = true
+      point_in_time_recovery = true
     }
 
     "mediconnect-predictions" = {
-      hash_key = "predictionId"
+      hash_key               = "predictionId"
+      deletion_protection    = true
+      point_in_time_recovery = true
     }
 
     "mediconnect-prescriptions" = {
-      hash_key         = "prescriptionId"
-      stream_enabled   = true
+      hash_key               = "prescriptionId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+      stream_enabled         = true
       stream_view_type = "NEW_IMAGE"
       global_secondary_indexes = [
         {
@@ -150,12 +177,16 @@ module "dynamodb_us" {
     }
 
     "mediconnect-symptom-logs" = {
-      hash_key  = "sessionId"
-      range_key = "timestamp"
+      hash_key               = "sessionId"
+      range_key              = "timestamp"
+      deletion_protection    = true
+      point_in_time_recovery = true
     }
 
     "mediconnect-transactions" = {
-      hash_key = "billId"
+      hash_key               = "billId"
+      deletion_protection    = true
+      point_in_time_recovery = true
       global_secondary_indexes = [
         {
           name      = "DoctorIndex"
@@ -170,9 +201,175 @@ module "dynamodb_us" {
     }
 
     "mediconnect-video-sessions" = {
-      hash_key      = "appointmentId"
-      ttl_enabled   = true
-      ttl_attribute = "ttl"
+      hash_key               = "appointmentId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+      ttl_enabled            = true
+      ttl_attribute          = "ttl"
+    }
+
+    # ── Tables below are referenced in code but not yet created in AWS ──
+
+    "mediconnect-allergies" = {
+      hash_key               = "patientId"
+      range_key              = "allergyId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-immunizations" = {
+      hash_key               = "patientId"
+      range_key              = "immunizationId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-emergency-access" = {
+      hash_key               = "overrideId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-lab-orders" = {
+      hash_key               = "orderId"
+      range_key              = "patientId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-referrals" = {
+      hash_key               = "referralId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+      global_secondary_indexes = [
+        {
+          name     = "patientId-index"
+          hash_key = "patientId"
+        },
+      ]
+    }
+
+    "mediconnect-med-reconciliations" = {
+      hash_key               = "reconId"
+      range_key              = "patientId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-care-plans" = {
+      hash_key               = "carePlanId"
+      range_key              = "patientId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-mpi-links" = {
+      hash_key               = "mpiId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+      global_secondary_indexes = [
+        {
+          name     = "soundexLastName-index"
+          hash_key = "soundexLastName"
+        },
+      ]
+    }
+
+    "mediconnect-bulk-exports" = {
+      hash_key               = "exportId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-staff-shifts" = {
+      hash_key               = "shiftId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+      global_secondary_indexes = [
+        {
+          name     = "StaffIndex"
+          hash_key = "staffId"
+        },
+      ]
+    }
+
+    "mediconnect-staff-tasks" = {
+      hash_key               = "taskId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-staff-announcements" = {
+      hash_key               = "announcementId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-sdoh-assessments" = {
+      hash_key               = "assessmentId"
+      range_key              = "patientId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-eligibility-checks" = {
+      hash_key               = "checkId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-prior-auth" = {
+      hash_key               = "authId"
+      range_key              = "patientId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-reminders" = {
+      hash_key               = "reminderId"
+      range_key              = "appointmentId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-bluebutton-connections" = {
+      hash_key               = "connectionId"
+      range_key              = "patientId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-ecr-reports" = {
+      hash_key               = "reportId"
+      range_key              = "patientId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-elr-reports" = {
+      hash_key               = "reportId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-consent-ledger" = {
+      hash_key               = "patientId"
+      range_key              = "consentId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-hl7-messages" = {
+      hash_key               = "messageId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+    }
+
+    "mediconnect-dicom-studies" = {
+      hash_key               = "patientId"
+      range_key              = "studyInstanceUID"
+      deletion_protection    = true
+      point_in_time_recovery = true
     }
   }
 }

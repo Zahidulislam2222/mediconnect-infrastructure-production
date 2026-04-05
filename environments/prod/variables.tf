@@ -25,3 +25,9 @@ variable "azure_location" {
   type        = string
   default     = "westus"
 }
+
+variable "gcp_billing_enabled" {
+  description = "Set to true when GCP billing is enabled. Controls resources that require billing (Secret Manager, Artifact Registry)."
+  type        = bool
+  default     = false
+}

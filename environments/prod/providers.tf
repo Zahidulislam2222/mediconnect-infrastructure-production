@@ -17,18 +17,35 @@ terraform {
   }
 }
 
+locals {
+  default_tags = {
+    Project     = "MediConnect"
+    Environment = "prod"
+    ManagedBy   = "Terraform"
+  }
+}
+
 provider "aws" {
   region = var.aws_region
+  default_tags { tags = local.default_tags }
 }
 
 provider "aws" {
   alias  = "us"
   region = "us-east-1"
+  default_tags { tags = local.default_tags }
 }
 
 provider "aws" {
   alias  = "eu"
   region = "eu-central-1"
+  default_tags { tags = local.default_tags }
+}
+
+provider "aws" {
+  alias  = "us_west"
+  region = "us-west-2"
+  default_tags { tags = local.default_tags }
 }
 
 provider "google" {

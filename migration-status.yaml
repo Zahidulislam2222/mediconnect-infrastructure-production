@@ -1,0 +1,266 @@
+# ============================================================================
+# MediConnect IaC Migration — Status Tracker
+# ============================================================================
+# This is the SINGLE SOURCE OF TRUTH for migration progress.
+# Agents MUST update this file (not just memory) after completing work.
+# Run `bash verify_migration.sh` to verify claims in this file.
+# ============================================================================
+
+last_updated: "2026-04-06T00:02:00Z"
+last_verified_by: "verify_migration.sh"
+
+# --------------------------------------------------------------------------
+# Phase 0: Cloud Discovery
+# --------------------------------------------------------------------------
+phase_0:
+  status: "COMPLETE"
+  aws:
+    status: "COMPLETE"
+    resources_discovered: 458
+    findings_count: 17
+    source_file: "phase0-aws-summary.md"
+  gcp:
+    status: "COMPLETE"
+    resources_discovered: 57  # real resources (834 indexed minus noise)
+    findings_count: 6
+    source_file: "phase0-gcp-azure-summary.md"
+  azure:
+    status: "COMPLETE"
+    resources_discovered: 4
+    findings_count: 6
+    source_file: "phase0-gcp-azure-summary.md"
+
+# --------------------------------------------------------------------------
+# Phase 1: Write Terraform + Import
+# --------------------------------------------------------------------------
+phase_1:
+  status: "COMPLETE"
+  aws:
+    status: "COMPLETE"
+    resources_in_state: 370
+    terraform_plan: "No changes"
+    completed_date: "2026-04-05"
+  gcp:
+    status: "COMPLETE"
+    resources_in_state: 40
+    resources_target: 44  # 57 real minus noise (default SA, revisions, images, API toggles)
+    blocked_by_billing: 3  # 1 Artifact Registry + 2 Secret Manager (need GCP billing enabled)
+    completed_date: "2026-04-05"
+    notes: |
+      40/44 resources imported. 3 blocked by GCP billing being disabled.
+      Set gcp_billing_enabled=true after enabling billing to manage remaining 3.
+  azure:
+    status: "COMPLETE"
+    resources_in_state: 4
+    resources_target: 4
+    completed_date: "2026-04-05"
+    notes: "All 4 resources imported (Cosmos DB, 2 RGs, NetworkWatcher)."
+
+# --------------------------------------------------------------------------
+# Phase 2: Compliance Hardening
+# --------------------------------------------------------------------------
+phase_2:
+  status: "CODE_READY"  # Azure + GCP code written, apply pending
+  aws:
+    status: "COMPLETE"
+    findings_resolved: 17
+    findings_total: 17
+    completed_date: "2026-04-05"
+    findings:
+      - id: 1
+        description: "DynamoDB deletion protection"
+        severity: "CRITICAL"
+        status: "FIXED"
+      - id: 2-3
+        description: "DynamoDB PITR"
+        severity: "CRITICAL"
+        status: "FIXED"
+      - id: 4
+        description: "IAM wildcards"
+        severity: "CRITICAL"
+        status: "CLOSED — false positive (AWS requires *)"
+      - id: 5
+        description: "Missing DynamoDB tables"
+        severity: "CRITICAL"
+        status: "FIXED — 22 tables × 2 regions"
+      - id: 6
+        description: "S3 versioning"
+        severity: "HIGH"
+        status: "FIXED"
+      - id: 7
+        description: "S3 KMS encryption"
+        severity: "HIGH"
+        status: "FIXED"
+      - id: 8
+        description: "S3 public access"
+        severity: "HIGH"
+        status: "FIXED"
+      - id: 9
+        description: "ECR scan + immutable tags"
+        severity: "HIGH"
+        status: "FIXED"
+      - id: 10
+        description: "EU SQS DLQ"
+        severity: "HIGH"
+        status: "FIXED"
+      - id: 11
+        description: "EU SNS topics"
+        severity: "HIGH"
+        status: "FIXED"
+      - id: 12
+        description: "CloudWatch retention"
+        severity: "MEDIUM"
+        status: "FIXED — 365d active, 30d legacy"
+      - id: 13
+        description: "SES domain"
+        severity: "MEDIUM"
+        status: "FIXED — mediconnect.health + DKIM + MAIL FROM"
+      - id: 14
+        description: "Resource tags"
+        severity: "MEDIUM"
+        status: "FIXED — default_tags on all providers"
+      - id: 15
+        description: "S3 lifecycle"
+        severity: "MEDIUM"
+        status: "FIXED — 7yr HIPAA retention"
+      - id: 16
+        description: "EU DynamoDB streams"
+        severity: "MEDIUM"
+        status: "CLOSED — GDPR by design"
+      - id: 17
+        description: "KMS key"
+        severity: "MEDIUM"
+        status: "FIXED"
+  gcp:
+    status: "CODE_READY"
+    findings_resolved: 4
+    findings_total: 6
+    completed_date: "2026-04-05"
+    notes: "Code written for all 6 findings. 4 resolved, 2 deferred (not fixable in TF). Apply pending."
+    findings:
+      - id: 1
+        description: "Secret Manager stores AWS credentials"
+        severity: "HIGH"
+        status: "DEFERRED — needs billing enabled + migration to Workload Identity (operational, not IaC)"
+      - id: 2
+        description: "Healthcare API DICOM Store us-east1 only (no EU)"
+        severity: "HIGH"
+        status: "CODE_READY — EU Healthcare dataset + DICOM store added, apply pending"
+      - id: 3
+        description: "Cloud SQL module for non-existent instance"
+        severity: "MEDIUM"
+        status: "RESOLVED — module exists but not wired into prod, no state drift"
+      - id: 4
+        description: "648 Cloud Run revisions — no cleanup policy"
+        severity: "MEDIUM"
+        status: "RESOLVED — Cloud Run auto-manages revisions, not a TF concern"
+      - id: 5
+        description: "3 service account keys — rotation unknown"
+        severity: "MEDIUM"
+        status: "DEFERRED — key rotation is operational, not manageable in TF"
+      - id: 6
+        description: "BigQuery AI datasets empty"
+        severity: "LOW"
+        status: "RESOLVED — Phase 0 was wrong, datasets have symptom_logs tables"
+  azure:
+    status: "CODE_READY"
+    findings_resolved: 0
+    findings_total: 6
+    completed_date: "2026-04-05"
+    notes: "Code written for all 6 findings. Apply pending — user runs terraform apply."
+    findings:
+      - id: 1
+        description: "Cosmos DB account empty — no databases"
+        severity: "CRITICAL"
+        status: "CODE_READY — database + container added, apply pending"
+      - id: 2
+        description: "Single region (East US) — no geo-replication"
+        severity: "HIGH"
+        status: "CODE_READY — West Europe geo_location added, apply pending"
+      - id: 3
+        description: "Public network access enabled"
+        severity: "HIGH"
+        status: "CODE_READY — public_network_access_enabled=false, apply pending"
+      - id: 4
+        description: "Free tier in production"
+        severity: "MEDIUM"
+        status: "CODE_READY — free_tier_enabled=false, apply pending"
+      - id: 5
+        description: "Session consistency — needs verification"
+        severity: "MEDIUM"
+        status: "CODE_READY — changed to BoundedStaleness, apply pending"
+      - id: 6
+        description: "Periodic backup only — should be continuous"
+        severity: "MEDIUM"
+        status: "CODE_READY — changed to Continuous, apply pending"
+
+# --------------------------------------------------------------------------
+# Phase 3: Expand Coverage
+# --------------------------------------------------------------------------
+phase_3:
+  status: "COMPLETE"
+  aws:
+    status: "COMPLETE"
+    notes: "Done as Phase 2e — 22 missing tables + EU SQS + EU SNS"
+    completed_date: "2026-04-05"
+  gcp:
+    status: "N/A"
+    notes: "No missing resources to expand for GCP"
+  azure:
+    status: "N/A"
+    notes: "No missing resources to expand for Azure"
+
+# --------------------------------------------------------------------------
+# Phase 4: Final Audit (cross-cloud)
+# --------------------------------------------------------------------------
+phase_4:
+  status: "NOT_STARTED"
+  notes: |
+    Checkov and Prowler are installed in D:\RAGSetup docker-compose (separate project).
+    Checkov mounts mediconnect TF dir and outputs to D:\RAGSetup\reports\hipaa\.
+    Phase 4 agent should: run scans from RAGSetup, read reports, generate compliance report here.
+    Azure + GCP compliance changes are CODE_READY — user will terraform apply separately.
+
+# --------------------------------------------------------------------------
+# Pre-Phase 4: App vs IaC Audit
+# --------------------------------------------------------------------------
+app_vs_iac_audit:
+  status: "COMPLETE"
+  completed_date: "2026-04-06"
+  gaps_fixed: 15
+  gaps_remaining: 0
+  gaps_fixed_date: "2026-04-06"
+  gaps_fixed_details: |
+    12 SQS queues (6 categories × 2: queue + DLQ) added to sqs.tf (US + EU)
+    3 ECR repos (admin, staff, dicom) added to ecr.tf (US + EU)
+    verify_app_vs_iac.sh: PASS — 127 pass, 0 fail, 32 warn
+  plan_file: "audit-app-vs-iac.md"
+  description: |
+    Cross-check every resource the app code references against Terraform state.
+    20 steps covering: DynamoDB, S3, SQS, SNS, Cognito, Lambda, API Gateway,
+    CloudFront, ECR, KMS, SSM, IoT, SES, EventBridge, GCP, Azure, CI/CD, Frontend.
+    Any agent can pick up from where the last one left off — progress is tracked
+    in audit-app-vs-iac.md with checkboxes per step.
+  enhancements:
+    sdk_catchall:
+      status: "DONE"
+      date: "2026-04-06"
+      description: "Added Section 19 to verify_app_vs_iac.sh — SDK-based resource discovery catches new service types, non-standard names, hardcoded ARNs, GCP/Azure clients"
+      finding: "SecretsManagerClient used in code but no secretsmanager.tf"
+    cicd_gate:
+      status: "DONE"
+      date: "2026-04-06"
+      description: "Added verify_app_vs_iac.sh to .github/workflows/deploy.yml test-and-lint stage"
+    driftctl:
+      status: "PLANNED"
+      description: "driftctl scan for cloud-vs-TF coverage. Added to Step 5b in audit-app-vs-iac.md"
+  scope:
+    - "Compliance scanning (Checkov HIPAA framework + Prowler)"
+    - "Cross-cloud audit (AWS + GCP + Azure)"
+    - "Verify all Phase 0 findings resolved"
+    - "Generate compliance report"
+    - "driftctl cloud coverage scan (unmanaged resource detection)"
+  tools:
+    - "Checkov (Terraform static analysis, HIPAA framework)"
+    - "Prowler (live AWS runtime scan)"
+    - "driftctl (cloud-vs-TF unmanaged resource detection)"

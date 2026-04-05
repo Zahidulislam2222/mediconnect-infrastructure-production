@@ -78,6 +78,10 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+      # --- IaC Coverage Check (App Code vs Terraform) ---
+      - name: Verify app resources have Terraform coverage
+        run: bash verify_app_vs_iac.sh
+
   # ═══════════════════════════════════════════════════════════════
   #  2. Build & Push Container Images
   # ═══════════════════════════════════════════════════════════════

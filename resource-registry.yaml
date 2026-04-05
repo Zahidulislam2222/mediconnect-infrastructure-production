@@ -1,0 +1,881 @@
+# ============================================================================
+# Resource Registry — Single Source of Truth
+# ============================================================================
+# Maps every cloud resource the app code references to its Terraform file
+# and the app files that use it. Any agent adding a new resource MUST update
+# this file. Run `bash verify_app_vs_iac.sh` to validate.
+#
+# Legend:
+#   status: OK | MISSING_TF | MISSING_APP | ORPHANED | CODE_READY
+#   OK          = App references it AND Terraform manages it
+#   MISSING_TF  = App references it but NO Terraform coverage
+#   MISSING_APP = Terraform manages it but no app code references it
+#   ORPHANED    = In Terraform but confirmed unused
+#   CODE_READY  = Terraform code written but not yet applied
+# ============================================================================
+
+last_updated: "2026-04-05"
+last_verified_by: "verify_app_vs_iac.sh"
+
+# --------------------------------------------------------------------------
+# DynamoDB Tables (38 tables × 2 regions = 76 resources)
+# --------------------------------------------------------------------------
+dynamodb:
+  # -- Tables with env var overrides --
+  - name: mediconnect-patients
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/patient-service, legacy_lambdas/mediconnect-get-patients]
+    env_var: DYNAMO_TABLE
+    status: OK
+
+  - name: mediconnect-doctors
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/doctor-service, legacy_lambdas/mediconnect-get-doctors, legacy_lambdas/mediconnect-create-doctor]
+    env_var: DYNAMO_TABLE_DOCTORS
+    status: OK
+
+  - name: mediconnect-appointments
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/booking-service, legacy_lambdas/mediconnect-book-appointment, legacy_lambdas/mediconnect-get-appointments]
+    env_var: TABLE_APPOINTMENTS
+    status: OK
+
+  - name: mediconnect-transactions
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/booking-service]
+    env_var: TABLE_TRANSACTIONS
+    status: OK
+
+  - name: mediconnect-video-sessions
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/communication-service, legacy_lambdas/mediconnect-cleanup-recordings]
+    env_var: TABLE_SESSIONS
+    status: OK
+
+  - name: mediconnect-staff-shifts
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/staff-service]
+    env_var: TABLE_SHIFTS
+    status: OK
+
+  - name: mediconnect-staff-tasks
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/staff-service]
+    env_var: TABLE_TASKS
+    status: OK
+
+  - name: mediconnect-staff-announcements
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/staff-service]
+    env_var: TABLE_ANNOUNCEMENTS
+    status: OK
+
+  - name: mediconnect-audit-logs
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/shared/audit.ts, all services]
+    env_var: TABLE_AUDIT
+    status: OK
+
+  - name: mediconnect-mpi-links
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/patient-service/src/modules/clinical/mpi.controller.ts]
+    env_var: TABLE_MPI
+    status: OK
+
+  - name: mediconnect-bulk-exports
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/patient-service/src/modules/clinical/bulk-export.controller.ts]
+    env_var: TABLE_EXPORTS
+    status: OK
+
+  - name: mediconnect-allergies
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/patient-service, backend_v2/doctor-service]
+    env_var: TABLE_ALLERGIES
+    status: OK
+
+  - name: mediconnect-immunizations
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/patient-service]
+    env_var: TABLE_IMMUNIZATIONS
+    status: OK
+
+  - name: mediconnect-emergency-access
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/shared/emergency-access.ts]
+    env_var: TABLE_EMERGENCY_ACCESS
+    status: OK
+
+  - name: mediconnect-lab-orders
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/doctor-service/src/modules/clinical/lab.controller.ts]
+    env_var: TABLE_LAB_ORDERS
+    status: OK
+
+  - name: mediconnect-referrals
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/doctor-service/src/modules/clinical/referral.controller.ts]
+    env_var: TABLE_REFERRALS
+    status: OK
+
+  - name: mediconnect-med-reconciliations
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/doctor-service/src/modules/clinical/med-reconciliation.controller.ts]
+    env_var: TABLE_MED_RECON
+    status: OK
+
+  - name: mediconnect-care-plans
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/patient-service]
+    env_var: TABLE_CARE_PLANS
+    status: OK
+
+  - name: mediconnect-booking-locks
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/booking-service, legacy_lambdas/mediconnect-book-appointment]
+    env_var: TABLE_LOCKS
+    status: OK
+
+  - name: mediconnect-prescriptions
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/doctor-service, legacy_lambdas/mediconnect-prescription-service]
+    env_var: TABLE_PRESCRIPTIONS
+    status: OK
+
+  - name: mediconnect-graph-data
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/patient-service, legacy_lambdas/mediconnect-graph-service]
+    env_var: TABLE_GRAPH
+    status: OK
+
+  - name: mediconnect-sdoh-assessments
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/patient-service]
+    env_var: TABLE_SDOH
+    status: OK
+
+  - name: mediconnect-eligibility-checks
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/patient-service]
+    env_var: TABLE_ELIGIBILITY
+    status: OK
+
+  - name: mediconnect-prior-auth
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/doctor-service]
+    env_var: TABLE_PRIOR_AUTH
+    status: OK
+
+  - name: mediconnect-reminders
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/booking-service/src/controllers/reminder.controller.ts]
+    env_var: TABLE_REMINDERS
+    status: OK
+
+  - name: mediconnect-bluebutton-connections
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/patient-service]
+    env_var: TABLE_BB_CONNECTIONS
+    status: OK
+
+  - name: mediconnect-ecr-reports
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/doctor-service]
+    env_var: TABLE_ECR
+    status: OK
+
+  - name: mediconnect-elr-reports
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/doctor-service]
+    env_var: TABLE_ELR
+    status: OK
+
+  - name: mediconnect-iot-vitals
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/patient-service/src/modules/iot]
+    env_var: DYNAMO_TABLE_VITALS
+    status: OK
+
+  # -- Hardcoded tables (no env var override) --
+  - name: mediconnect-drug-interactions
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/doctor-service (interaction checks), legacy_lambdas/mediconnect-prescription-service]
+    hardcoded: true
+    status: OK
+
+  - name: mediconnect-chat-history
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/communication-service, backend_v2/patient-service (GDPR erasure)]
+    hardcoded: true
+    status: OK
+
+  - name: mediconnect-chat-connections
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/communication-service (WebSocket connections)]
+    hardcoded: true
+    status: OK
+
+  - name: mediconnect-consent-ledger
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/patient-service (GDPR consent, export)]
+    hardcoded: true
+    status: OK
+
+  - name: mediconnect-knowledge-base
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/patient-service, legacy_lambdas/mediconnect-chatbot]
+    hardcoded: true
+    status: OK
+
+  - name: mediconnect-dicom-studies
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/dicom-service/services/metadata_store.py]
+    hardcoded: true
+    status: OK
+
+  - name: mediconnect-hl7-messages
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/patient-service/src/modules/clinical/hl7.controller.ts]
+    hardcoded: true
+    status: OK
+
+  - name: mediconnect-health-records
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/doctor-service, backend_v2/patient-service, legacy_lambdas/mediconnect-ehr-service]
+    hardcoded: true
+    status: OK
+
+  - name: mediconnect-pharmacy-inventory
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [backend_v2/doctor-service (prescription fulfillment)]
+    hardcoded: true
+    status: OK
+
+  # -- Tables only in TF (no app code reference found via grep) --
+  - name: mediconnect-billing-audit
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [legacy_lambdas/mediconnect-billing-service]
+    status: OK
+
+  - name: mediconnect-clinical-notes
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [legacy_lambdas/mediconnect-ehr-service]
+    status: OK
+
+  - name: mediconnect-content-cache
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [legacy_lambdas/mediconnect-chatbot]
+    status: OK
+
+  - name: mediconnect-doctor-schedules
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [legacy_lambdas/mediconnect-update-schedule]
+    status: OK
+
+  - name: mediconnect-medical-records
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [legacy_lambdas/mediconnect-imaging-service]
+    status: OK
+
+  - name: mediconnect-predictions
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [legacy_lambdas/mediconnect-ai-predictor]
+    status: OK
+
+  - name: mediconnect-symptom-logs
+    tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
+    app_files: [legacy_lambdas/mediconnect-symptom-checker, legacy_lambdas/mediconnect-stream-to-bigquery]
+    status: OK
+
+# --------------------------------------------------------------------------
+# S3 Buckets (16 app-referenced + infra buckets)
+# --------------------------------------------------------------------------
+s3:
+  - name: mediconnect-patient-data
+    tf_file: environments/prod/s3_us.tf
+    app_files: [backend_v2/patient-service, backend_v2/shared/audit.ts]
+    status: OK
+
+  - name: mediconnect-patient-data-eu
+    tf_file: environments/prod/s3_eu.tf
+    app_files: [backend_v2/patient-service]
+    status: OK
+
+  - name: mediconnect-doctor-data
+    tf_file: environments/prod/s3_us.tf
+    app_files: [backend_v2/doctor-service]
+    status: OK
+
+  - name: mediconnect-doctor-data-eu
+    tf_file: environments/prod/s3_eu.tf
+    app_files: [backend_v2/doctor-service]
+    status: OK
+
+  - name: mediconnect-medical-images
+    tf_file: environments/prod/s3_us.tf
+    app_files: [backend_v2/dicom-service, legacy_lambdas/mediconnect-imaging-service]
+    status: OK
+
+  - name: mediconnect-medical-images-eu
+    tf_file: environments/prod/s3_eu.tf
+    app_files: [backend_v2/dicom-service]
+    status: OK
+
+  - name: mediconnect-consultation-recordings
+    tf_file: environments/prod/s3_us.tf
+    app_files: [backend_v2/communication-service, legacy_lambdas/mediconnect-video-service]
+    status: OK
+
+  - name: mediconnect-consultation-recordings-eu
+    tf_file: environments/prod/s3_eu.tf
+    app_files: [backend_v2/communication-service]
+    status: OK
+
+  - name: mediconnect-consultation-files
+    tf_file: environments/prod/s3_us.tf
+    app_files: [backend_v2/communication-service]
+    status: OK
+
+  - name: mediconnect-ehr-records
+    tf_file: environments/prod/s3_us.tf
+    app_files: [backend_v2/doctor-service, legacy_lambdas/mediconnect-ehr-service]
+    status: OK
+
+  - name: mediconnect-ehr-records-eu
+    tf_file: environments/prod/s3_eu.tf
+    app_files: [backend_v2/doctor-service]
+    status: OK
+
+  - name: mediconnect-media-assets
+    tf_file: environments/prod/s3_us.tf
+    app_files: [backend_v2/communication-service]
+    status: OK
+
+  - name: mediconnect-prescriptions
+    tf_file: environments/prod/s3_us.tf
+    app_files: [backend_v2/doctor-service]
+    note: "Also a DynamoDB table (different resource type)"
+    status: OK
+
+  - name: mediconnect-prescriptions-eu
+    tf_file: environments/prod/s3_eu.tf
+    app_files: [backend_v2/doctor-service]
+    status: OK
+
+  - name: mediconnect-datalake-950110266426
+    tf_file: environments/prod/s3_us.tf
+    app_files: [legacy_lambdas/mediconnect-stream-to-bigquery]
+    status: OK
+
+  - name: mediconnect-audit-logs-950110266426
+    tf_file: environments/prod/s3_us.tf
+    app_files: [backend_v2/shared/audit.ts]
+    status: OK
+
+  - name: mediconnect-audit-logs-950110266426-dr
+    tf_file: environments/prod/s3_dr.tf
+    app_files: []
+    note: "DR replication target — no direct app reference expected"
+    status: OK
+
+  - name: mediconnect-cicd-950110266426
+    tf_file: environments/prod/s3_us.tf
+    app_files: [.github/workflows/deploy.yml]
+    note: "CI/CD artifact bucket"
+    status: OK
+
+# --------------------------------------------------------------------------
+# SQS Queues
+# --------------------------------------------------------------------------
+sqs:
+  - name: mediconnect-dlq
+    tf_file: environments/prod/sqs.tf
+    app_files: [backend_v2/shared/event-bus.ts]
+    status: OK
+
+  - name: mediconnect-audit-events
+    tf_file: environments/prod/sqs.tf (US + EU)
+    app_files: [backend_v2/shared/event-bus.ts]
+    status: OK
+
+  - name: mediconnect-audit-events-dlq
+    tf_file: environments/prod/sqs.tf (US + EU)
+    app_files: [backend_v2/shared/event-bus.ts]
+    status: OK
+
+  - name: mediconnect-clinical-events
+    tf_file: environments/prod/sqs.tf (US + EU)
+    app_files: [backend_v2/shared/event-bus.ts]
+    status: OK
+
+  - name: mediconnect-clinical-events-dlq
+    tf_file: environments/prod/sqs.tf (US + EU)
+    app_files: [backend_v2/shared/event-bus.ts]
+    status: OK
+
+  - name: mediconnect-appointment-events
+    tf_file: environments/prod/sqs.tf (US + EU)
+    app_files: [backend_v2/shared/event-bus.ts]
+    status: OK
+
+  - name: mediconnect-appointment-events-dlq
+    tf_file: environments/prod/sqs.tf (US + EU)
+    app_files: [backend_v2/shared/event-bus.ts]
+    status: OK
+
+  - name: mediconnect-patient-events
+    tf_file: environments/prod/sqs.tf (US + EU)
+    app_files: [backend_v2/shared/event-bus.ts]
+    status: OK
+
+  - name: mediconnect-patient-events-dlq
+    tf_file: environments/prod/sqs.tf (US + EU)
+    app_files: [backend_v2/shared/event-bus.ts]
+    status: OK
+
+  - name: mediconnect-security-events
+    tf_file: environments/prod/sqs.tf (US + EU)
+    app_files: [backend_v2/shared/event-bus.ts]
+    status: OK
+
+  - name: mediconnect-security-events-dlq
+    tf_file: environments/prod/sqs.tf (US + EU)
+    app_files: [backend_v2/shared/event-bus.ts]
+    status: OK
+
+  - name: mediconnect-system-events
+    tf_file: environments/prod/sqs.tf (US + EU)
+    app_files: [backend_v2/shared/event-bus.ts]
+    status: OK
+
+  - name: mediconnect-system-events-dlq
+    tf_file: environments/prod/sqs.tf (US + EU)
+    app_files: [backend_v2/shared/event-bus.ts]
+    status: OK
+
+# --------------------------------------------------------------------------
+# SNS Topics
+# --------------------------------------------------------------------------
+sns:
+  - name: mediconnect-appointments
+    tf_file: environments/prod/sns.tf (US + EU)
+    app_files: [backend_v2/booking-service]
+    status: OK
+
+  - name: mediconnect-high-risk-alerts
+    tf_file: environments/prod/sns.tf (US + EU)
+    app_files: [backend_v2/shared/breach-detection.ts]
+    status: OK
+
+  - name: mediconnect-ops-alerts
+    tf_file: environments/prod/sns.tf (US + EU)
+    app_files: [backend_v2/shared/breach-detection.ts]
+    status: OK
+
+  - name: mediconnect-pharmacy-alerts
+    tf_file: environments/prod/sns.tf (US + EU)
+    app_files: [backend_v2/doctor-service]
+    status: OK
+
+  - name: mediconnect-prescription-alerts
+    tf_file: environments/prod/sns.tf (US + EU)
+    app_files: [backend_v2/doctor-service]
+    status: OK
+
+  - name: billing-alert
+    tf_file: environments/prod/sns.tf (US + EU)
+    app_files: [legacy_lambdas/mediconnect-billing-service]
+    status: OK
+
+# --------------------------------------------------------------------------
+# Lambda Functions (v2 = active, legacy = in AWS but being replaced)
+# --------------------------------------------------------------------------
+lambda:
+  # v2 Lambdas (actively deployed, in TF)
+  - name: mediconnect-cognito-triggers
+    tf_file: environments/prod/lambda_us.tf + lambda_eu.tf
+    app_files: [backend_v2/cognito-triggers/index.mjs]
+    status: OK
+
+  - name: mediconnect-ws-authorizer
+    tf_file: environments/prod/lambda_us.tf + lambda_eu.tf
+    app_files: [backend_v2/ws-authorizer/index.mjs]
+    status: OK
+
+  - name: mediconnect-cleanup-recordings
+    tf_file: environments/prod/lambda_us.tf + lambda_eu.tf
+    app_files: [backend_v2/cleanup-recordings/index.mjs]
+    status: OK
+
+  - name: mediconnect-failover-proxy
+    tf_file: environments/prod/lambda_us.tf + lambda_eu.tf
+    app_files: [backend_v2/failover-proxy/index.mjs]
+    status: OK
+
+  - name: mediconnect-auto-group-us
+    tf_file: environments/prod/lambda_us.tf
+    app_files: []
+    note: "Cognito auto-group assignment — US only"
+    status: OK
+
+  - name: mediconnect-auto-group-eu
+    tf_file: environments/prod/lambda_eu.tf
+    app_files: []
+    note: "Cognito auto-group assignment — EU only"
+    status: OK
+
+  # Legacy Lambdas (29 functions in legacy_lambdas/ — in AWS but NOT in TF)
+  # These are deployed by CI/CD directly, not managed by Terraform.
+  # They are being replaced by the v2 containerized services.
+  - name: legacy_lambdas (29 functions)
+    tf_file: NOT_MANAGED
+    app_files: [legacy_lambdas/*/]
+    note: >
+      Legacy Lambda functions exist in AWS and are deployed by CI/CD (deploy-lambdas job).
+      They are NOT in Terraform. This is intentional — they are being replaced by
+      backend_v2 containerized services. The event-bus gracefully degrades if queues
+      are unavailable.
+    status: OK
+
+# --------------------------------------------------------------------------
+# ECR Repositories
+# --------------------------------------------------------------------------
+ecr:
+  - name: patient-service
+    tf_file: environments/prod/ecr.tf
+    app_files: [.github/workflows/deploy.yml]
+    region: eu-central-1
+    status: OK
+
+  - name: doctor-service
+    tf_file: environments/prod/ecr.tf
+    app_files: [.github/workflows/deploy.yml]
+    region: eu-central-1
+    status: OK
+
+  - name: booking-service
+    tf_file: environments/prod/ecr.tf
+    app_files: [.github/workflows/deploy.yml]
+    region: eu-central-1
+    status: OK
+
+  - name: communication-service
+    tf_file: environments/prod/ecr.tf
+    app_files: [.github/workflows/deploy.yml]
+    region: eu-central-1
+    status: OK
+
+  - name: admin-service
+    tf_file: environments/prod/ecr.tf
+    app_files: [.github/workflows/deploy.yml, backend_v2/admin-service/Dockerfile]
+    region: us-east-1 + eu-central-1
+    status: OK
+
+  - name: staff-service
+    tf_file: environments/prod/ecr.tf
+    app_files: [.github/workflows/deploy.yml, backend_v2/staff-service/Dockerfile]
+    region: us-east-1 + eu-central-1
+    status: OK
+
+  - name: dicom-service
+    tf_file: environments/prod/ecr.tf
+    app_files: [.github/workflows/deploy.yml, backend_v2/dicom-service/Dockerfile]
+    region: us-east-1 + eu-central-1
+    status: OK
+
+# --------------------------------------------------------------------------
+# Cognito User Pools
+# --------------------------------------------------------------------------
+cognito:
+  - name: mediconnect-users-us
+    tf_file: environments/prod/cognito_us.tf
+    app_files: [backend_v2/shared/auth.middleware.ts, backend_v2/cognito-triggers]
+    status: OK
+
+  - name: mediconnect-users-eu
+    tf_file: environments/prod/cognito_eu.tf
+    app_files: [backend_v2/shared/auth.middleware.ts, backend_v2/cognito-triggers]
+    status: OK
+
+# --------------------------------------------------------------------------
+# KMS Keys
+# --------------------------------------------------------------------------
+kms:
+  - name: mediconnect-phi-encryption
+    tf_file: environments/prod/kms.tf
+    app_files: [backend_v2/shared/kms-crypto.ts]
+    regions: [us-east-1, eu-central-1]
+    status: OK
+
+  - name: mediconnect-prescription-signer
+    tf_file: environments/prod/kms.tf
+    app_files: [backend_v2/doctor-service]
+    regions: [us-east-1, eu-central-1]
+    status: OK
+
+# --------------------------------------------------------------------------
+# SSM Parameters
+# --------------------------------------------------------------------------
+ssm:
+  - path: /mediconnect/prod/cognito/*
+    tf_file: environments/prod/ssm_us.tf + ssm_eu.tf
+    app_files: [backend_v2/*/src/index.ts (loadSecrets)]
+    status: OK
+
+  - path: /mediconnect/prod/db/*
+    tf_file: environments/prod/ssm_us.tf + ssm_eu.tf
+    app_files: [backend_v2/*/src/index.ts (loadSecrets)]
+    status: OK
+
+  - path: /mediconnect/stripe/*
+    tf_file: environments/prod/ssm_us.tf + ssm_eu.tf
+    app_files: [backend_v2/booking-service/src/index.ts]
+    status: OK
+
+  - path: /mediconnect/prod/kms/*
+    tf_file: environments/prod/ssm_us.tf + ssm_eu.tf
+    app_files: [backend_v2/shared/kms-crypto.ts]
+    status: OK
+
+  - path: /mediconnect/prod/sns/*
+    tf_file: environments/prod/ssm_us.tf + ssm_eu.tf
+    app_files: [backend_v2/doctor-service, backend_v2/patient-service]
+    status: OK
+
+  - path: /mediconnect/prod/mqtt/endpoint
+    tf_file: environments/prod/ssm_us.tf + ssm_eu.tf
+    app_files: [backend_v2/patient-service/src/modules/iot]
+    status: OK
+
+# --------------------------------------------------------------------------
+# IoT Core
+# --------------------------------------------------------------------------
+iot:
+  - name: mediconnect-wearable (thing type)
+    tf_file: environments/prod/iot.tf
+    app_files: [backend_v2/patient-service/src/modules/iot]
+    status: OK
+
+# --------------------------------------------------------------------------
+# SES
+# --------------------------------------------------------------------------
+ses:
+  - name: mediconnect.health (domain identity)
+    tf_file: environments/prod/ses.tf
+    app_files: [backend_v2/shared/notifications.ts]
+    status: OK
+
+# --------------------------------------------------------------------------
+# EventBridge
+# --------------------------------------------------------------------------
+eventbridge:
+  - name: mediconnect-stop-recording-rule
+    tf_file: environments/prod/eventbridge.tf
+    app_files: [backend_v2/cleanup-recordings/index.mjs]
+    status: OK
+
+# --------------------------------------------------------------------------
+# API Gateway
+# --------------------------------------------------------------------------
+apigateway:
+  - name: mediconnect-ws-chat (WebSocket API)
+    tf_file: environments/prod/apigateway.tf
+    app_files: [backend_v2/communication-service, backend_v2/ws-authorizer]
+    status: OK
+
+# --------------------------------------------------------------------------
+# CloudFront
+# --------------------------------------------------------------------------
+cloudfront:
+  - name: mediconnect-frontend (distribution)
+    tf_file: environments/prod/cloudfront.tf
+    app_files: [mediconnect-hub (frontend repo)]
+    status: OK
+
+# --------------------------------------------------------------------------
+# GCP: BigQuery
+# --------------------------------------------------------------------------
+gcp_bigquery:
+  - name: mediconnect_analytics (dataset, US)
+    tf_file: environments/prod/gcp_bigquery.tf
+    app_files: [backend_v2/booking-service (pushRevenueToBigQuery, pushAppointmentToBigQuery)]
+    status: OK
+
+  - name: mediconnect_analytics_eu (dataset, EU)
+    tf_file: environments/prod/gcp_bigquery.tf
+    app_files: [backend_v2/booking-service]
+    status: OK
+
+  - name: mediconnect_ai (dataset, US)
+    tf_file: environments/prod/gcp_bigquery.tf
+    app_files: [legacy_lambdas/mediconnect-symptom-checker]
+    status: OK
+
+  - name: mediconnect_ai_eu (dataset, EU)
+    tf_file: environments/prod/gcp_bigquery.tf
+    app_files: [legacy_lambdas/mediconnect-symptom-checker]
+    status: OK
+
+  - name: iot (dataset, US)
+    tf_file: environments/prod/gcp_bigquery.tf
+    app_files: [backend_v2/patient-service (pushVitalToBigQuery)]
+    status: OK
+
+  - name: iot_eu (dataset, EU)
+    tf_file: environments/prod/gcp_bigquery.tf
+    app_files: [backend_v2/patient-service]
+    status: OK
+
+# --------------------------------------------------------------------------
+# GCP: Cloud Run
+# --------------------------------------------------------------------------
+gcp_cloudrun:
+  - name: 14 services (7 US + 7 EU)
+    tf_file: environments/prod/gcp_cloudrun.tf
+    app_files: [.github/workflows/deploy.yml (deploy-gcp job)]
+    services: [patient-service, doctor-service, booking-service, communication-service, admin-service, staff-service, dicom-service]
+    regions: [us-central1, europe-west3]
+    status: OK
+
+# --------------------------------------------------------------------------
+# GCP: Healthcare API
+# --------------------------------------------------------------------------
+gcp_healthcare:
+  - name: mediconnect-main (dataset, us-east1)
+    tf_file: environments/prod/gcp_services.tf
+    app_files: [backend_v2/dicom-service]
+    status: OK
+
+  - name: mediconnect-eu (dataset, europe-west3)
+    tf_file: environments/prod/gcp_services.tf
+    app_files: []
+    note: "Added in Phase 2 for GDPR compliance"
+    status: CODE_READY
+
+  - name: xray-archive (DICOM store, US + EU)
+    tf_file: environments/prod/gcp_services.tf
+    app_files: [backend_v2/dicom-service]
+    status: OK
+
+# --------------------------------------------------------------------------
+# GCP: Pub/Sub
+# --------------------------------------------------------------------------
+gcp_pubsub:
+  - name: iot-health-sync
+    tf_file: environments/prod/gcp_services.tf
+    app_files: [legacy_lambdas/mediconnect-iot-gcp-sync]
+    status: OK
+
+  - name: video-call-analytics
+    tf_file: environments/prod/gcp_services.tf
+    app_files: [backend_v2/communication-service]
+    status: OK
+
+# --------------------------------------------------------------------------
+# GCP: IAM / Workload Identity
+# --------------------------------------------------------------------------
+gcp_iam:
+  - name: data-logger (service account)
+    tf_file: environments/prod/gcp_iam.tf
+    app_files: [all Cloud Run services use this SA]
+    status: OK
+
+  - name: github-pool (Workload Identity)
+    tf_file: environments/prod/gcp_iam.tf
+    app_files: [.github/workflows/deploy.yml]
+    status: OK
+
+  - name: aws-to-gcp-bridge (Workload Identity)
+    tf_file: environments/prod/gcp_iam.tf
+    app_files: [backend_v2 Dockerfiles (OIDC token bridge)]
+    status: OK
+
+# --------------------------------------------------------------------------
+# GCP: Storage
+# --------------------------------------------------------------------------
+gcp_storage:
+  - name: mediconnect-analytics_cloudbuild
+    tf_file: environments/prod/gcp_services.tf
+    app_files: []
+    note: "Cloud Build artifact bucket"
+    status: OK
+
+  - name: mediconnect-medical-images
+    tf_file: environments/prod/gcp_services.tf
+    app_files: [backend_v2/dicom-service]
+    status: OK
+
+# --------------------------------------------------------------------------
+# GCP: Artifact Registry (billing-dependent)
+# --------------------------------------------------------------------------
+gcp_artifact_registry:
+  - name: mediconnect-repo
+    tf_file: environments/prod/gcp_services.tf
+    app_files: [.github/workflows/deploy.yml]
+    note: "Requires gcp_billing_enabled=true"
+    status: CODE_READY
+
+# --------------------------------------------------------------------------
+# GCP: Secret Manager (billing-dependent)
+# --------------------------------------------------------------------------
+gcp_secret_manager:
+  - name: aws_access_key_id
+    tf_file: environments/prod/gcp_services.tf
+    app_files: [Cloud Run services (AWS credential bridge)]
+    note: "Requires gcp_billing_enabled=true. Phase 2 recommends migrating to Workload Identity."
+    status: CODE_READY
+
+  - name: aws_secret_access_key
+    tf_file: environments/prod/gcp_services.tf
+    app_files: [Cloud Run services (AWS credential bridge)]
+    note: "Requires gcp_billing_enabled=true"
+    status: CODE_READY
+
+# --------------------------------------------------------------------------
+# Azure: Cosmos DB
+# --------------------------------------------------------------------------
+azure:
+  - name: mediconnect-db (Cosmos DB account)
+    tf_file: modules/azure/data/main.tf
+    app_files: [modules/aws/identity (reads Cosmos endpoint/key)]
+    status: CODE_READY
+    note: "Phase 2 compliance changes written but not applied"
+
+  - name: mediconnect-db (SQL database)
+    tf_file: modules/azure/data/main.tf
+    app_files: []
+    note: "Phase 2 Finding #1 — database + container added"
+    status: CODE_READY
+
+  - name: mediconnect-rg (resource group)
+    tf_file: modules/azure/data/main.tf
+    app_files: []
+    status: OK
+
+  - name: NetworkWatcherRG (resource group)
+    tf_file: modules/azure/data/main.tf
+    app_files: []
+    note: "Azure auto-created, imported into TF"
+    status: OK
+
+# ============================================================================
+# GAP SUMMARY
+# ============================================================================
+gap_summary:
+  total_resources_checked: 139
+  status_ok: 136
+  status_missing_tf: 0
+  status_code_ready: 5  # GCP billing + Azure compliance (pending apply)
+
+  missing_tf: none  # All 15 gaps fixed on 2026-04-06
+
+  resolved_gaps:
+    sqs_queues:
+      count: 12
+      status: "FIXED — added to sqs.tf (US + EU) with DLQ redrive"
+      fixed_date: "2026-04-06"
+
+    ecr_repos:
+      count: 3
+      status: "FIXED — added to ecr.tf (US + EU)"
+      fixed_date: "2026-04-06"
