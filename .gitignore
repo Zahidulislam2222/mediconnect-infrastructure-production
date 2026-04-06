@@ -68,3 +68,19 @@ trust-policy.json
 
 # Claude Code
 CLAUDE.md
+
+# --- Plans, Reports & Audit Docs (keep in conversation/memory, not in repo) ---
+*-plan.md
+*-plan-*.md
+*-report*.md
+*-audit*.md
+*-summary.md
+*-results.md
+*-inventory.md
+audit-*.md
+phase0-*.md
+compliance-report*.md
+cloud-vs-code-*.md
+!README.md
+!compliance/*.md
+!backend_v2/**/docs/*.md
