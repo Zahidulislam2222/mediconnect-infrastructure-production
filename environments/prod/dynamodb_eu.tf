@@ -351,5 +351,32 @@ module "dynamodb_eu" {
         },
       ]
     }
+
+    # ── Chatbot Tables ───────────────────────────────────────────────
+
+    "mediconnect-chat-sessions" = {
+      hash_key               = "sessionId"
+      range_key              = "messageIndex"
+      deletion_protection    = true
+      point_in_time_recovery = true
+      ttl_enabled            = true
+      ttl_attribute          = "ttl"
+      global_secondary_indexes = [
+        {
+          name     = "PatientIndex"
+          hash_key = "patientId"
+          range_key = "createdAt"
+        },
+      ]
+    }
+
+    "mediconnect-chatbot-usage" = {
+      hash_key               = "patientId"
+      range_key              = "date"
+      deletion_protection    = true
+      point_in_time_recovery = true
+      ttl_enabled            = true
+      ttl_attribute          = "ttl"
+    }
   }
 }

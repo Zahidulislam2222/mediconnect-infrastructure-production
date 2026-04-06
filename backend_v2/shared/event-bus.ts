@@ -97,6 +97,11 @@ export enum EventType {
     // Extended Appointment Events
     ELIGIBILITY_CHECKED = "appointment.eligibility_checked",
 
+    // Chatbot Events
+    CHATBOT_MESSAGE_PROCESSED = "system.chatbot_message",
+    CHATBOT_RATE_LIMITED = "system.chatbot_rate_limited",
+    CHATBOT_ABUSE_DETECTED = "security.chatbot_abuse",
+
     // Extended System Events
     STAFF_SHIFT_CHANGED = "system.staff_shift_changed",
 
