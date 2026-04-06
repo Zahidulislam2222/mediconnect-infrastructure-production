@@ -12,11 +12,13 @@
 ![Cloud](https://img.shields.io/badge/Cloud-AWS%20%7C%20GCP%20%7C%20Azure-F97316)
 ![IaC](https://img.shields.io/badge/Terraform-414_Resources-7B42BC)
 ![Cost](https://img.shields.io/badge/Idle%20Cost-%241%2Fmo-22C55E)
-![Tests](https://img.shields.io/badge/Tests-567%2B_Assertions-22C55E)
+![Tests](https://img.shields.io/badge/Tests-650%2B_Assertions-22C55E)
 ![Scans](https://img.shields.io/badge/Compliance_Scans-20_Frameworks-06B6D4)
+![Kafka](https://img.shields.io/badge/Kafka-7_Topics-000000)
+![LightRAG](https://img.shields.io/badge/LightRAG-Graph_RAG-FF6B35)
 
-**Production-grade, multi-cloud healthcare backend with 7 microservices, 4 Lambda functions, and 35 FHIR R4 resource types.**
-**Forensically verified HIPAA / GDPR / HL7 FHIR R4 / SOC 2 / ISO 27001 / PCI-DSS / NIST 800-53 compliance — proven in code, scans, and tests.**
+**Production-grade, multi-cloud healthcare backend with 7 microservices, 4 Lambda functions, 35 FHIR R4 resource types, Kafka event streaming, and AI-powered chatbot.**
+**Forensically verified HIPAA / GDPR / HL7 FHIR R4 / SOC 2 / ISO 27001 / PCI-DSS / NIST 800-53 / EU AI Act compliance — proven in code, scans, and tests.**
 
 [Live Demo](https://askme-82f72.web.app) · [Frontend Repo](https://github.com/Zahidulislam2222/mediconnect-hub) · [Author](https://zahidul-islam.vercel.app)
 
@@ -57,9 +59,12 @@ MediConnect is a **production-grade global telemedicine platform** built on a th
 | **Zero-Cost Idle** | ~$1/month when no users active (vs ~$300/month traditional always-on) |
 | **AI Circuit Breaker** | AWS Bedrock → GCP Vertex AI → Azure OpenAI for 99.99% AI availability |
 | **Multi-Region Data Residency** | US data in `us-east-1`, EU data in `eu-central-1` — GDPR Schrems II compliant |
-| **567+ Automated Assertions** | 12 backend TS + 12 Python + 4 frontend + 4 verification scripts across 32 test files |
+| **650+ Automated Assertions** | 12 backend TS + 12 Python + 4 frontend + 125 compliance + 4 verification scripts |
 | **414 Terraform Resources** | Full IaC coverage across AWS (370), GCP (40), Azure (4) — 129 PASS / 0 FAIL verify |
 | **20 Compliance Framework Scans** | Prowler + Checkov + Trivy + Healthcare Scanner across all 3 clouds |
+| **Kafka Event Streaming** | 7 topics, MSK Serverless (US + EU), feature-flagged alongside SQS |
+| **AI Chatbot (LightRAG)** | Graph-based RAG, rate limiting per tier, PII scrubbing, Redis caching |
+| **Subscription System** | Discount Pass model (Plus $19/mo, Premium $39/mo), Stripe Connect payouts |
 | **0 npm Vulnerabilities** | OIDC Workload Identity replacing all static keys |
 
 ---
@@ -345,13 +350,16 @@ Full report: [`compliance-report-phase4.md`](compliance-report-phase4.md)
 | AWS Lambda | 4 functions × 2 regions = 8 deployments |
 | GitHub Actions | CI/CD pipeline (test → build → deploy) |
 | Docker Compose | Local development orchestration |
+| Apache Kafka (MSK Serverless) | Event streaming — 7 topics, dual-write with SQS, IAM auth |
+| Terraform | 414 resources across AWS (370) + GCP (40) + Azure (4) |
 
 ### AI & Machine Learning
 | Service | Usage |
 |---------|-------|
-| AWS Bedrock (Claude 3 Haiku) | Primary AI clinical assistant |
+| AWS Bedrock (Claude 3 Haiku) | Primary AI — chatbot + clinical assistant |
 | GCP Vertex AI (Gemini 2.5) | AI fallback #1 |
 | Azure OpenAI (GPT-4) | AI fallback #2 |
+| LightRAG (HKUDS) | Graph-based RAG for AI chatbot knowledge |
 | AWS Rekognition | Biometric face match (selfie vs government ID) |
 | AWS Textract | AI diploma OCR for doctor credentialing |
 | AWS Comprehend Medical | FHIR term extraction from clinical text |
@@ -360,10 +368,18 @@ Full report: [`compliance-report-phase4.md`](compliance-report-phase4.md)
 ### Data Stores
 | Store | Usage |
 |-------|-------|
-| AWS DynamoDB | Primary database — 15+ tables, on-demand billing, per-region |
+| AWS DynamoDB | Primary database — 48+ tables, on-demand billing, per-region |
 | AWS S3 | Documents, DICOM files, verification images, export artifacts |
 | GCP BigQuery | Analytics data warehouse (revenue, appointments, vitals) |
-| Redis | Distributed rate limiting, session caching |
+| Redis | Distributed rate limiting, AI response caching, session management |
+
+### Payments & Subscriptions
+| Service | Usage |
+|---------|-------|
+| Stripe Payments | Per-visit PaymentIntents with webhook signature verification |
+| Stripe Subscriptions | Discount Pass model (Plus $19/mo, Premium $39/mo) |
+| Stripe Connect | Weekly doctor payouts with 7-day hold |
+| Stripe Customer Portal | Self-service billing management |
 
 ---
 
