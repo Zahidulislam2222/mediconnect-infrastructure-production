@@ -15,6 +15,7 @@
 import { Kafka, Producer, Consumer, logLevel, SASLOptions } from 'kafkajs';
 import { safeLog, safeError } from './logger';
 
+
 // ─── Configuration ──────────────────────────────────────────────────────
 
 export const KAFKA_ENABLED = process.env.KAFKA_ENABLED === 'true';
@@ -31,8 +32,9 @@ const normalizeRegion = (region: string = 'us-east-1'): string => {
 // ─── MSK IAM Auth (Production Only) ────────────────────────────────────
 
 async function getMskSaslConfig(region: string): Promise<SASLOptions> {
-    // Dynamic import to avoid loading in local dev
-    const { generateAuthToken } = await import('aws-msk-iam-sasl-signer-js');
+    // Dynamic import to avoid loading in local dev (package only installed in production)
+    const signer = await import(/* webpackIgnore: true */ 'aws-msk-iam-sasl-signer-js' as any);
+    const generateAuthToken = signer.generateAuthToken || signer.default?.generateAuthToken;
 
     return {
         mechanism: 'oauthbearer' as any,

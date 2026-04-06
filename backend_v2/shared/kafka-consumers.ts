@@ -130,12 +130,11 @@ async function startNotificationConsumer(region: string) {
 
                 await sendNotification({
                     region,
-                    recipientId: payload.patientId,
-                    recipientEmail: '',
+                    recipientEmail: payload.patientEmail || '',
                     subject: mapping.subjectFn(payload),
                     message: mapping.messageFn(payload),
                     type: mapping.type as any,
-                    metadata: payload,
+                    metadata: { patientId: payload.patientId || '' },
                 });
 
                 safeLog(`[KAFKA-NOTIFY] ${eventType} → ${mapping.type} sent`);

@@ -82,13 +82,11 @@ export const updateDoctorRate = catchAsync(async (req: Request, res: Response) =
         },
     }));
 
-    await writeAuditLog({
-        action: 'DOCTOR_RATE_UPDATED',
-        actorId: doctorId,
-        resource: `doctor/${doctorId}/rate`,
-        detail: `Rate changed: $${currentRate} → $${newRate}`,
-        region,
-    });
+    await writeAuditLog(
+        doctorId, doctorId, 'DOCTOR_RATE_UPDATED',
+        `Rate changed: $${currentRate} → $${newRate}`,
+        { region }
+    );
 
     publishEvent(EventType.DOCTOR_RATE_CHANGED, { doctorId, previousRate: currentRate, newRate }, region).catch(() => {});
 
@@ -128,13 +126,11 @@ export const setDoctorTier = catchAsync(async (req: Request, res: Response) => {
         },
     }));
 
-    await writeAuditLog({
-        action: 'DOCTOR_TIER_SET',
-        actorId: adminId,
-        resource: `doctor/${doctorId}/tier`,
-        detail: `Tier set to ${tier} (${tierConfig.doctorPercentage}/${tierConfig.platformPercentage})`,
-        region,
-    });
+    await writeAuditLog(
+        adminId, doctorId, 'DOCTOR_TIER_SET',
+        `Tier set to ${tier} (${tierConfig.doctorPercentage}/${tierConfig.platformPercentage})`,
+        { region }
+    );
 
     res.json({ message: `Doctor tier set to ${tier}`, ...tierConfig });
 });
@@ -227,13 +223,11 @@ export const linkStripeConnect = catchAsync(async (req: Request, res: Response) 
         },
     }));
 
-    await writeAuditLog({
-        action: 'STRIPE_CONNECT_LINKED',
-        actorId: doctorId,
-        resource: `doctor/${doctorId}/stripe-connect`,
-        detail: `Linked Stripe Connect account`,
-        region,
-    });
+    await writeAuditLog(
+        doctorId, doctorId, 'STRIPE_CONNECT_LINKED',
+        'Linked Stripe Connect account',
+        { region }
+    );
 
     res.json({ message: 'Stripe Connect account linked' });
 });

@@ -159,7 +159,7 @@ export const executePayouts = catchAsync(async (req: Request, res: Response) => 
     const { doctorIds } = req.body; // optional: specific doctors, or all pending
     const stripeKey = await getSSMParameter('/mediconnect/prod/stripe/secret_key', region, true);
     if (!stripeKey) throw new Error('Stripe secret not found');
-    const stripe = new Stripe(stripeKey, { apiVersion: '2024-12-18.acacia' });
+    const stripe = new Stripe(stripeKey, { apiVersion: '2023-10-16' });
 
     const holdCutoff = new Date();
     holdCutoff.setDate(holdCutoff.getDate() - PAYOUT_HOLD_DAYS);
@@ -277,13 +277,11 @@ export const executePayouts = catchAsync(async (req: Request, res: Response) => 
         });
     }
 
-    await writeAuditLog({
-        action: 'PAYOUTS_EXECUTED',
-        actorId: adminId,
-        resource: 'payouts/weekly',
-        detail: `${results.length} doctors, total: $${results.reduce((s, r) => s + r.netPayout, 0).toFixed(2)}`,
-        region,
-    });
+    await writeAuditLog(
+        adminId, 'SYSTEM', 'PAYOUTS_EXECUTED',
+        `${results.length} doctors, total: $${results.reduce((s: number, r: any) => s + r.netPayout, 0).toFixed(2)}`,
+        { region }
+    );
 
     res.json({
         message: `Payouts processed for ${results.length} doctors`,

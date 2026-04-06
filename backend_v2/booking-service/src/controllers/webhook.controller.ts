@@ -714,13 +714,11 @@ async function handleSubscriptionCreated(subscription: Stripe.Subscription, regi
         },
     }));
 
-    await writeAuditLog({
-        action: 'SUBSCRIPTION_ACTIVATED',
-        actorId: patientId,
-        resource: `subscription/${subscription.id}`,
-        detail: `Plan: ${plan.name}, Discount: ${plan.discountPercent}%, Cycle: ${cycleStart} to ${cycleEnd}`,
-        region,
-    });
+    await writeAuditLog(
+        patientId, patientId, 'SUBSCRIPTION_ACTIVATED',
+        `Plan: ${plan.name}, Discount: ${plan.discountPercent}%, Cycle: ${cycleStart} to ${cycleEnd}`,
+        { region }
+    );
 
     safeLog(`Subscription activated: ${subscription.id}, patient: ${patientId}, plan: ${planId}`);
 }
@@ -757,13 +755,11 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription, regi
         },
     }));
 
-    await writeAuditLog({
-        action: 'SUBSCRIPTION_STATUS_CHANGED',
-        actorId: patientId,
-        resource: `subscription/${subscription.id}`,
-        detail: `Status: ${newStatus}, CancelAtPeriodEnd: ${subscription.cancel_at_period_end}`,
-        region,
-    });
+    await writeAuditLog(
+        patientId, patientId, 'SUBSCRIPTION_STATUS_CHANGED',
+        `Status: ${newStatus}, CancelAtPeriodEnd: ${subscription.cancel_at_period_end}`,
+        { region }
+    );
 
     safeLog(`Subscription updated: ${subscription.id}, status: ${newStatus}`);
 }
@@ -788,13 +784,11 @@ async function handleSubscriptionDeleted(subscription: Stripe.Subscription, regi
         },
     }));
 
-    await writeAuditLog({
-        action: 'SUBSCRIPTION_CANCELLED',
-        actorId: patientId,
-        resource: `subscription/${subscription.id}`,
-        detail: 'Subscription fully cancelled',
-        region,
-    });
+    await writeAuditLog(
+        patientId, patientId, 'SUBSCRIPTION_CANCELLED',
+        'Subscription fully cancelled',
+        { region }
+    );
 
     safeLog(`Subscription cancelled: ${subscription.id}, patient: ${patientId}`);
 }
@@ -835,13 +829,11 @@ async function handleSubscriptionInvoicePaid(invoice: Stripe.Invoice, regionalDb
         },
     }));
 
-    await writeAuditLog({
-        action: 'SUBSCRIPTION_RENEWED',
-        actorId: patientId,
-        resource: `subscription/${subscriptionId}`,
-        detail: `Invoice: ${invoice.id}, Amount: $${((invoice.amount_paid || 0) / 100).toFixed(2)}, Period: ${periodStart} to ${periodEnd}`,
-        region,
-    });
+    await writeAuditLog(
+        patientId, patientId, 'SUBSCRIPTION_RENEWED',
+        `Invoice: ${invoice.id}, Amount: $${((invoice.amount_paid || 0) / 100).toFixed(2)}, Period: ${periodStart} to ${periodEnd}`,
+        { region }
+    );
 
     safeLog(`Subscription renewed: ${subscriptionId}, patient: ${patientId}`);
 }
@@ -868,24 +860,21 @@ async function handleSubscriptionInvoiceFailed(invoice: Stripe.Invoice, regional
         },
     }));
 
-    await writeAuditLog({
-        action: 'SUBSCRIPTION_PAYMENT_FAILED',
-        actorId: patientId,
-        resource: `subscription/${subscriptionId}`,
-        detail: `Invoice: ${invoice.id}, Attempt: ${invoice.attempt_count}`,
-        region,
-    });
+    await writeAuditLog(
+        patientId, patientId, 'SUBSCRIPTION_PAYMENT_FAILED',
+        `Invoice: ${invoice.id}, Attempt: ${invoice.attempt_count}`,
+        { region }
+    );
 
     // Notify patient to update payment method
     try {
         sendNotification({
             region,
             recipientEmail: '',
-            recipientId: patientId,
             subject: 'Payment Failed — Update Your Card',
             message: 'Your MediConnect subscription payment failed. Please update your payment method to continue receiving discounts.',
             type: 'PAYMENT_FAILED',
-            metadata: { subscriptionId, invoiceId: invoice.id },
+            metadata: { subscriptionId: subscriptionId || '', invoiceId: invoice.id },
         }).catch(() => {});
     } catch { /* Non-blocking */ }
 

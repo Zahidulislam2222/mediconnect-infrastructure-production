@@ -32,7 +32,7 @@ import {
 
 async function getStripe(region: string): Promise<Stripe> {
     const secretKey = await getSSMParameter('/mediconnect/prod/stripe/secret_key', region);
-    return new Stripe(secretKey!, { apiVersion: '2024-12-18.acacia' });
+    return new Stripe(secretKey!, { apiVersion: '2023-10-16' });
 }
 
 async function getStripePriceId(planId: PlanId, region: string): Promise<string> {
@@ -124,13 +124,11 @@ export async function createSubscription(req: Request, res: Response) {
         const invoice = subscription.latest_invoice as Stripe.Invoice;
         const paymentIntent = invoice.payment_intent as Stripe.PaymentIntent;
 
-        await writeAuditLog({
-            action: 'SUBSCRIPTION_INITIATED',
-            actorId: user.id,
-            resource: `subscription/${subscription.id}`,
-            detail: `Plan: ${planId}, Status: ${subscription.status}`,
-            region,
-        });
+        await writeAuditLog(
+            user.id, user.id, 'SUBSCRIPTION_INITIATED',
+            `Plan: ${planId}, Status: ${subscription.status}`,
+            { region }
+        );
 
         safeLog(`Subscription created: ${subscription.id} for patient ${user.id}, plan: ${planId}`);
 
@@ -181,13 +179,11 @@ export async function cancelSubscription(req: Request, res: Response) {
             },
         }));
 
-        await writeAuditLog({
-            action: 'SUBSCRIPTION_CANCEL_REQUESTED',
-            actorId: user.id,
-            resource: `subscription/${sub.stripeSubscriptionId}`,
-            detail: `Cancels at period end: ${sub.cycleEnd}. Reason: ${reason || 'none'}`,
-            region,
-        });
+        await writeAuditLog(
+            user.id, user.id, 'SUBSCRIPTION_CANCEL_REQUESTED',
+            `Cancels at period end: ${sub.cycleEnd}. Reason: ${reason || 'none'}`,
+            { region }
+        );
 
         res.json({
             message: 'Subscription will cancel at end of billing period',
@@ -251,13 +247,11 @@ export async function upgradeSubscription(req: Request, res: Response) {
             },
         }));
 
-        await writeAuditLog({
-            action: 'SUBSCRIPTION_UPGRADED',
-            actorId: user.id,
-            resource: `subscription/${sub.stripeSubscriptionId}`,
-            detail: `${sub.planId} → ${newPlanId}`,
-            region,
-        });
+        await writeAuditLog(
+            user.id, user.id, 'SUBSCRIPTION_UPGRADED',
+            `${sub.planId} → ${newPlanId}`,
+            { region }
+        );
 
         res.json({ message: `Upgraded to ${plan.name}`, planId: newPlanId, discountPercent: plan.discountPercent });
     } catch (err: any) {
@@ -359,13 +353,11 @@ export async function addFamilyMember(req: Request, res: Response) {
             },
         }));
 
-        await writeAuditLog({
-            action: 'FAMILY_MEMBER_ADDED',
-            actorId: user.id,
-            resource: `subscription/${sub.stripeSubscriptionId}/family/${memberId}`,
-            detail: `Relationship: ${relationship}`,
-            region,
-        });
+        await writeAuditLog(
+            user.id, memberId, 'FAMILY_MEMBER_ADDED',
+            `Relationship: ${relationship}`,
+            { region }
+        );
 
         res.json({ message: 'Family member added', memberId, familySize: sub.familyMembers.length + 1 });
     } catch (err: any) {
@@ -405,13 +397,11 @@ export async function removeFamilyMember(req: Request, res: Response) {
             },
         }));
 
-        await writeAuditLog({
-            action: 'FAMILY_MEMBER_REMOVED',
-            actorId: user.id,
-            resource: `subscription/${sub.stripeSubscriptionId}/family/${memberId}`,
-            detail: `Removed from family plan`,
-            region,
-        });
+        await writeAuditLog(
+            user.id, memberId, 'FAMILY_MEMBER_REMOVED',
+            'Removed from family plan',
+            { region }
+        );
 
         res.json({ message: 'Family member removed', memberId });
     } catch (err: any) {
