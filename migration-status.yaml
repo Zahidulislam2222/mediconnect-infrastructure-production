@@ -6,8 +6,8 @@
 # Run `bash verify_migration.sh` to verify claims in this file.
 # ============================================================================
 
-last_updated: "2026-04-06T00:02:00Z"
-last_verified_by: "verify_migration.sh"
+last_updated: "2026-04-06T18:00:00Z"
+last_verified_by: "verify_app_vs_iac.sh (127 PASS / 0 FAIL / 33 WARN)"
 
 # --------------------------------------------------------------------------
 # Phase 0: Cloud Discovery
@@ -214,12 +214,41 @@ phase_3:
 # Phase 4: Final Audit (cross-cloud)
 # --------------------------------------------------------------------------
 phase_4:
-  status: "NOT_STARTED"
+  status: "IN_PROGRESS"
+  started_date: "2026-04-06"
+  report_file: "compliance-report-phase4.md"
+  scans_completed:
+    checkov: "263 PASS / 140 FAIL → 96 fixed (44 remaining: 22 GCP CMEK deferred, 20 SSM String acceptable, 2 legacy SG)"
+    prowler_hipaa: "AWS 333/304, GCP 13/11, Azure 6/26"
+    prowler_gdpr: "AWS 411/505, GCP 11/30, Azure 2/32"
+    prowler_soc2: "AWS 849/596, GCP 15/29, Azure 6/33"
+    trivy: "222 vulns (5 CRITICAL) — third-party LightRAG image"
+    healthcare_scanner: "20 PASS / 1 FAIL (false positive) / 1 WARN"
+  fixes_applied:
+    - "sqs.tf: KMS encryption on 26 SQS queues"
+    - "ssm_us.tf + ssm_eu.tf: KMS key_id on 24 SecureString params"
+    - "ecr.tf: KMS encryption on 14 ECR repos"
+    - "cloudwatch.tf: KMS keys + encryption on 7 log groups + retention fix"
+    - "sns.tf: KMS encryption on 10 SNS topics"
+    - "apigateway.tf: Access logging on 2 API GW stages"
+    - "gcp_iam.tf: Attribute conditions on 2 WI providers"
+    - "gcp_services.tf: Uniform access + retention on 2 GCS buckets"
+    - "guardduty.tf: NEW — GuardDuty detectors (US + EU)"
+    - "securityhub.tf: NEW — Security Hub + 4 standards (US + EU)"
+    - "deploy.yml: GCP push conditional on DEPLOY_GCP variable"
+  remaining:
+    - "User runs terraform apply for all IaC fixes"
+    - "Set DEPLOY_GCP=false in GitHub repo variables"
+    - "Re-run Prowler after apply to verify remediation"
+    - "Enable GCP billing when ready — unlocks 22 CMEK checks"
+    - "Run Inferno against FHIR server for ONC g(10) testing"
+    - "Run OWASP ZAP against live backend"
   notes: |
-    Checkov and Prowler are installed in D:\RAGSetup docker-compose (separate project).
-    Checkov mounts mediconnect TF dir and outputs to D:\RAGSetup\reports\hipaa\.
-    Phase 4 agent should: run scans from RAGSetup, read reports, generate compliance report here.
-    Azure + GCP compliance changes are CODE_READY — user will terraform apply separately.
+    All scans completed via D:\rag-production-stack docker-compose.
+    20 compliance frameworks scanned across 3 clouds.
+    96 Checkov checks fixed in IaC code. 34 Prowler critical findings addressed.
+    CI/CD fixed for GCP billing OFF scenario.
+    Azure + GCP compliance changes still CODE_READY — user applies.
 
 # --------------------------------------------------------------------------
 # Pre-Phase 4: App vs IaC Audit

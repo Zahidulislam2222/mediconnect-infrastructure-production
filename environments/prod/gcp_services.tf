@@ -50,9 +50,14 @@ resource "google_healthcare_dicom_store" "xray_archive_eu" {
 # ── GCP Cloud Storage Buckets ─────────────────────────────────────────────
 
 resource "google_storage_bucket" "cloudbuild" {
-  name     = "mediconnect-analytics_cloudbuild"
-  location = "US"
-  project  = var.gcp_project_id
+  name                        = "mediconnect-analytics_cloudbuild"
+  location                    = "US"
+  project                     = var.gcp_project_id
+  uniform_bucket_level_access = true
+
+  retention_policy {
+    retention_period = 2592000 # 30 days
+  }
 
   labels = {
     project     = "mediconnect"
@@ -66,9 +71,14 @@ resource "google_storage_bucket" "cloudbuild" {
 }
 
 resource "google_storage_bucket" "medical_images" {
-  name     = "mediconnect-medical-images"
-  location = "US"
-  project  = var.gcp_project_id
+  name                        = "mediconnect-medical-images"
+  location                    = "US"
+  project                     = var.gcp_project_id
+  uniform_bucket_level_access = true
+
+  retention_policy {
+    retention_period = 220752000 # 7 years (HIPAA retention)
+  }
 
   labels = {
     project     = "mediconnect"

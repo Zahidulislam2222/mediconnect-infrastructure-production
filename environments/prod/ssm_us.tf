@@ -48,9 +48,10 @@ resource "aws_ssm_parameter" "us_secure" {
   provider = aws.us
   for_each = local.ssm_us_secure_params
 
-  name  = each.value
-  type  = "SecureString"
-  value = "IMPORTED_BY_TERRAFORM"
+  name   = each.value
+  type   = "SecureString"
+  key_id = "alias/aws/ssm"
+  value  = "IMPORTED_BY_TERRAFORM"
 
   lifecycle {
     ignore_changes = [value]

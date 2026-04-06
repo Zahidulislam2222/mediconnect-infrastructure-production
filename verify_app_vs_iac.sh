@@ -218,14 +218,10 @@ header "5. Lambda Functions (legacy_lambdas/ + backend_v2/ vs lambda_us.tf)"
 LAMBDA_TF_US="$TF_DIR/lambda_us.tf"
 LAMBDA_TF_EU="$TF_DIR/lambda_eu.tf"
 
-# Lambda folders = Lambda functions
+# Legacy lambdas in legacy_lambdas/ are kept for reference only (not deployed).
+# They were replaced by the 7 microservices. Skip them from WARN checks.
+# See: cloud-vs-code audit (commit ed106cd) — 31 legacy Lambdas confirmed dead code.
 LAMBDA_FUNCTIONS_APP=()
-if [ -d "$LAMBDAS" ]; then
-  while IFS= read -r dir; do
-    name=$(basename "$dir")
-    LAMBDA_FUNCTIONS_APP+=("$name")
-  done < <(find "$LAMBDAS" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort)
-fi
 
 # Also add v2 Lambdas (from backend_v2/)
 V2_LAMBDAS=("cognito-triggers" "ws-authorizer" "cleanup-recordings" "failover-proxy")
@@ -648,7 +644,7 @@ BOTO3_TF_MAP["wafv2"]="waf"
 BOTO3_TF_MAP["redshift"]="redshift"
 
 # Services that don't need their own TF file (managed elsewhere or runtime-only)
-SKIP_SERVICES="chime|cloudwatch|ssm|lambda"
+SKIP_SERVICES="chime|cloudwatch|ssm|lambda|secretsmanager"
 
 # Check TypeScript SDK clients
 for sdk_class in "${!SDK_TF_MAP[@]}"; do

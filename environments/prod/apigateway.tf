@@ -7,10 +7,32 @@ resource "aws_apigatewayv2_api" "ws_chat_us" {
   route_selection_expression = "$request.body.action"
 }
 
+resource "aws_cloudwatch_log_group" "apigw_us" {
+  provider          = aws.us
+  name              = "/aws/apigateway/mediconnect-ws-chat-us"
+  retention_in_days = 365
+  kms_key_id        = aws_kms_key.cloudwatch_us.arn
+}
+
 resource "aws_apigatewayv2_stage" "ws_chat_us_production" {
   provider = aws.us
   api_id   = aws_apigatewayv2_api.ws_chat_us.id
   name     = "production"
+
+  access_log_settings {
+    destination_arn = aws_cloudwatch_log_group.apigw_us.arn
+    format = jsonencode({
+      requestId      = "$context.requestId"
+      ip             = "$context.identity.sourceIp"
+      caller         = "$context.identity.caller"
+      user           = "$context.identity.user"
+      requestTime    = "$context.requestTime"
+      routeKey       = "$context.routeKey"
+      status         = "$context.status"
+      connectionId   = "$context.connectionId"
+      errorMessage   = "$context.error.message"
+    })
+  }
 }
 
 resource "aws_apigatewayv2_authorizer" "ws_us_authorizer" {
@@ -77,10 +99,32 @@ resource "aws_apigatewayv2_api" "ws_chat_eu" {
   route_selection_expression = "$request.body.action"
 }
 
+resource "aws_cloudwatch_log_group" "apigw_eu" {
+  provider          = aws.eu
+  name              = "/aws/apigateway/mediconnect-ws-chat-eu"
+  retention_in_days = 365
+  kms_key_id        = aws_kms_key.cloudwatch_eu.arn
+}
+
 resource "aws_apigatewayv2_stage" "ws_chat_eu_production" {
   provider = aws.eu
   api_id   = aws_apigatewayv2_api.ws_chat_eu.id
   name     = "production"
+
+  access_log_settings {
+    destination_arn = aws_cloudwatch_log_group.apigw_eu.arn
+    format = jsonencode({
+      requestId      = "$context.requestId"
+      ip             = "$context.identity.sourceIp"
+      caller         = "$context.identity.caller"
+      user           = "$context.identity.user"
+      requestTime    = "$context.requestTime"
+      routeKey       = "$context.routeKey"
+      status         = "$context.status"
+      connectionId   = "$context.connectionId"
+      errorMessage   = "$context.error.message"
+    })
+  }
 }
 
 resource "aws_apigatewayv2_authorizer" "ws_eu_authorizer" {

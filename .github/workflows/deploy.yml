@@ -1,11 +1,13 @@
 name: "Enterprise Multi-Cloud Deploy (Mediconnect)"
 
 # ─────────────────────────────────────────────────────────────────
-# Toggle AKS / EKS via GitHub repo variables (Settings > Variables):
+# Toggle cloud deploys via GitHub repo variables (Settings > Variables):
+#   DEPLOY_GCP = "false" | (unset = on by default)
 #   DEPLOY_AKS = "true" | (unset = off)
 #   DEPLOY_EKS = "true" | (unset = off)
 #
-# GCP Cloud Run deploys always (free-tier optimised).
+# GCP Cloud Run deploys by default. Set DEPLOY_GCP=false to skip
+# (e.g., when GCP billing is disabled).
 #
 # When re-enabling K8s, also create these secrets if missing:
 #   EKS_ADMIN_ROLE_ARN, EKS_STAFF_ROLE_ARN
@@ -127,22 +129,27 @@ jobs:
       - if: vars.DEPLOY_EKS == 'true'
         run: aws ecr get-login-password --region eu-central-1 | docker login --username AWS --password-stdin ${{ env.AWS_ECR }}
 
-      # --- GCP GAR (always) ---
-      - uses: google-github-actions/auth@v2
+      # --- GCP GAR (when GCP enabled — set DEPLOY_GCP=false to skip) ---
+      - if: vars.DEPLOY_GCP != 'false'
+        uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
-      - uses: google-github-actions/setup-gcloud@v2
-      - run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+      - if: vars.DEPLOY_GCP != 'false'
+        uses: google-github-actions/setup-gcloud@v2
+      - if: vars.DEPLOY_GCP != 'false'
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
       - name: "Build and push container image"
         run: |
           TAG=${{ github.sha }}
           docker build -t local-img -f backend_v2/${{ matrix.service }}/Dockerfile .
 
-          # GCP Artifact Registry (always)
-          docker tag local-img ${{ env.GCP_GAR }}/${{ matrix.service }}:$TAG
-          docker push ${{ env.GCP_GAR }}/${{ matrix.service }}:$TAG
+          # GCP Artifact Registry (when GCP enabled — default: on)
+          if [ "${{ vars.DEPLOY_GCP }}" != "false" ]; then
+            docker tag local-img ${{ env.GCP_GAR }}/${{ matrix.service }}:$TAG
+            docker push ${{ env.GCP_GAR }}/${{ matrix.service }}:$TAG
+          fi
 
           # Azure ACR (when AKS enabled)
           if [ "${{ vars.DEPLOY_AKS }}" == "true" ]; then
@@ -462,6 +469,7 @@ jobs:
   #
   deploy-gcp:
     needs: [build-and-push]
+    if: vars.DEPLOY_GCP != 'false'
     runs-on: ubuntu-latest
     strategy:
       matrix:

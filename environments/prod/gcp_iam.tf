@@ -32,6 +32,8 @@ resource "google_iam_workload_identity_pool_provider" "github" {
     "attribute.repository" = "assertion.repository"
   }
 
+  attribute_condition = "assertion.repository_owner == 'zahidbd2'"
+
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
   }
@@ -53,6 +55,8 @@ resource "google_iam_workload_identity_pool_provider" "aws" {
   workload_identity_pool_provider_id = "aws-provider"
   display_name                       = "aws-provider"
   project                            = var.gcp_project_id
+
+  attribute_condition = "assertion.account_id == '950110266426'"
 
   aws {
     account_id = "950110266426"

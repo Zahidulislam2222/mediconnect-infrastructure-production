@@ -10,6 +10,10 @@ resource "aws_ecr_repository" "doctor_service_us" {
   image_scanning_configuration {
     scan_on_push = true
   }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+  }
 }
 
 resource "aws_ecr_repository" "doctor_service" {
@@ -19,6 +23,10 @@ resource "aws_ecr_repository" "doctor_service" {
 
   image_scanning_configuration {
     scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
   }
 }
 
@@ -32,6 +40,10 @@ resource "aws_ecr_repository" "communication_service_us" {
   image_scanning_configuration {
     scan_on_push = true
   }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+  }
 }
 
 resource "aws_ecr_repository" "communication_service" {
@@ -41,6 +53,10 @@ resource "aws_ecr_repository" "communication_service" {
 
   image_scanning_configuration {
     scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
   }
 }
 
@@ -54,6 +70,10 @@ resource "aws_ecr_repository" "patient_service_us" {
   image_scanning_configuration {
     scan_on_push = true
   }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+  }
 }
 
 resource "aws_ecr_repository" "patient_service" {
@@ -63,6 +83,10 @@ resource "aws_ecr_repository" "patient_service" {
 
   image_scanning_configuration {
     scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
   }
 }
 
@@ -76,6 +100,10 @@ resource "aws_ecr_repository" "booking_service_us" {
   image_scanning_configuration {
     scan_on_push = true
   }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+  }
 }
 
 resource "aws_ecr_repository" "booking_service" {
@@ -85,6 +113,10 @@ resource "aws_ecr_repository" "booking_service" {
 
   image_scanning_configuration {
     scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
   }
 }
 
@@ -98,6 +130,10 @@ resource "aws_ecr_repository" "admin_service_us" {
   image_scanning_configuration {
     scan_on_push = true
   }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+  }
 }
 
 resource "aws_ecr_repository" "admin_service" {
@@ -107,6 +143,10 @@ resource "aws_ecr_repository" "admin_service" {
 
   image_scanning_configuration {
     scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
   }
 }
 
@@ -120,6 +160,10 @@ resource "aws_ecr_repository" "staff_service_us" {
   image_scanning_configuration {
     scan_on_push = true
   }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+  }
 }
 
 resource "aws_ecr_repository" "staff_service" {
@@ -129,6 +173,10 @@ resource "aws_ecr_repository" "staff_service" {
 
   image_scanning_configuration {
     scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
   }
 }
 
@@ -142,6 +190,10 @@ resource "aws_ecr_repository" "dicom_service_us" {
   image_scanning_configuration {
     scan_on_push = true
   }
+
+  encryption_configuration {
+    encryption_type = "KMS"
+  }
 }
 
 resource "aws_ecr_repository" "dicom_service" {
@@ -151,5 +203,9 @@ resource "aws_ecr_repository" "dicom_service" {
 
   image_scanning_configuration {
     scan_on_push = true
+  }
+
+  encryption_configuration {
+    encryption_type = "KMS"
   }
 }

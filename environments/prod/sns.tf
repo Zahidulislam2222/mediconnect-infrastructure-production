@@ -6,12 +6,12 @@ module "sns_us" {
   }
 
   topics = {
-    "mediconnect-appointments"         = {}
-    "mediconnect-high-risk-alerts"     = {}
+    "mediconnect-appointments"         = { kms_master_key_id = "alias/aws/sns" }
+    "mediconnect-high-risk-alerts"     = { kms_master_key_id = "alias/aws/sns" }
     "mediconnect-ops-alerts"           = { display_name = "MediAlert", kms_master_key_id = "alias/aws/sns" }
-    "mediconnect-pharmacy-alerts"      = {}
-    "mediconnect-prescription-alerts"  = {}
-    "billing-alert"                    = {}
+    "mediconnect-pharmacy-alerts"      = { kms_master_key_id = "alias/aws/sns" }
+    "mediconnect-prescription-alerts"  = { kms_master_key_id = "alias/aws/sns" }
+    "billing-alert"                    = { kms_master_key_id = "alias/aws/sns" }
   }
 }
 
@@ -23,11 +23,11 @@ module "sns_eu" {
   }
 
   topics = {
-    "mediconnect-appointments-eu"        = {}
-    "mediconnect-high-risk-alerts-eu"    = {}
+    "mediconnect-appointments-eu"        = { kms_master_key_id = "alias/aws/sns" }
+    "mediconnect-high-risk-alerts-eu"    = { kms_master_key_id = "alias/aws/sns" }
     "mediconnect-ops-alerts-eu"          = { display_name = "MediAlert-EU", kms_master_key_id = "alias/aws/sns" }
-    "mediconnect-pharmacy-alerts-eu"     = {}
-    "mediconnect-prescription-alerts-eu" = {}
-    "billing-alert-eu"                   = {}
+    "mediconnect-pharmacy-alerts-eu"     = { kms_master_key_id = "alias/aws/sns" }
+    "mediconnect-prescription-alerts-eu" = { kms_master_key_id = "alias/aws/sns" }
+    "billing-alert-eu"                   = { kms_master_key_id = "alias/aws/sns" }
   }
 }

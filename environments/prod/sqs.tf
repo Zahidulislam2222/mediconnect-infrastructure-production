@@ -3,6 +3,7 @@ resource "aws_sqs_queue" "dlq_us" {
   name     = "mediconnect-dlq"
 
   message_retention_seconds = 1209600 # 14 days
+  kms_master_key_id         = "alias/aws/sqs"
   # max_message_size = 1048576 — actual AWS value is 1 MB, but provider v5.x caps validation at 262144; managed outside TF
 
   lifecycle {
@@ -18,6 +19,7 @@ resource "aws_sqs_queue" "dlq_eu" {
   name     = "mediconnect-dlq"
 
   message_retention_seconds = 1209600 # 14 days
+  kms_master_key_id         = "alias/aws/sqs"
 }
 
 # ============================================================================
@@ -44,6 +46,7 @@ resource "aws_sqs_queue" "event_dlq_us" {
   name     = each.value
 
   message_retention_seconds = 1209600 # 14 days
+  kms_master_key_id         = "alias/aws/sqs"
 }
 
 resource "aws_sqs_queue" "event_queue_us" {
@@ -53,6 +56,7 @@ resource "aws_sqs_queue" "event_queue_us" {
 
   message_retention_seconds  = 345600 # 4 days
   visibility_timeout_seconds = 60
+  kms_master_key_id          = "alias/aws/sqs"
 
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.event_dlq_us[each.key].arn
@@ -68,6 +72,7 @@ resource "aws_sqs_queue" "event_dlq_eu" {
   name     = each.value
 
   message_retention_seconds = 1209600 # 14 days
+  kms_master_key_id         = "alias/aws/sqs"
 }
 
 resource "aws_sqs_queue" "event_queue_eu" {
@@ -77,6 +82,7 @@ resource "aws_sqs_queue" "event_queue_eu" {
 
   message_retention_seconds  = 345600 # 4 days
   visibility_timeout_seconds = 60
+  kms_master_key_id          = "alias/aws/sqs"
 
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.event_dlq_eu[each.key].arn
