@@ -16,6 +16,9 @@ build/
 !package-lock.json
 !gcp_key.json.example
 
+# --- Kubernetes Configs (contain certs, tokens, private keys) ---
+*.kubeconfig
+
 # --- Terraform (CRITICAL) ---
 .terraform/
 *.tfstate
