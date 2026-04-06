@@ -13,6 +13,7 @@ locals {
     "/mediconnect/prod/s3/patient_identity_bucket" = "mediconnect-patient-data"
     "/mediconnect/prod/sns/topic_arn_eu"          = "arn:aws:sns:eu-central-1:950110266426:mediconnect-high-risk-alerts-eu"
     "/mediconnect/prod/sns/topic_arn_us"          = "arn:aws:sns:us-east-1:950110266426:mediconnect-high-risk-alerts"
+    "/mediconnect/prod/lightrag/url"              = "http://localhost:9621"
   }
 
   ssm_us_secure_params = toset([

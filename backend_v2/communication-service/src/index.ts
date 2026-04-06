@@ -8,6 +8,7 @@ import { GetParametersCommand } from "@aws-sdk/client-ssm";
 
 import { communicationRoutes } from "./routes/communication.routes";
 import { aiRoutes } from "./routes/ai.routes";
+import chatbotRoutes from "./routes/chatbot.routes";
 import { authMiddleware } from './middleware/auth.middleware';
 import { getRegionalSSMClient } from '../../shared/aws-config';
 import { createRateLimitStore } from '../../shared/rate-limit-store'; // 🟢 FIX #9: Redis distributed rate limiting
@@ -132,6 +133,9 @@ app.use("/", communicationRoutes);
 // Auth runs first so aiLimiter can key by req.user.id (not just IP)
 app.use("/ai", authMiddleware, aiLimiter);
 app.use("/ai", aiRoutes);
+
+// Chatbot: public access (rate limited per tier) + authenticated users get more messages
+app.use("/chatbot", chatbotRoutes);
 
 // --- 4. 100% COMPLIANT VAULT SYNC ---
 async function loadSecrets() {
