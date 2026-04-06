@@ -10,6 +10,7 @@ import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient } from '../../../shared/aws-config';
 import { writeAuditLog } from '../../../shared/audit';
 import { safeLog, safeError } from '../../../shared/logger';
+import { publishEvent, EventType } from '../../../shared/event-bus';
 import {
     DoctorTier,
     DOCTOR_TIERS,
@@ -88,6 +89,8 @@ export const updateDoctorRate = catchAsync(async (req: Request, res: Response) =
         detail: `Rate changed: $${currentRate} → $${newRate}`,
         region,
     });
+
+    publishEvent(EventType.DOCTOR_RATE_CHANGED, { doctorId, previousRate: currentRate, newRate }, region).catch(() => {});
 
     res.json({
         message: 'Rate updated',

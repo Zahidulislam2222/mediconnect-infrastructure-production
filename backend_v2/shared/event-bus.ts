@@ -18,6 +18,7 @@
 import { SQSClient, SendMessageCommand, GetQueueUrlCommand } from "@aws-sdk/client-sqs";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { safeLog, safeError } from './logger';
+import { KAFKA_ENABLED, KAFKA_DUAL_WRITE, publishToKafka, KAFKA_TOPICS } from './kafka';
 
 // --- SQS Client Factory (follows same pattern as aws-config.ts) ---
 
@@ -85,6 +86,20 @@ export enum EventType {
     SERVICE_HEALTH_CHANGE = "system.health_change",
     FAILOVER_TRIGGERED = "system.failover",
 
+    // Communication Events
+    VIDEO_CALL_STARTED = "communication.video_started",
+    VIDEO_CALL_ENDED = "communication.video_ended",
+
+    // Extended Clinical Events
+    DOCTOR_RATE_CHANGED = "clinical.doctor_rate_changed",
+    DICOM_STUDY_UPLOADED = "clinical.dicom_uploaded",
+
+    // Extended Appointment Events
+    ELIGIBILITY_CHECKED = "appointment.eligibility_checked",
+
+    // Extended System Events
+    STAFF_SHIFT_CHANGED = "system.staff_shift_changed",
+
     // Subscription Events
     SUBSCRIPTION_CREATED = "subscription.created",
     SUBSCRIPTION_CANCELLED = "subscription.cancelled",
@@ -142,7 +157,23 @@ function getQueueCategory(eventType: EventType): string {
     if (eventType.startsWith("appointment.")) return "appointment";
     if (eventType.startsWith("patient.") || eventType.startsWith("consent.")) return "patient";
     if (eventType.startsWith("hl7.")) return "clinical";
+    if (eventType.startsWith("subscription.")) return "system";
+    if (eventType.startsWith("payout.")) return "system";
+    if (eventType.startsWith("communication.")) return "system";
     return "system";
+}
+
+// ─── Kafka Topic Mapping ────────────────────────────────────────────────
+
+function getKafkaTopic(eventType: EventType): string {
+    if (eventType.startsWith("audit.") || eventType.startsWith("security.")) return KAFKA_TOPICS.AUDIT;
+    if (eventType.startsWith("clinical.") || eventType.startsWith("hl7.")) return KAFKA_TOPICS.CLINICAL;
+    if (eventType === EventType.VITAL_ALERT) return KAFKA_TOPICS.VITALS;
+    if (eventType.startsWith("appointment.")) return KAFKA_TOPICS.APPOINTMENTS;
+    if (eventType.startsWith("patient.") || eventType.startsWith("consent.")) return KAFKA_TOPICS.PATIENTS;
+    if (eventType.startsWith("subscription.")) return KAFKA_TOPICS.SUBSCRIPTIONS;
+    if (eventType.startsWith("payout.") || eventType === EventType.SUBSCRIPTION_PAYMENT_FAILED || eventType === EventType.SUBSCRIPTION_DISPUTE) return KAFKA_TOPICS.PAYMENTS;
+    return KAFKA_TOPICS.AUDIT; // default: audit trail captures everything
 }
 
 // --- Queue URL Resolution (cached) ---
@@ -197,8 +228,12 @@ interface PublishResult {
 }
 
 /**
- * Publish an event to the SQS event pipeline.
- * Gracefully degrades: if SQS is unavailable, logs locally.
+ * Publish an event to Kafka (if enabled) and/or SQS.
+ *
+ * Modes:
+ *   KAFKA_ENABLED=false  → SQS only (default, current behavior)
+ *   KAFKA_ENABLED=true   → Kafka primary, SQS fallback on Kafka failure
+ *   KAFKA_DUAL_WRITE=true → Both Kafka AND SQS (migration safety)
  */
 export async function publishEvent(
     eventType: EventType,
@@ -208,6 +243,24 @@ export async function publishEvent(
 ): Promise<PublishResult> {
     const category = getQueueCategory(eventType);
     const normalizedRegion = normalizeRegion(region);
+
+    // ─── Kafka Path (feature-flagged) ───────────────────────────────
+    if (KAFKA_ENABLED) {
+        try {
+            const topic = getKafkaTopic(eventType);
+            const key = payload.patientId || payload.doctorId || payload.appointmentId || eventType;
+            await publishToKafka(topic, key, { eventType, category, payload, meta }, normalizedRegion);
+
+            // If dual-write is OFF, Kafka success means we're done
+            if (!KAFKA_DUAL_WRITE) {
+                return { published: true, queueCategory: category };
+            }
+            // If dual-write is ON, continue to SQS below
+        } catch (kafkaErr: any) {
+            safeError(`[EVENT_BUS] Kafka publish failed for ${eventType}: ${kafkaErr.message}. Falling back to SQS.`);
+            // Fall through to SQS
+        }
+    }
 
     const message = {
         eventType,
