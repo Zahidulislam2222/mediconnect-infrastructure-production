@@ -84,6 +84,14 @@ export enum EventType {
     // System Events
     SERVICE_HEALTH_CHANGE = "system.health_change",
     FAILOVER_TRIGGERED = "system.failover",
+
+    // Subscription Events
+    SUBSCRIPTION_CREATED = "subscription.created",
+    SUBSCRIPTION_CANCELLED = "subscription.cancelled",
+    SUBSCRIPTION_RENEWED = "subscription.renewed",
+    SUBSCRIPTION_PAYMENT_FAILED = "subscription.payment_failed",
+    SUBSCRIPTION_DISPUTE = "subscription.dispute",
+    PAYOUT_EXECUTED = "payout.executed",
 }
 
 // --- Queue Configuration ---

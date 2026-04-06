@@ -12,6 +12,14 @@ import { google } from 'googleapis';
 import { pushAppointmentToBigQuery, pushRevenueToBigQuery } from './billing.controller';
 import { sendNotification } from '../../../shared/notifications';
 import { publishEvent, EventType } from '../../../shared/event-bus';
+import {
+    PlanId,
+    SubscriptionStatus,
+    TABLE_SUBSCRIPTIONS,
+    calculateDiscountedPrice,
+    isGpSpecialty,
+    SubscriptionRecord,
+} from '../../../shared/subscription';
 
 // 🛡️ ARCHITECTURAL PURGE: 'pg' and 'db.ts' have been completely removed.
 // All data (including pricing and tokens) now securely flows through Regional DynamoDB.
@@ -107,6 +115,60 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
     }
     let fee = Number(doctorRes.Item.consultationFee);
     if (isNaN(fee) || fee < 0) fee = 50; // Fallback to safe default
+
+    // ─── SUBSCRIPTION DISCOUNT CHECK (Loophole #2: server-side only) ────────
+    // Read subscription from DB, NEVER from JWT or client request (loophole #10)
+    let discountApplied = 0;
+    let originalPrice = fee;
+    let isFreeGpVisit = false;
+    let subscriptionId: string | undefined;
+
+    try {
+        // Check if patient (or their family primary) has an active subscription
+        const subResult = await docClient.send(new GetCommand({
+            TableName: TABLE_SUBSCRIPTIONS,
+            Key: { patientId },
+        }));
+        let sub = subResult.Item as SubscriptionRecord | undefined;
+
+        // If no direct subscription, check if patient is a family member on someone else's plan
+        if (!sub || sub.status !== SubscriptionStatus.ACTIVE) {
+            // Query for family membership would go here (scan by familyMembers contains patientId)
+            // For now, only direct subscriptions are checked
+        }
+
+        if (sub && sub.status === SubscriptionStatus.ACTIVE && !sub.disputeFrozen) {
+            subscriptionId = sub.stripeSubscriptionId;
+            const doctorSpecialty = (doctorRes.Item.specialty || '').toLowerCase();
+
+            // Premium: check if free GP visit available
+            if (sub.planId === PlanId.PREMIUM &&
+                sub.freeGpVisitsRemaining > 0 &&
+                isGpSpecialty(doctorSpecialty)) {
+                isFreeGpVisit = true;
+                discountApplied = 100;
+                fee = 0;
+
+                // Deduct free GP visit
+                await docClient.send(new UpdateCommand({
+                    TableName: TABLE_SUBSCRIPTIONS,
+                    Key: { patientId },
+                    UpdateExpression: 'SET freeGpVisitsRemaining = freeGpVisitsRemaining - :one, updatedAt = :now',
+                    ConditionExpression: 'freeGpVisitsRemaining > :zero',
+                    ExpressionAttributeValues: { ':one': 1, ':zero': 0, ':now': new Date().toISOString() },
+                }));
+            } else {
+                // Apply percentage discount (server-calculated, loophole #2)
+                const pricing = calculateDiscountedPrice(fee, sub.planId);
+                fee = pricing.discountedPrice;
+                discountApplied = pricing.discountPercent;
+            }
+        }
+    } catch (subErr: any) {
+        // Subscription check failure should NOT block booking — fall back to full price
+        logger.warn(`Subscription check failed for ${patientId}: ${subErr.message}`);
+    }
+
     amountToCharge = Math.round(fee * 100);
 
     // 2. Atomic Locking (Condition: attribute_not_exists)
@@ -144,29 +206,33 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         throw e;
     }
 
-    const stripeKey = await getSSMParameter(STRIPE_SECRET_NAME, region, true);
-    if (!stripeKey) throw new Error("Stripe secret not found");
+    // Skip Stripe payment for free GP visits (Premium subscription benefit)
+    if (!isFreeGpVisit) {
+        const stripeKey = await getSSMParameter(STRIPE_SECRET_NAME, region, true);
+        if (!stripeKey) throw new Error("Stripe secret not found");
 
-    stripeInstance = new Stripe(stripeKey);
-    try {
-        const paymentIntent = await stripeInstance.paymentIntents.create({
-            amount: amountToCharge,
-            currency: "usd",
-            payment_method: paymentToken,
-            confirm: true,
-            capture_method: 'manual', // CRITICAL: Do not take money yet
-            metadata: { 
-            appointmentId, doctorId, patientId, 
-            billId: transactionId, type: 'BOOKING_FEE', 
-            region 
-            },
-            automatic_payment_methods: { enabled: true, allow_redirects: 'never' }
-        });
-        paymentIntentId = paymentIntent.id;
-    } catch (paymentError: any) {
-        logger.error("[BOOKING] Payment authorization failed", { error: paymentError.message });
-        await docClient.send(new DeleteCommand({ TableName: TABLE_LOCKS, Key: { lockId: lockKey } }));
-        return res.status(402).json({ error: "Payment Failed", details: paymentError.message });
+        stripeInstance = new Stripe(stripeKey);
+        try {
+            const paymentIntent = await stripeInstance.paymentIntents.create({
+                amount: amountToCharge,
+                currency: "usd",
+                payment_method: paymentToken,
+                confirm: true,
+                capture_method: 'manual', // CRITICAL: Do not take money yet
+                metadata: {
+                appointmentId, doctorId, patientId,
+                billId: transactionId, type: 'BOOKING_FEE',
+                region,
+                ...(discountApplied > 0 ? { discountApplied: String(discountApplied), originalPrice: String(originalPrice) } : {}),
+                },
+                automatic_payment_methods: { enabled: true, allow_redirects: 'never' }
+            });
+            paymentIntentId = paymentIntent.id;
+        } catch (paymentError: any) {
+            logger.error("[BOOKING] Payment authorization failed", { error: paymentError.message });
+            await docClient.send(new DeleteCommand({ TableName: TABLE_LOCKS, Key: { lockId: lockKey } }));
+            return res.status(402).json({ error: "Payment Failed", details: paymentError.message });
+        }
     }
 
     // 🟢 FHIR R4 TRANSFORMATION: Appointment Resource
@@ -245,8 +311,11 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
                     Item: {
                         appointmentId, patientId, patientName: encryptedPatientName, doctorId, doctorName: encryptedDoctorName,
                         timeSlot: normalizedTime, status: "CONFIRMED",
-                        paymentStatus: "paid", paymentId: paymentIntentId,
+                        paymentStatus: isFreeGpVisit ? "subscription_free" : "paid",
+                        paymentId: isFreeGpVisit ? undefined : paymentIntentId,
                         createdAt: timestamp, amountPaid: amountToCharge / 100,
+                        originalPrice, discountApplied, subscriptionId,
+                        isFreeGpVisit,
                         coverageType: "NONE", priority, reason, patientAvatar, patientAge,
                         triageStatus: "WAITING", resource: fhirResource
                     }

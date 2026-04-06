@@ -319,5 +319,37 @@ module "dynamodb_eu" {
       deletion_protection    = true
       point_in_time_recovery = true
     }
+
+    # ── Subscription Tables ──────────────────────────────────────────
+
+    "mediconnect-subscriptions" = {
+      hash_key               = "patientId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+      global_secondary_indexes = [
+        {
+          name     = "StatusIndex"
+          hash_key = "status"
+        },
+        {
+          name     = "StripeSubIndex"
+          hash_key = "stripeSubscriptionId"
+        },
+      ]
+    }
+
+    "mediconnect-doctor-payouts" = {
+      hash_key               = "doctorId"
+      range_key              = "periodEndPayoutId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+      global_secondary_indexes = [
+        {
+          name     = "StatusIndex"
+          hash_key = "status"
+          range_key = "periodEndPayoutId"
+        },
+      ]
+    }
   }
 }

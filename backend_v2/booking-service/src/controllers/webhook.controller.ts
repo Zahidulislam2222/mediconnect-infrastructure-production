@@ -7,6 +7,12 @@ import { pushRevenueToBigQuery, pushAppointmentToBigQuery } from './billing.cont
 import { writeAuditLog } from '../../../shared/audit';
 import { safeLog, safeError } from '../../../shared/logger';
 import { sendNotification } from '../../../shared/notifications';
+import {
+    PlanId,
+    SubscriptionStatus,
+    PLANS,
+    TABLE_SUBSCRIPTIONS,
+} from '../../../shared/subscription';
 
 const STRIPE_SECRET_NAME = "/mediconnect/stripe/keys";
 const STRIPE_WEBHOOK_SECRET_NAME = "/mediconnect/stripe/webhook_secret";
@@ -137,6 +143,24 @@ export const handleStripeWebhook = async (req: Request, res: Response) => {
     } else if (event.type === 'charge.dispute.closed') {
         const dispute = event.data.object as Stripe.Dispute;
         await handleDisputeClosed(dispute, regionalDb, region);
+    }
+    // ─── SUBSCRIPTION WEBHOOK EVENTS ──────────────────────────────────────
+    else if (event.type === 'customer.subscription.created') {
+        await handleSubscriptionCreated(event.data.object as Stripe.Subscription, regionalDb, region);
+    } else if (event.type === 'customer.subscription.updated') {
+        await handleSubscriptionUpdated(event.data.object as Stripe.Subscription, regionalDb, region);
+    } else if (event.type === 'customer.subscription.deleted') {
+        await handleSubscriptionDeleted(event.data.object as Stripe.Subscription, regionalDb, region);
+    } else if (event.type === 'invoice.paid') {
+        const invoice = event.data.object as Stripe.Invoice;
+        if (invoice.subscription) {
+            await handleSubscriptionInvoicePaid(invoice, regionalDb, region);
+        }
+    } else if (event.type === 'invoice.payment_failed') {
+        const invoice = event.data.object as Stripe.Invoice;
+        if (invoice.subscription) {
+            await handleSubscriptionInvoiceFailed(invoice, regionalDb, region);
+        }
     }
 
     res.json({ received: true });
@@ -637,4 +661,233 @@ async function handleDisputeClosed(dispute: Stripe.Dispute, regionalDb: any, reg
             metadata: { disputeId: dispute.id, billId: billId || '', outcome: dispute.status }
         }).catch(() => {});
     } catch { /* Non-blocking */ }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SUBSCRIPTION WEBHOOK HANDLERS
+// Loopholes addressed: #3 (webhook-gated activation), #8 (dispute freeze),
+// #9 (chargeback), #11 (idempotency via claimWebhookEvent above)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * customer.subscription.created — First successful payment
+ * THIS is the only place a subscription becomes active (loophole #3).
+ */
+async function handleSubscriptionCreated(subscription: Stripe.Subscription, regionalDb: any, region: string) {
+    const { patientId, planId, consentTimestamp, consentTermsVersion } = subscription.metadata || {};
+    if (!patientId || !planId) {
+        safeError(`Subscription created without metadata: ${subscription.id}`);
+        return;
+    }
+
+    const plan = PLANS[planId as PlanId];
+    if (!plan) {
+        safeError(`Unknown plan ID in subscription: ${planId}`);
+        return;
+    }
+
+    const now = new Date().toISOString();
+    const cycleStart = new Date(subscription.current_period_start * 1000).toISOString();
+    const cycleEnd = new Date(subscription.current_period_end * 1000).toISOString();
+
+    await regionalDb.send(new PutCommand({
+        TableName: TABLE_SUBSCRIPTIONS,
+        Item: {
+            patientId,
+            planId,
+            status: SubscriptionStatus.ACTIVE,
+            discountPercent: plan.discountPercent,
+            stripeCustomerId: subscription.customer as string,
+            stripeSubscriptionId: subscription.id,
+            stripePriceId: subscription.items.data[0]?.price?.id || '',
+            freeGpVisitsRemaining: plan.freeGpVisitsPerMonth,
+            familyMembers: [],
+            familyChangesThisYear: 0,
+            cycleStart,
+            cycleEnd,
+            cancelAtPeriodEnd: false,
+            disputeFrozen: false,
+            consentTimestamp: consentTimestamp || now,
+            consentTermsVersion: consentTermsVersion || '1.0',
+            createdAt: now,
+            updatedAt: now,
+        },
+    }));
+
+    await writeAuditLog({
+        action: 'SUBSCRIPTION_ACTIVATED',
+        actorId: patientId,
+        resource: `subscription/${subscription.id}`,
+        detail: `Plan: ${plan.name}, Discount: ${plan.discountPercent}%, Cycle: ${cycleStart} to ${cycleEnd}`,
+        region,
+    });
+
+    safeLog(`Subscription activated: ${subscription.id}, patient: ${patientId}, plan: ${planId}`);
+}
+
+/**
+ * customer.subscription.updated — Status change, plan change, or cancellation pending.
+ */
+async function handleSubscriptionUpdated(subscription: Stripe.Subscription, regionalDb: any, region: string) {
+    const { patientId } = subscription.metadata || {};
+    if (!patientId) return;
+
+    const statusMap: Record<string, SubscriptionStatus> = {
+        active: SubscriptionStatus.ACTIVE,
+        past_due: SubscriptionStatus.PAST_DUE,
+        canceled: SubscriptionStatus.CANCELLED,
+        incomplete: SubscriptionStatus.INCOMPLETE,
+        incomplete_expired: SubscriptionStatus.CANCELLED,
+        unpaid: SubscriptionStatus.PAST_DUE,
+    };
+
+    const newStatus = statusMap[subscription.status] || SubscriptionStatus.ACTIVE;
+    const cycleEnd = new Date(subscription.current_period_end * 1000).toISOString();
+
+    await regionalDb.send(new UpdateCommand({
+        TableName: TABLE_SUBSCRIPTIONS,
+        Key: { patientId },
+        UpdateExpression: 'SET #status = :status, cancelAtPeriodEnd = :cap, cycleEnd = :ce, updatedAt = :now',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+            ':status': newStatus,
+            ':cap': subscription.cancel_at_period_end || false,
+            ':ce': cycleEnd,
+            ':now': new Date().toISOString(),
+        },
+    }));
+
+    await writeAuditLog({
+        action: 'SUBSCRIPTION_STATUS_CHANGED',
+        actorId: patientId,
+        resource: `subscription/${subscription.id}`,
+        detail: `Status: ${newStatus}, CancelAtPeriodEnd: ${subscription.cancel_at_period_end}`,
+        region,
+    });
+
+    safeLog(`Subscription updated: ${subscription.id}, status: ${newStatus}`);
+}
+
+/**
+ * customer.subscription.deleted — Subscription fully cancelled.
+ * Remove discount, zero out free visits.
+ */
+async function handleSubscriptionDeleted(subscription: Stripe.Subscription, regionalDb: any, region: string) {
+    const { patientId } = subscription.metadata || {};
+    if (!patientId) return;
+
+    await regionalDb.send(new UpdateCommand({
+        TableName: TABLE_SUBSCRIPTIONS,
+        Key: { patientId },
+        UpdateExpression: 'SET #status = :cancelled, discountPercent = :zero, freeGpVisitsRemaining = :zero, updatedAt = :now',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+            ':cancelled': SubscriptionStatus.CANCELLED,
+            ':zero': 0,
+            ':now': new Date().toISOString(),
+        },
+    }));
+
+    await writeAuditLog({
+        action: 'SUBSCRIPTION_CANCELLED',
+        actorId: patientId,
+        resource: `subscription/${subscription.id}`,
+        detail: 'Subscription fully cancelled',
+        region,
+    });
+
+    safeLog(`Subscription cancelled: ${subscription.id}, patient: ${patientId}`);
+}
+
+/**
+ * invoice.paid — Monthly renewal succeeded.
+ * Reset free GP visits. Update cycle dates.
+ */
+async function handleSubscriptionInvoicePaid(invoice: Stripe.Invoice, regionalDb: any, region: string) {
+    const subscriptionId = invoice.subscription as string;
+    if (!subscriptionId) return;
+
+    // Get patientId from subscription metadata (stored when subscription was created)
+    const customerMetadata = (invoice as any).subscription_details?.metadata || {};
+    const patientId = customerMetadata.patientId || invoice.metadata?.patientId;
+    const planId = customerMetadata.planId || invoice.metadata?.planId;
+
+    if (!patientId) {
+        safeError(`Invoice paid but no patientId in metadata: ${invoice.id}`);
+        return;
+    }
+
+    const plan = PLANS[planId as PlanId];
+    const periodStart = invoice.period_start ? new Date(invoice.period_start * 1000).toISOString() : new Date().toISOString();
+    const periodEnd = invoice.period_end ? new Date(invoice.period_end * 1000).toISOString() : new Date().toISOString();
+
+    await regionalDb.send(new UpdateCommand({
+        TableName: TABLE_SUBSCRIPTIONS,
+        Key: { patientId },
+        UpdateExpression: 'SET #status = :active, freeGpVisitsRemaining = :freeGp, cycleStart = :start, cycleEnd = :end, updatedAt = :now',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+            ':active': SubscriptionStatus.ACTIVE,
+            ':freeGp': plan?.freeGpVisitsPerMonth || 0,
+            ':start': periodStart,
+            ':end': periodEnd,
+            ':now': new Date().toISOString(),
+        },
+    }));
+
+    await writeAuditLog({
+        action: 'SUBSCRIPTION_RENEWED',
+        actorId: patientId,
+        resource: `subscription/${subscriptionId}`,
+        detail: `Invoice: ${invoice.id}, Amount: $${((invoice.amount_paid || 0) / 100).toFixed(2)}, Period: ${periodStart} to ${periodEnd}`,
+        region,
+    });
+
+    safeLog(`Subscription renewed: ${subscriptionId}, patient: ${patientId}`);
+}
+
+/**
+ * invoice.payment_failed — Monthly renewal failed.
+ * Mark as past_due. Patient gets grace period.
+ */
+async function handleSubscriptionInvoiceFailed(invoice: Stripe.Invoice, regionalDb: any, region: string) {
+    const subscriptionId = invoice.subscription as string;
+    const customerMetadata = (invoice as any).subscription_details?.metadata || {};
+    const patientId = customerMetadata.patientId || invoice.metadata?.patientId;
+
+    if (!patientId) return;
+
+    await regionalDb.send(new UpdateCommand({
+        TableName: TABLE_SUBSCRIPTIONS,
+        Key: { patientId },
+        UpdateExpression: 'SET #status = :pastDue, updatedAt = :now',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: {
+            ':pastDue': SubscriptionStatus.PAST_DUE,
+            ':now': new Date().toISOString(),
+        },
+    }));
+
+    await writeAuditLog({
+        action: 'SUBSCRIPTION_PAYMENT_FAILED',
+        actorId: patientId,
+        resource: `subscription/${subscriptionId}`,
+        detail: `Invoice: ${invoice.id}, Attempt: ${invoice.attempt_count}`,
+        region,
+    });
+
+    // Notify patient to update payment method
+    try {
+        sendNotification({
+            region,
+            recipientEmail: '',
+            recipientId: patientId,
+            subject: 'Payment Failed — Update Your Card',
+            message: 'Your MediConnect subscription payment failed. Please update your payment method to continue receiving discounts.',
+            type: 'PAYMENT_FAILED',
+            metadata: { subscriptionId, invoiceId: invoice.id },
+        }).catch(() => {});
+    } catch { /* Non-blocking */ }
+
+    safeLog(`Subscription payment failed: ${subscriptionId}, patient: ${patientId}, attempt: ${invoice.attempt_count}`);
 }

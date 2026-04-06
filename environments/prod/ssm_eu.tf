@@ -27,6 +27,9 @@ locals {
     "/mediconnect/prod/stripe/secret_key",
     "/mediconnect/stripe/keys",
     "/mediconnect/stripe/webhook_secret",
+    "/mediconnect/prod/stripe/plus_price_id",
+    "/mediconnect/prod/stripe/premium_price_id",
+    "/mediconnect/prod/stripe/connect_webhook_secret",
   ])
 }
 
