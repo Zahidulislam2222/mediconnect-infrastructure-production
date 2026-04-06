@@ -37,12 +37,6 @@ module "dynamodb_eu" {
       ttl_attribute          = "ttl"
     }
 
-    "mediconnect-billing-audit" = {
-      hash_key               = "auditId"
-      deletion_protection    = true
-      point_in_time_recovery = true
-    }
-
     "mediconnect-booking-locks" = {
       hash_key               = "lockId"
       deletion_protection    = true
@@ -64,26 +58,6 @@ module "dynamodb_eu" {
     "mediconnect-chat-history" = {
       hash_key               = "conversationId"
       range_key              = "timestamp"
-      deletion_protection    = true
-      point_in_time_recovery = true
-    }
-
-    "mediconnect-clinical-notes" = {
-      hash_key               = "patientId"
-      range_key              = "timestamp"
-      deletion_protection    = true
-      point_in_time_recovery = true
-    }
-
-    # EU: no TTL (unlike US)
-    "mediconnect-content-cache" = {
-      hash_key               = "cacheKey"
-      deletion_protection    = true
-      point_in_time_recovery = true
-    }
-
-    "mediconnect-doctor-schedules" = {
-      hash_key               = "doctorId"
       deletion_protection    = true
       point_in_time_recovery = true
     }
@@ -127,13 +101,6 @@ module "dynamodb_eu" {
       point_in_time_recovery = true
     }
 
-    "mediconnect-medical-records" = {
-      hash_key               = "patientId"
-      range_key              = "recordId"
-      deletion_protection    = true
-      point_in_time_recovery = true
-    }
-
     # EU: no streams (unlike US)
     "mediconnect-patients" = {
       hash_key               = "patientId"
@@ -144,12 +111,6 @@ module "dynamodb_eu" {
     "mediconnect-pharmacy-inventory" = {
       hash_key               = "pharmacyId"
       range_key              = "drugId"
-      deletion_protection    = true
-      point_in_time_recovery = true
-    }
-
-    "mediconnect-predictions" = {
-      hash_key               = "predictionId"
       deletion_protection    = true
       point_in_time_recovery = true
     }
@@ -169,13 +130,6 @@ module "dynamodb_eu" {
           hash_key = "patientId"
         },
       ]
-    }
-
-    "mediconnect-symptom-logs" = {
-      hash_key               = "sessionId"
-      range_key              = "timestamp"
-      deletion_protection    = true
-      point_in_time_recovery = true
     }
 
     "mediconnect-transactions" = {

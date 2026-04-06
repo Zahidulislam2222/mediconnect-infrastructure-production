@@ -1,9 +1,9 @@
-# IAM roles — 45 total
+# IAM roles — active services only (legacy Lambda roles removed)
 # Trust policies are stored in iam_policies/*.json
 # Inline/managed policies are ignored for Phase 1 (import-only)
 
 locals {
-  # Custom / path roles (manually created)
+  # Custom / path roles (manually created) — active services
   iam_custom_roles = {
     "mediconnect-admin-role"        = { path = "/" }
     "mediconnect-azure-role-us"     = { path = "/" }
@@ -23,34 +23,14 @@ locals {
     "MediconnectReplicationRole"    = { path = "/" }
   }
 
-  # /service-role/ path roles (auto-created by AWS services)
+  # /service-role/ path roles — active Lambda functions only
   iam_service_roles = {
     "mediconnect-auto-group-eu-role-ewcj2kcy"      = { path = "/service-role/" }
     "mediconnect-auto-group-us-role-msj8mvre"       = { path = "/service-role/" }
-    "mediconnect-billing-service-role-rfaptbgu"     = { path = "/service-role/" }
-    "mediconnect-book-appointment-role-q8q3s008"    = { path = "/service-role/" }
-    "mediconnect-cancel-appointment-role-43pkwks2"  = { path = "/service-role/" }
     "mediconnect-cleanup-recordings-role-g9twqdgq"  = { path = "/service-role/" }
     "mediconnect-cleanup-recordings-role-i088yo9g"  = { path = "/service-role/" }
-    "mediconnect-cleanup-service-role-6p3uo83y"     = { path = "/service-role/" }
-    "mediconnect-create-doctor-role-7vu5yt62"       = { path = "/service-role/" }
-    "mediconnect-create-patient-role-a2tin7y6"      = { path = "/service-role/" }
-    "mediconnect-ehr-service-role-qu55gdhw"         = { path = "/service-role/" }
     "mediconnect-failover-proxy-role-enf1d6hy"      = { path = "/service-role/" }
     "mediconnect-failover-proxy-role-jehbuy9v"      = { path = "/service-role/" }
-    "mediconnect-file-sharing-service-role-yv0v6kc2" = { path = "/service-role/" }
-    "mediconnect-get-appointments-role-8f7rs7ve"    = { path = "/service-role/" }
-    "mediconnect-get-doctors-role-bgepsu8i"         = { path = "/service-role/" }
-    "mediconnect-get-patients-role-4p2aska2"        = { path = "/service-role/" }
-    "mediconnect-get-vitals-role-vttgimn7"          = { path = "/service-role/" }
-    "mediconnect-graph-service-role-50gdzyo0"       = { path = "/service-role/" }
-    "mediconnect-imaging-service-role-genwi8el"     = { path = "/service-role/" }
-    "mediconnect-iot-gcp-sync-role-benw9tph"        = { path = "/service-role/" }
-    "mediconnect-prescription-service-role-5pr8s84o" = { path = "/service-role/" }
-    "mediconnect-stream-to-bigquery-role-rht3ozce"  = { path = "/service-role/" }
-    "mediconnect-symptom-checker-role-hmvxvqh5"     = { path = "/service-role/" }
-    "mediconnect-update-schedule-role-ul1us2xa"     = { path = "/service-role/" }
-    "mediconnect-websocket-handler-role-ibksgcey"   = { path = "/service-role/" }
     "mediconnect-ws-authorizer-role-5u712lso"       = { path = "/service-role/" }
     "mediconnect-ws-authorizer-role-62a577ny"       = { path = "/service-role/" }
     "MediconnectAnalyticsRole"                      = { path = "/service-role/" }
