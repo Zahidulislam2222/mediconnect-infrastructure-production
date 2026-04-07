@@ -18,6 +18,10 @@ import { writeAuditLog } from '../../../shared/audit';
 import { safeLog, safeError } from '../../../shared/logger';
 import { publishEvent, EventType } from '../../../shared/event-bus';
 import { scrubPII } from '../utils/fhir-mapper';
+import { modelRouter } from '../utils/model-router';
+import { scoreConfidence, rerankByRelevance, validateResponse, ConfidenceScore, ValidationResult } from '../utils/rag-validators';
+import { planQuery, executeQueryPlan } from '../utils/query-planner';
+import { publishMetric, MetricName } from '../../../shared/metrics';
 import { randomUUID } from 'crypto';
 
 // ─── Config ─────────────────────────────────────────────────────────────
@@ -198,44 +202,31 @@ async function queryLightRAG(question: string, mode: 'naive' | 'mix'): Promise<s
     }
 }
 
-// ─── AI Generation (Existing Circuit Breaker) ───────────────────────────
+// ─── AI Generation (via Model Router) ────────────────────────────────
 
 async function generateAIResponse(
     question: string,
     ragContext: string,
     conversationHistory: Array<{ role: string; content: string }>,
+    region: string,
 ): Promise<string> {
-    // Import the existing AI circuit breaker from communication-service
-    // This tries: Claude Haiku → Vertex AI → Azure OpenAI
     try {
-        const messages = [
-            { role: 'system', content: SYSTEM_PROMPT },
-            ...(ragContext ? [{ role: 'system', content: `Knowledge base context:\n${ragContext}` }] : []),
-            ...conversationHistory.slice(-6), // Last 6 messages for context
-            { role: 'user', content: question },
-        ];
+        const systemParts = [SYSTEM_PROMPT];
+        if (ragContext) {
+            systemParts.push(`Knowledge base context:\n${ragContext}`);
+        }
+        const historyContext = conversationHistory.slice(-6)
+            .map(m => `${m.role}: ${m.content}`)
+            .join('\n');
 
-        // Use existing Bedrock/Vertex/Azure circuit breaker
-        // For now, call Bedrock directly (circuit breaker wraps this)
-        const { BedrockRuntimeClient, InvokeModelCommand } = await import('@aws-sdk/client-bedrock-runtime');
-        const client = new BedrockRuntimeClient({ region: 'us-east-1' });
+        const prompt = [
+            systemParts.join('\n\n'),
+            historyContext ? `\nConversation history:\n${historyContext}` : '',
+            `\nUser question: ${question}`,
+        ].join('\n');
 
-        const response = await client.send(new InvokeModelCommand({
-            modelId: 'anthropic.claude-3-haiku-20240307-v1:0',
-            contentType: 'application/json',
-            body: JSON.stringify({
-                anthropic_version: 'bedrock-2023-05-31',
-                max_tokens: 500,
-                messages: messages.filter(m => m.role !== 'system').map(m => ({
-                    role: m.role === 'system' ? 'user' : m.role,
-                    content: m.content,
-                })),
-                system: messages.filter(m => m.role === 'system').map(m => m.content).join('\n\n'),
-            }),
-        }));
-
-        const result = JSON.parse(new TextDecoder().decode(response.body));
-        return result.content?.[0]?.text || 'I apologize, I was unable to generate a response. Please try again.';
+        const result = await modelRouter.route('generation', prompt, region);
+        return result.text || 'I apologize, I was unable to generate a response. Please try again.';
     } catch (err: any) {
         safeError(`AI generation failed: ${err.message}`);
         return 'Our AI assistant is temporarily unavailable. Please try again in a few minutes or contact support.';
@@ -354,12 +345,31 @@ export const sendMessage = catchAsync(async (req: Request, res: Response) => {
         });
     }
 
-    // ── Step 8: LightRAG Query ──────────────────────────────────────
+    // ── Step 8: Query Planning ────────────────────────────────────
+    const plan = await planQuery(scrubbedMessage, intent, region);
     const ragMode = intent === 'faq' || intent === 'action' ? 'naive' : 'mix';
-    const ragContext = await queryLightRAG(scrubbedMessage, ragMode);
 
-    // ── Step 9: AI Generation ───────────────────────────────────────
-    // Get conversation history for context
+    // ── Step 9: LightRAG Query (supports multi-query) ──────────────
+    let ragContext: string;
+    let confidenceResult: ConfidenceScore;
+
+    if (plan.isComplex) {
+        const combined = await executeQueryPlan(plan, queryLightRAG, intent);
+        ragContext = combined.context;
+        confidenceResult = scoreConfidence(scrubbedMessage, ragContext, intent);
+    } else {
+        ragContext = await queryLightRAG(scrubbedMessage, ragMode);
+        confidenceResult = scoreConfidence(scrubbedMessage, ragContext, intent);
+    }
+
+    // ── Step 10: Confidence + Rerank ───────────────────────────────
+    if (confidenceResult.action === 'skip_rag') {
+        ragContext = ''; // Let LLM answer from system prompt only
+    } else if (ragContext) {
+        ragContext = rerankByRelevance(scrubbedMessage, ragContext);
+    }
+
+    // ── Step 11: AI Generation (via Model Router) ──────────────────
     let history: Array<{ role: string; content: string }> = [];
     try {
         const historyResult = await db.send(new QueryCommand({
@@ -375,9 +385,24 @@ export const sendMessage = catchAsync(async (req: Request, res: Response) => {
         }));
     } catch { /* No history yet */ }
 
-    const aiResponse = await generateAIResponse(scrubbedMessage, ragContext, history);
+    let aiResponse = await generateAIResponse(scrubbedMessage, ragContext, history, region);
 
-    // ── Step 10: Response Pipeline ──────────────────────────────────
+    // ── Step 12: Validation (auditor + strategist combined) ────────
+    const validation = await validateResponse(
+        scrubbedMessage, ragContext, aiResponse, intent,
+        confidenceResult.score, region,
+    );
+
+    if (validation.overallVerdict === 'fail') {
+        aiResponse = "I'm not fully confident in my answer. Please contact our support team at support@mediconnect.health for accurate information.";
+        safeLog(`Chatbot validation FAILED: hallucination=${validation.hallucination.detected}, contradiction=${validation.contradiction.detected}`);
+    }
+
+    if (confidenceResult.action === 'skip_rag' && confidenceResult.score < 0.1) {
+        aiResponse += "\n\n_Note: I couldn't find specific information about this in our knowledge base. Please contact our support team for help._";
+    }
+
+    // ── Step 13: Response Pipeline ──────────────────────────────────
     const estimatedTokens = Math.ceil((scrubbedMessage.length + aiResponse.length + (ragContext?.length || 0)) / 4);
 
     // Cache the response
@@ -389,18 +414,36 @@ export const sendMessage = catchAsync(async (req: Request, res: Response) => {
     // Save chat messages (user + assistant)
     await saveChatMessage(db, sessionId, messagesUsed * 2, patientId, message, aiResponse, intent, false, region);
 
-    // Audit log
-    await writeAuditLog(patientId, patientId, 'CHATBOT_MESSAGE', `Intent: ${intent}, RAG: ${ragMode}, Cached: false`, { region });
+    // Audit log (enriched with confidence + validation)
+    await writeAuditLog(patientId, patientId, 'CHATBOT_MESSAGE',
+        `Intent: ${intent}, RAG: ${ragMode}, Confidence: ${confidenceResult.score.toFixed(2)}, Validation: ${validation.overallVerdict}, Complex: ${plan.isComplex}, Cached: false`,
+        { region });
 
-    // Event bus
+    // Event bus (enriched payload)
     publishEvent(EventType.CHATBOT_MESSAGE_PROCESSED, {
         patientId, sessionId, intent, ragMode,
         cached: false, tokensUsed: estimatedTokens,
         responseTimeMs: Date.now() - startTime,
+        confidenceScore: confidenceResult.score,
+        validationVerdict: validation.overallVerdict,
+        validationSkipped: validation.skipped,
+        queryComplexity: plan.isComplex ? 'complex' : 'simple',
+        subQueries: plan.subQueries.length,
     }, region).catch(() => {});
 
+    // CloudWatch metrics (non-blocking)
     const responseTimeMs = Date.now() - startTime;
-    safeLog(`Chatbot: ${intent}/${ragMode} ${responseTimeMs}ms ${estimatedTokens}tok ${patientId}`);
+    publishMetric(MetricName.CHATBOT_LATENCY, responseTimeMs, 'Milliseconds', { Intent: intent }, region).catch(() => {});
+    publishMetric(MetricName.CHATBOT_CONFIDENCE, Math.round(confidenceResult.score * 100), 'None', { Intent: intent }, region).catch(() => {});
+    publishMetric(MetricName.CHATBOT_TOKENS_USED, estimatedTokens, 'Count', { Intent: intent }, region).catch(() => {});
+    if (!validation.skipped) {
+        publishMetric(MetricName.CHATBOT_VALIDATION, validation.passed ? 1 : 0, 'Count', { Verdict: validation.overallVerdict }, region).catch(() => {});
+    }
+    if (plan.isComplex) {
+        publishMetric(MetricName.CHATBOT_QUERY_COMPLEXITY, plan.subQueries.length, 'Count', { Intent: intent }, region).catch(() => {});
+    }
+
+    safeLog(`Chatbot: ${intent}/${ragMode} ${responseTimeMs}ms ${estimatedTokens}tok conf=${confidenceResult.score.toFixed(2)} val=${validation.overallVerdict} ${patientId}`);
 
     res.json({
         sessionId,

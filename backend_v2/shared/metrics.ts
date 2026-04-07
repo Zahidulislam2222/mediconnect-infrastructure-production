@@ -39,6 +39,14 @@ export enum MetricName {
     PRESCRIPTION_ISSUED = 'PrescriptionIssued',
     GDPR_ERASURE = 'GDPRErasure',
     GDPR_EXPORT = 'GDPRExport',
+
+    // RAG Chatbot metrics
+    CHATBOT_LATENCY = 'ChatbotLatency',
+    CHATBOT_CONFIDENCE = 'ChatbotConfidence',
+    CHATBOT_VALIDATION = 'ChatbotValidation',
+    CHATBOT_CACHE_HIT = 'ChatbotCacheHit',
+    CHATBOT_QUERY_COMPLEXITY = 'ChatbotQueryComplexity',
+    CHATBOT_TOKENS_USED = 'ChatbotTokensUsed',
 }
 
 /**
