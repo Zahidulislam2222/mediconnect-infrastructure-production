@@ -473,7 +473,7 @@ doctor_pharmacy_runtime_discovery:
     gcp_billing_metadata: read; enabled
     aws_resources: 405
     aws_inventory_complete: true
-    aws_billing: NOT_QUERIED — fresh approval required for one $0.01 request
+    aws_billing: "QUERIED — owner-approved single $0.01 request succeeded; estimated account-wide period, 15 service groups, no pagination or retry; project attribution not established"
     azure: UNAVAILABLE — authentication refresh required
   doctor_services:
     count: 2
