@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 // ─── FEATURE #21: SDOH (Social Determinants of Health) ─────────────────────
 // Z-codes (ICD-10-CM) for social risk factors: housing, food, transportation,
 // education, employment, social isolation, violence, financial strain.
@@ -11,13 +12,11 @@ import { PutCommand, QueryCommand, GetCommand, UpdateCommand } from '@aws-sdk/li
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
 import { validateUSCore } from '../../../../shared/us-core-profiles';
+import { setting } from '../../../../shared/settings';
 
-const TABLE_SDOH = process.env.TABLE_SDOH || 'mediconnect-sdoh-assessments';
+const TABLE_SDOH = setting("TABLE_SDOH");
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── Z-Codes (ICD-10-CM Social Determinant Codes) ──────────────────────────
 

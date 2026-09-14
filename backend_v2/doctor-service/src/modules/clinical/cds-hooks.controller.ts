@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 // ─── FEATURE #15: CDS Hooks (Clinical Decision Support) ────────────────────
 // Implements CDS Hooks specification (https://cds-hooks.org/).
 // Hook triggers during clinical workflow: prescription, order entry, patient view.
@@ -9,14 +10,12 @@ import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
 import { safeError } from '../../../../shared/logger';
+import { setting } from '../../../../shared/settings';
 
-const TABLE_PATIENTS = process.env.DYNAMO_TABLE || 'mediconnect-patients';
-const TABLE_ALLERGIES = process.env.TABLE_ALLERGIES || 'mediconnect-allergies';
+const TABLE_PATIENTS = setting("DYNAMO_TABLE");
+const TABLE_ALLERGIES = setting("TABLE_ALLERGIES");
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── CDS Service Definitions ───────────────────────────────────────────────
 

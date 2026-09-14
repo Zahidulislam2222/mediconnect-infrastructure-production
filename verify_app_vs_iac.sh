@@ -16,6 +16,32 @@ LAMBDAS="$REPO_ROOT/legacy_lambdas"
 TF_DIR="$REPO_ROOT/environments/prod"
 FRONTEND_DIR="$(cd "$REPO_ROOT/../mediconnect-hub" 2>/dev/null && pwd)" || FRONTEND_DIR=""
 
+# Restrict recursive source scans to project code. Vendored dependencies made the
+# documented verification command take minutes and added third-party matches that
+# are outside this app-to-IaC audit.
+SOURCE_GREP_EXCLUDES=(
+  --exclude-dir=.git
+  --exclude-dir=node_modules
+  --exclude-dir=dist
+  --exclude-dir=build
+  --exclude-dir=coverage
+  --exclude-dir=.terraform
+  --exclude-dir=venv
+  --exclude-dir=.venv
+  --exclude-dir=__pycache__
+  --exclude-dir=.pytest_cache
+  --exclude-dir='*.dist-info'
+)
+
+LAMBDA_ENTRY_FILES=()
+while IFS= read -r -d '' entry_file; do
+  LAMBDA_ENTRY_FILES+=("$entry_file")
+done < <(
+  find "$LAMBDAS" -maxdepth 2 -type f \
+    \( -name 'index.mjs' -o -name 'lambda_function.py' -o -name 'handler.py' \) \
+    -print0 2>/dev/null
+)
+
 PASS_COUNT=0
 FAIL_COUNT=0
 WARN_COUNT=0
@@ -97,7 +123,7 @@ DYNAMO_TABLES_APP=(
 )
 
 # Also extract dynamically from code to catch any we missed
-DYNAMO_TABLES_CODE=$(grep -roh '"mediconnect-[a-z][a-z0-9_-]*"' "$BACKEND" --include="*.ts" --include="*.py" 2>/dev/null | tr -d '"' | sort -u)
+DYNAMO_TABLES_CODE=$(grep -roh "${SOURCE_GREP_EXCLUDES[@]}" '"mediconnect-[a-z][a-z0-9_-]*"' "$BACKEND" --include="*.ts" --include="*.py" 2>/dev/null | tr -d '"' | sort -u)
 DYNAMO_TABLES_LAMBDA=$(for f in $(find "$LAMBDAS" -maxdepth 2 \( -name "index.mjs" -o -name "lambda_function.py" -o -name "handler.py" \) 2>/dev/null); do grep -oh '"mediconnect-[a-z][a-z0-9_-]*"' "$f" 2>/dev/null; done | tr -d '"' | sort -u)
 
 # Combine all app references and filter to likely DynamoDB tables
@@ -326,7 +352,7 @@ SSM_TF_US="$TF_DIR/ssm_us.tf"
 SSM_TF_EU="$TF_DIR/ssm_eu.tf"
 
 # SSM paths referenced in loadSecrets() — extract from backend code
-SSM_PATHS_APP=$(grep -roh "'/mediconnect/prod/[a-zA-Z/_-]*'" "$BACKEND" --include="*.ts" 2>/dev/null | tr -d "'" | sort -u)
+SSM_PATHS_APP=$(grep -roh "${SOURCE_GREP_EXCLUDES[@]}" "'/mediconnect/prod/[a-zA-Z/_-]*'" "$BACKEND" --include="*.ts" 2>/dev/null | tr -d "'" | sort -u)
 
 SSM_PASS=0
 SSM_FAIL=0
@@ -649,7 +675,7 @@ SKIP_SERVICES="chime|cloudwatch|ssm|lambda|secretsmanager"
 # Check TypeScript SDK clients
 for sdk_class in "${!SDK_TF_MAP[@]}"; do
   tf_pattern="${SDK_TF_MAP[$sdk_class]}"
-  if grep -rq "$sdk_class" "$BACKEND" --include="*.ts" --include="*.mjs" 2>/dev/null; then
+  if grep -rq "${SOURCE_GREP_EXCLUDES[@]}" "$sdk_class" "$BACKEND" --include="*.ts" --include="*.mjs" 2>/dev/null; then
     if echo "$tf_pattern" | grep -qE "$SKIP_SERVICES"; then
       continue  # runtime-only services, no dedicated TF needed
     fi
@@ -669,7 +695,7 @@ done
 # Check Python boto3 clients
 for boto_svc in "${!BOTO3_TF_MAP[@]}"; do
   tf_pattern="${BOTO3_TF_MAP[$boto_svc]}"
-  if grep -rq "boto3.*['\"]$boto_svc['\"]\\|client('$boto_svc')\\|resource('$boto_svc')" "$BACKEND" --include="*.py" 2>/dev/null; then
+  if grep -rq "${SOURCE_GREP_EXCLUDES[@]}" "boto3.*['\"]$boto_svc['\"]\\|client('$boto_svc')\\|resource('$boto_svc')" "$BACKEND" --include="*.py" 2>/dev/null; then
     if echo "$tf_pattern" | grep -qE "$SKIP_SERVICES"; then
       continue
     fi
@@ -700,12 +726,12 @@ done
 
 if [ ${#SRC_DIRS[@]} -gt 0 ]; then
   # Find table names that aren't mediconnect-*
-  NON_MC_TABLES=$(grep -rh 'TableName.*"[a-z]' "${SRC_DIRS[@]}" --include="*.ts" --include="*.py" --include="*.mjs" 2>/dev/null \
+  NON_MC_TABLES=$(grep -rh "${SOURCE_GREP_EXCLUDES[@]}" 'TableName.*"[a-z]' "${SRC_DIRS[@]}" --include="*.ts" --include="*.py" --include="*.mjs" 2>/dev/null \
     | grep -v node_modules | grep -v '.d.ts' \
     | grep -o '"[a-z][a-z0-9_-]*"' | tr -d '"' | grep -v "mediconnect" | sort -u)
 
   # Find bucket names that aren't mediconnect-*
-  NON_MC_BUCKETS=$(grep -rh 'Bucket.*"[a-z]' "${SRC_DIRS[@]}" --include="*.ts" --include="*.py" --include="*.mjs" 2>/dev/null \
+  NON_MC_BUCKETS=$(grep -rh "${SOURCE_GREP_EXCLUDES[@]}" 'Bucket.*"[a-z]' "${SRC_DIRS[@]}" --include="*.ts" --include="*.py" --include="*.mjs" 2>/dev/null \
     | grep -v node_modules | grep -v '.d.ts' \
     | grep -o '"[a-z][a-z0-9._-]*"' | tr -d '"' | grep -v "mediconnect" | sort -u)
 
@@ -725,9 +751,9 @@ fi
 # --- 19c: Find hardcoded ARN references in source code ---
 echo -e "  ${CYAN}Scanning for hardcoded ARNs...${NC}"
 
-if [ ${#SRC_DIRS[@]} -gt 0 ]; then
+if [ ${#SRC_DIRS[@]} -gt 0 ] || [ ${#LAMBDA_ENTRY_FILES[@]} -gt 0 ]; then
   HARDCODED_ARNS=$(grep -roh 'arn:aws:[a-z0-9-]*:[a-z0-9-]*:[0-9]*:[a-zA-Z0-9/_:.-]*' \
-    "${SRC_DIRS[@]}" "$LAMBDAS" \
+    "${SOURCE_GREP_EXCLUDES[@]}" "${SRC_DIRS[@]}" "${LAMBDA_ENTRY_FILES[@]}" \
     --include="*.ts" --include="*.py" --include="*.mjs" --include="*.js" 2>/dev/null \
     | grep -v node_modules \
     | grep -v '111122223333\|123456789012\|123456789123\|000000000000\|444455556666\|555555555555\|999999999999\|EXAMPLE\|1234abcd' \
@@ -751,7 +777,7 @@ echo -e "  ${CYAN}Scanning for GCP/Azure SDK usage...${NC}"
 # GCP clients
 GCP_CLIENTS=("BigQuery" "CloudRunClient" "HealthcareService" "Storage" "PubSub" "SecretManagerServiceClient" "ArtifactRegistryClient")
 for gcp_class in "${GCP_CLIENTS[@]}"; do
-  if grep -rq "$gcp_class" "$BACKEND" --include="*.ts" --include="*.py" 2>/dev/null; then
+  if grep -rq "${SOURCE_GREP_EXCLUDES[@]}" "$gcp_class" "$BACKEND" --include="*.ts" --include="*.py" 2>/dev/null; then
     # Check if any gcp_*.tf file exists
     gcp_tf=$(find "$ALL_TF" -name "gcp_*.tf" 2>/dev/null | head -1)
     if [ -z "$gcp_tf" ]; then
@@ -765,7 +791,7 @@ done
 # Azure clients
 AZURE_CLIENTS=("CosmosClient" "azure.cosmos" "BlobServiceClient" "azure.storage")
 for az_class in "${AZURE_CLIENTS[@]}"; do
-  if grep -rq "$az_class" "$BACKEND" --include="*.ts" --include="*.py" 2>/dev/null; then
+  if grep -rq "${SOURCE_GREP_EXCLUDES[@]}" "$az_class" "$BACKEND" --include="*.ts" --include="*.py" 2>/dev/null; then
     az_tf=$(find "$REPO_ROOT/modules" -path "*/azure/*" -name "*.tf" 2>/dev/null | head -1)
     if [ -z "$az_tf" ]; then
       warn "SDK Catch-All: Code uses Azure $az_class but no azure module .tf files found"

@@ -12,8 +12,14 @@ import { ApiGatewayManagementApiClient, PostToConnectionCommand } from "@aws-sdk
 const client = new DynamoDBClient({});
 const ddb = DynamoDBDocumentClient.from(client);
 
-const CONNECTIONS_TABLE = "mediconnect-chat-connections";
-const HISTORY_TABLE = "mediconnect-chat-history";
+const requireEnv = (name) => {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`Missing required configuration: ${name}`);
+  return value;
+};
+
+const CONNECTIONS_TABLE = requireEnv("TABLE_CHAT_CONNECTIONS");
+const HISTORY_TABLE = requireEnv("TABLE_CHAT_HISTORY");
 
 // We will initialize this dynamically based on the request
 let apiGateway;

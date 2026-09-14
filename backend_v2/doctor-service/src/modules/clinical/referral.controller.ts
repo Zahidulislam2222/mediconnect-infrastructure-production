@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 // ─── FEATURE #26: ServiceRequest / Referrals ──────────────────────────────
 // Provider-to-provider referrals using FHIR ServiceRequest resource.
 // Tracks referral lifecycle: draft → active → completed/revoked.
@@ -10,14 +11,12 @@ import { PutCommand, QueryCommand, GetCommand, UpdateCommand, ScanCommand } from
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
 import { validateUSCore } from '../../../../shared/us-core-profiles';
+import { setting } from '../../../../shared/settings';
 
-const TABLE_REFERRALS = process.env.TABLE_REFERRALS || 'mediconnect-referrals';
-const TABLE_DOCTORS = process.env.DYNAMO_TABLE_DOCTORS || 'mediconnect-doctors';
+const TABLE_REFERRALS = setting("TABLE_REFERRALS");
+const TABLE_DOCTORS = setting("DYNAMO_TABLE_DOCTORS");
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── Referral Specialties ───────────────────────────────────────────────────
 

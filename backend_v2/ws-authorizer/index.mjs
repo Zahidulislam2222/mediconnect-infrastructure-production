@@ -1,75 +1,22 @@
-// backend_v2/ws-authorizer/index.mjs
-// API Gateway WebSocket Authorizer — Verifies Cognito JWT from query string
-// Deployed per-region: US (us-east-1) and EU (eu-central-1)
+// Only short-lived, single-use tickets are accepted. Never accept Cognito JWTs in URLs.
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { socketAuthorizerSettings } from './settings.mjs';
+import { consumeConnectionTicket } from './ticket.mjs';
+let client;
 
-import { CognitoJwtVerifier } from "aws-jwt-verify";
-
-// AWS_REGION is set automatically by Lambda runtime
-const REGION = process.env.AWS_REGION || "us-east-1";
-const IS_EU = REGION.includes("eu");
-
-// Regional Cognito config (matches shared/aws-config.ts COGNITO_CONFIG pattern)
-const USER_POOL_ID = IS_EU
-    ? (process.env.COGNITO_USER_POOL_ID_EU || process.env.COGNITO_USER_POOL_ID)
-    : (process.env.COGNITO_USER_POOL_ID_US || process.env.COGNITO_USER_POOL_ID);
-
-const CLIENT_PATIENT = IS_EU
-    ? (process.env.COGNITO_CLIENT_ID_EU_PATIENT || process.env.COGNITO_CLIENT_ID_PATIENT)
-    : (process.env.COGNITO_CLIENT_ID_US_PATIENT || process.env.COGNITO_CLIENT_ID_PATIENT);
-
-const CLIENT_DOCTOR = IS_EU
-    ? (process.env.COGNITO_CLIENT_ID_EU_DOCTOR || process.env.COGNITO_CLIENT_ID_DOCTOR)
-    : (process.env.COGNITO_CLIENT_ID_US_DOCTOR || process.env.COGNITO_CLIENT_ID_DOCTOR);
-
-// Lazy-initialized verifier (avoids crash if env vars resolve late)
-let verifier = null;
-
-const getVerifier = () => {
-    if (verifier) return verifier;
-
-    if (!USER_POOL_ID) {
-        throw new Error(`AUTH_CRASH: Missing Cognito User Pool ID for ${IS_EU ? "EU" : "US"}`);
-    }
-
-    verifier = CognitoJwtVerifier.create({
-        userPoolId: USER_POOL_ID,
-        tokenUse: "id",
-        clientId: [CLIENT_PATIENT, CLIENT_DOCTOR].filter(Boolean),
-    });
-
-    return verifier;
-};
-
-const generatePolicy = (principalId, effect, resource, payload = {}) => ({
-    principalId,
-    policyDocument: {
-        Version: "2012-10-17",
-        Statement: [{
-            Action: "execute-api:Invoke",
-            Effect: effect,
-            Resource: resource,
-        }],
-    },
-    context: {
-        sub: payload.sub || "",
-        email: payload.email || "",
-        region: REGION,
-        role: payload["custom:role"] || (payload["cognito:groups"]?.[0]) || "patient",
-    },
+const policy = (principalId, effect, resource, context = {}) => ({
+    principalId, policyDocument: { Version: '2012-10-17', Statement: [{ Action: 'execute-api:Invoke', Effect: effect, Resource: resource }] }, context,
 });
-
-export const handler = async (event) => {
+export async function handler(event) {
     try {
-        const token = event.queryStringParameters?.token;
-        if (!token) throw new Error("Missing token");
-
-        const v = getVerifier();
-        const payload = await v.verify(token);
-
-        console.log(`[ws-authorizer][${REGION}] Authorized: ${payload.sub}`);
-        return generatePolicy(payload.sub, "Allow", event.methodArn, payload);
-    } catch (err) {
-        console.error(`[ws-authorizer][${REGION}] Auth failed: ${err.message}`);
-        return generatePolicy("unauthorized", "Deny", event.methodArn);
+        if (event.requestContext?.routeKey !== '$connect' || event.queryStringParameters?.token) throw new Error('INVALID_CONNECTION_REQUEST');
+        const config = socketAuthorizerSettings();
+        client ??= DynamoDBDocumentClient.from(new DynamoDBClient({ region: config.region }));
+        const identity = await consumeConnectionTicket(event.queryStringParameters?.ticket, client, config);
+        return policy(identity.sub, 'Allow', event.methodArn, identity);
+    } catch {
+        // Do not log tickets, JWTs, subject identifiers or provider exception payloads.
+        return policy('unauthorized', 'Deny', event.methodArn);
     }
-};
+}

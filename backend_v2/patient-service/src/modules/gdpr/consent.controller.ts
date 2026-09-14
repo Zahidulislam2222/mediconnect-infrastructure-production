@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 import { Request, Response } from 'express';
 import { PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { randomUUID } from 'crypto';
@@ -5,17 +6,18 @@ import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
 import { safeError } from '../../../../shared/logger';
 import { publishEvent, EventType } from '../../../../shared/event-bus';
+import { TABLE_NAMES } from '../../../../shared/settings';
 
 // =============================================================================
 // GDPR Consent Versioning (Article 7 - Conditions for Consent)
 // =============================================================================
-// Uses an append-only ledger (mediconnect-consent-ledger) so that no consent
+// Uses the configured append-only consent ledger so that no consent
 // record is ever mutated or deleted. Every change creates a new row, giving a
 // complete, tamper-evident history that satisfies GDPR Article 7(1) proof-of-
 // consent and Article 5(2) accountability obligations.
 // =============================================================================
 
-const CONSENT_TABLE = process.env.CONSENT_TABLE || 'mediconnect-consent-ledger';
+const CONSENT_TABLE = TABLE_NAMES.consentLedger;
 
 interface ConsentRecord {
     consentId: string;
@@ -32,10 +34,7 @@ interface ConsentRecord {
 /**
  * Helper: Extract region from request headers (mirrors patient.controller.ts)
  */
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 /**
  * GET /me/consent

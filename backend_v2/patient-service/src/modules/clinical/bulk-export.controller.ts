@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 // ─── FEATURE #20: Bulk FHIR $export ────────────────────────────────────────
 // FHIR $export operation for population health data exports.
 // Generates NDJSON bundles of patient data (Patient, Condition, Observation,
@@ -10,16 +11,14 @@ import { v4 as uuidv4 } from 'uuid';
 import { PutCommand, GetCommand, ScanCommand, QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
+import { setting } from '../../../../shared/settings';
 
-const TABLE_PATIENTS = process.env.DYNAMO_TABLE || 'mediconnect-patients';
-const TABLE_EXPORTS = process.env.TABLE_EXPORTS || 'mediconnect-bulk-exports';
-const TABLE_ALLERGIES = process.env.TABLE_ALLERGIES || 'mediconnect-allergies';
-const TABLE_IMMUNIZATIONS = process.env.TABLE_IMMUNIZATIONS || 'mediconnect-immunizations';
+const TABLE_PATIENTS = setting("DYNAMO_TABLE");
+const TABLE_EXPORTS = setting("TABLE_EXPORTS");
+const TABLE_ALLERGIES = setting("TABLE_ALLERGIES");
+const TABLE_IMMUNIZATIONS = setting("TABLE_IMMUNIZATIONS");
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── Gap #5 FIX: Paginated DynamoDB Scan for production-scale exports ────────
 // Handles datasets >1MB by paging through ExclusiveStartKey.

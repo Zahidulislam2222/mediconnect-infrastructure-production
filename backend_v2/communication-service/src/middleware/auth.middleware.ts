@@ -1,3 +1,4 @@
+import { resolveAuthRegion } from '../../../shared/region-context';
 import { Request, Response, NextFunction } from 'express';
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import { COGNITO_CONFIG } from '../../../shared/aws-config';
@@ -9,18 +10,12 @@ const verifiers: Record<string, any> = {
     'eu-central-1': null
 };
 
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    const bodyRegion = (req.body && req.body.region); 
-    const r = Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || bodyRegion || "us-east-1");
-    // Standardize to your physical AWS regions
-    return r.toUpperCase().includes('EU') ? 'eu-central-1' : 'us-east-1';
-};
+const extractRegion = (req: Request): string => resolveAuthRegion(req.headers['x-user-region']);
 
 const getVerifier = async (region: string) => {
     if (verifiers[region]) return verifiers[region];
 
-    const regionKey = region === 'eu-central-1' ? 'EU' : 'US';
+    const regionKey = resolveAuthRegion(region);
     const config = COGNITO_CONFIG[regionKey];
 
     if (!config.USER_POOL_ID || !config.CLIENT_PATIENT) {
@@ -38,23 +33,6 @@ const getVerifier = async (region: string) => {
 
 export const authMiddleware = async (req: Request, res: Response, next: NextFunction) => {
 
-    // 1. Support for AWS Lambda/AppSync Authorizer context (Internal Proxy)
-    const awsAuthorizer = req.body?.requestContext?.authorizer;
-
-    if (awsAuthorizer && awsAuthorizer.sub) {
-        const isDoctor = awsAuthorizer.role?.toLowerCase() === 'doctor';
-        (req as any).user = {
-            id: awsAuthorizer.sub,
-            email: awsAuthorizer.email || "",
-            region: extractRegion(req),
-            isDoctor,
-            isPatient: !isDoctor
-        };
-
-        if (req.body.body) req.body = req.body.body; 
-        return next(); 
-    }
-
     // 2. Standard HTTP Bearer Token Logic
     try {
         const authHeader = req.headers.authorization;
@@ -68,6 +46,7 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
 
         // 🔐 CRYPTOGRAPHIC VERIFICATION
         const payload = await v.verify(token);
+        req.headers['x-user-region'] = region;
 
         // 🟢 ALIGNMENT FIX: Use the same structure as Patient and Doctor services
         const groups = (payload['cognito:groups'] as string[]) || [];
@@ -84,12 +63,12 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
 
         next();
     } catch (err: any) {
-        const region = extractRegion(req);
+        const region = (req as any).user?.region;
         
         logger.warn("[AUTH] Authentication failed", { region });
 
         // Only log to Audit Log if it's a real attack (not just an expired token)
-        if (!err.message.includes('expired')) {
+        if (region && !err.message.includes('expired')) {
              await writeAuditLog("SYSTEM", "COMMUNICATION", "UNAUTHORIZED_ACCESS_ATTEMPT", err.message, { region, ip: req.ip });
         }
 

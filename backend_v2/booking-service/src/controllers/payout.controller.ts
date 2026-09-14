@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../shared/region-context';
 /**
  * Doctor Payout Controller — Weekly Stripe Connect Transfers
  *
@@ -15,6 +16,7 @@ import { getRegionalClient, getSSMParameter } from '../../../shared/aws-config';
 import { writeAuditLog } from '../../../shared/audit';
 import { safeLog, safeError } from '../../../shared/logger';
 import { randomUUID } from 'crypto';
+import { setting } from '../../../shared/settings';
 import {
     DoctorTier,
     DOCTOR_TIERS,
@@ -23,17 +25,14 @@ import {
     calculateShares,
 } from '../../../shared/subscription';
 
-const TABLE_APPOINTMENTS = process.env.TABLE_APPOINTMENTS || 'mediconnect-appointments';
-const TABLE_DOCTORS = process.env.TABLE_DOCTORS || 'mediconnect-doctors';
+const TABLE_APPOINTMENTS = setting("TABLE_APPOINTMENTS");
+const TABLE_DOCTORS = setting("TABLE_DOCTORS");
 
 const catchAsync = (fn: any) => (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(fn(req, res, next)).catch(next);
 };
 
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── CALCULATE PENDING PAYOUTS ──────────────────────────────────────────
 

@@ -19,11 +19,12 @@
 import { scrubPII } from './fhir-mapper';
 import { modelRouter } from './model-router';
 import { safeLog, safeError } from '../../../shared/logger';
+import { setting } from '../../../shared/settings';
 
 // ─── Config (from env vars) ───────────────────────────────────────────
 
-const CONFIDENCE_LOW_THRESHOLD = parseFloat(process.env.CONFIDENCE_LOW_THRESHOLD || '0.3');
-const VALIDATION_SKIP_THRESHOLD = parseFloat(process.env.VALIDATION_SKIP_THRESHOLD || '0.85');
+const CONFIDENCE_LOW_THRESHOLD = parseFloat(setting("CONFIDENCE_LOW_THRESHOLD"));
+const VALIDATION_SKIP_THRESHOLD = parseFloat(setting("VALIDATION_SKIP_THRESHOLD"));
 
 // ─── Stopwords (common English words to exclude from overlap) ─────────
 

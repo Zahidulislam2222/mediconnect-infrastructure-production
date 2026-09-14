@@ -1,4 +1,5 @@
 import winston from 'winston';
+import { setting } from './settings';
 
 /**
  * GDPR & HIPAA COMPLIANT MASKING + ANTI-REDOS
@@ -7,7 +8,7 @@ import winston from 'winston';
 const maskPII = winston.format((info: any) => {
     // Basic Regex Patterns
     const patterns = {
-        email: /([a-zA-Z0-9_\-\.]+)@([a-zA-Z0-9_\-\.]+)\.([a-zA-Z]{2,5})/g,
+        email: /([a-zA-Z0-9_\-.]+)@([a-zA-Z0-9_\-.]+)\.([a-zA-Z]{2,5})/g,
         ssn: /\b\d{3}-\d{2}-\d{4}\b/g,
         phone: /(?:(?:\+|00)[1-9]\d{0,3}[\s.-]?)?(?:\(?\d{2,5}\)?[\s.-]?)?\d{3,4}[\s.-]?\d{3,4}\b/g
     };
@@ -65,7 +66,7 @@ const maskPII = winston.format((info: any) => {
 });
 
 export const logger = winston.createLogger({
-    level: process.env.LOG_LEVEL || 'info',
+    level: setting("LOG_LEVEL"),
     format: winston.format.combine(
         winston.format.timestamp(),
         maskPII(), // Run masking BEFORE JSON formatting

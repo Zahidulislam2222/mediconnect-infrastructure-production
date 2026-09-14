@@ -1,8 +1,10 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 import { Request, Response } from 'express';
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
 import { safeError } from '../../../../shared/logger';
+import { setting } from '../../../../shared/settings';
 
 // =============================================================================
 // FHIR R4 Coverage Resource (Insurance / Coverage)
@@ -11,12 +13,9 @@ import { safeError } from '../../../../shared/logger';
 // the CapabilityStatement. Supports `read` interaction (by patient ID).
 // =============================================================================
 
-const PATIENT_TABLE = process.env.DYNAMO_TABLE || 'mediconnect-patients';
+const PATIENT_TABLE = setting("DYNAMO_TABLE");
 
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 /**
  * GET /me/coverage

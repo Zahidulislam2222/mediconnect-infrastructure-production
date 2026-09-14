@@ -8,6 +8,7 @@
 
 import { CloudWatchClient, PutMetricDataCommand } from '@aws-sdk/client-cloudwatch';
 import { safeLog, safeError } from './logger';
+import { setting } from './settings';
 
 const NAMESPACE = 'MediConnect';
 
@@ -64,7 +65,7 @@ export async function publishMetric(
         const cw = getCWClient(region);
         const metricDimensions = dimensions
             ? Object.entries(dimensions).map(([Name, Value]) => ({ Name, Value }))
-            : [{ Name: 'Service', Value: process.env.SERVICE_NAME || 'unknown' }];
+            : [{ Name: 'Service', Value: setting("SERVICE_NAME") }];
 
         await cw.send(new PutMetricDataCommand({
             Namespace: NAMESPACE,
@@ -91,7 +92,7 @@ export function metricsMiddleware() {
         if (req.path === '/health' || req.path === '/ready') return next();
 
         const start = Date.now();
-        const service = process.env.SERVICE_NAME || 'unknown';
+        const service = setting("SERVICE_NAME");
 
         res.on('finish', () => {
             const latency = Date.now() - start;

@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 // ─── FEATURE #13: CVX Immunization Codes + Reporting ───────────────────────
 // CDC CVX code database (built-in). FHIR Immunization resource.
 // Vaccine administration recording + history.
@@ -11,13 +12,11 @@ import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
 import { validateUSCore } from '../../../../shared/us-core-profiles';
 import { safeError } from '../../../../shared/logger';
+import { setting } from '../../../../shared/settings';
 
-const TABLE = process.env.TABLE_IMMUNIZATIONS || 'mediconnect-immunizations';
+const TABLE = setting("TABLE_IMMUNIZATIONS");
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── CDC CVX Code Database (Common Vaccines) ──────────────────────────────
 

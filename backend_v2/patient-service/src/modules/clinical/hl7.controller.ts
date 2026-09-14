@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 import { Request, Response } from "express";
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { PutCommand, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
@@ -5,15 +6,13 @@ import { writeAuditLog } from '../../../../shared/audit';
 import { safeLog, safeError } from '../../../../shared/logger';
 import { v4 as uuidv4 } from "uuid";
 import { publishEvent, EventType } from '../../../../shared/event-bus';
+import { TABLE_NAMES, setting } from '../../../../shared/settings';
 
-const TABLE_PATIENTS = process.env.DYNAMO_TABLE || "mediconnect-patients";
-const TABLE_HL7_MESSAGES = "mediconnect-hl7-messages";
-const TABLE_EHR = "mediconnect-health-records";
+const TABLE_PATIENTS = setting("DYNAMO_TABLE");
+const TABLE_HL7_MESSAGES = TABLE_NAMES.hl7Messages;
+const TABLE_EHR = TABLE_NAMES.ehr;
 
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // =============================================================================
 // HL7 v2.x PARSER
@@ -433,7 +432,7 @@ export const receiveHL7Message = async (req: Request, res: Response) => {
                 fhirResources = mapSIU_S12(msg);
                 processedType = "Scheduling";
                 break;
-            default:
+            default:{
                 const nak = generateACK(msg, "AR", `Unsupported message type: ${messageKey}`);
                 // Still store for audit
                 await db.send(new PutCommand({
@@ -450,6 +449,7 @@ export const receiveHL7Message = async (req: Request, res: Response) => {
                     }
                 }));
                 return res.status(422).json({ ack: nak, ackCode: "AR", error: `Unsupported: ${messageKey}` });
+}
         }
 
         // Store HL7 message log

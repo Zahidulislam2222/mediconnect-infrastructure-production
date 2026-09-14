@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../shared/region-context';
 /**
  * Staff Controller
  * =================
@@ -13,21 +14,19 @@ import { PutCommand, QueryCommand, GetCommand, UpdateCommand, ScanCommand, Delet
 import { writeAuditLog } from '../../../shared/audit';
 import { sendNotification } from '../../../shared/notifications';
 import { randomUUID } from 'crypto';
+import { setting } from '../../../shared/settings';
 
 // ─── Configuration ──────────────────────────────────────────────────────
-const TABLE_SHIFTS = process.env.TABLE_SHIFTS || "mediconnect-staff-shifts";
-const TABLE_TASKS = process.env.TABLE_TASKS || "mediconnect-staff-tasks";
-const TABLE_ANNOUNCEMENTS = process.env.TABLE_ANNOUNCEMENTS || "mediconnect-staff-announcements";
-const TABLE_DOCTORS = process.env.TABLE_DOCTORS || "mediconnect-doctors";
+const TABLE_SHIFTS = setting("TABLE_SHIFTS");
+const TABLE_TASKS = setting("TABLE_TASKS");
+const TABLE_ANNOUNCEMENTS = setting("TABLE_ANNOUNCEMENTS");
+const TABLE_DOCTORS = setting("TABLE_DOCTORS");
 
 const catchAsync = (fn: any) => (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(fn(req, res, next)).catch(next);
 };
 
-export const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
+export const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── SHIFT MANAGEMENT ───────────────────────────────────────────────────
 

@@ -7,7 +7,7 @@
         "start": "node dist/staff-service/src/index.js",
         "build": "tsc",
         "dev": "nodemon src/index.ts",
-        "test": "echo \"No tests defined yet\" && exit 0",
+        "test": "npm run build && node ../scripts/service_health_test.mjs staff-service",
         "typecheck": "tsc --noEmit"
     },
     "dependencies": {

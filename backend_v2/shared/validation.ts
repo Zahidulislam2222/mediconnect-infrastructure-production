@@ -1,3 +1,4 @@
+import { resolveAuthRegion } from './region-context';
 // ─── FIX #10: ZOD REQUEST VALIDATION MIDDLEWARE ──────────────────────────
 // PROBLEM: All input validation was manual and scattered across controllers.
 // Missing fields caused runtime crashes, and inconsistent error messages
@@ -271,11 +272,12 @@ export function requireRegionHeader() {
                 message: 'All requests must include x-user-region header for data residency compliance'
             });
         }
-        const normalized = Array.isArray(region) ? region[0] : region;
-        if (!['us-east-1', 'eu-central-1', 'US', 'EU', 'us', 'eu'].includes(normalized)) {
+        try {
+            resolveAuthRegion(region);
+        } catch {
             return res.status(400).json({
                 error: 'Invalid x-user-region header',
-                message: 'Supported regions: US, EU, us-east-1, eu-central-1'
+                message: 'Use US, EU or their configured regional aliases'
             });
         }
         next();

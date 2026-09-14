@@ -1,6 +1,7 @@
 import { getRegionalSESClient } from './aws-config';
 import { SendEmailCommand } from '@aws-sdk/client-ses';
 import { safeLog, safeError } from './logger';
+import { setting } from './settings';
 
 interface NotificationOptions {
   region: string;
@@ -24,7 +25,7 @@ export async function sendNotification(options: NotificationOptions): Promise<vo
     }
 
     const sesClient = getRegionalSESClient(options.region);
-    const senderEmail = process.env.SES_SENDER_EMAIL || 'noreply@mediconnect.health';
+    const senderEmail = setting("SES_SENDER_EMAIL");
 
     await sesClient.send(new SendEmailCommand({
       Source: senderEmail,

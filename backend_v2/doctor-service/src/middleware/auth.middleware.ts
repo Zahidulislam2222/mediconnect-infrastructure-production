@@ -1,3 +1,4 @@
+import { resolveAuthRegion } from '../../../shared/region-context';
 import { Request, Response, NextFunction } from 'express';
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import { COGNITO_CONFIG } from '../../../shared/aws-config';
@@ -9,7 +10,7 @@ const verifiers: Record<string, any> = {};
 
 const getVerifier = async (userRegion: string) => {
     // 1. Normalize Region
-    const isEU = userRegion?.toUpperCase().includes('EU');
+    const isEU = resolveAuthRegion(userRegion) === 'EU';
     const regionKey = isEU ? 'EU' : 'US';
     
     // 2. Return cached verifier if exists
@@ -53,13 +54,14 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
         
         // Safely parse regional header
         const rawRegion = req.headers['x-user-region'];
-        const userRegion = Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion as string || "us-east-1");
+        const userRegion = resolveAuthRegion(rawRegion);
 
         // Get the strict regional verifier
         const v = await getVerifier(userRegion);
         
         // Verify Token (Crypto & Expiry check)
         const payload = await v.verify(token);
+        req.headers['x-user-region'] = userRegion;
 
         // --- 2026 PERMISSION ENFORCEMENT (RBAC) ---
         const groups = (payload['cognito:groups'] as string[]) || [];

@@ -177,7 +177,7 @@ describe('Kafka consumers defined', () => {
 describe('Docker Compose: local Kafka', () => {
     const compose = readFile('../docker-compose.yml');
 
-    assert(compose.includes('apache/kafka:3.9.0'), 'Kafka 3.9.0 image in docker-compose');
+    assert(/image:\s*confluentinc\/cp-kafka:\d+\.\d+\.\d+/.test(compose), 'Local Kafka uses a version-pinned Confluent image');
     assert(compose.includes('kafka-ui'), 'Kafka UI for debugging');
     assert(compose.includes('profiles') && compose.includes('kafka'), 'Kafka under --profile kafka (not started by default)');
 });

@@ -22,9 +22,14 @@ try {
 const dynamo = DynamoDBDocumentClient.from(instrumentedDDBClient);
 const sns = instrumentedSNSClient;
 
-// Use Env Vars or Defaults
-const INVENTORY_TABLE = process.env.INVENTORY_TABLE || "mediconnect-pharmacy-inventory";
-const PRESCRIPTION_TABLE = process.env.PRESCRIPTION_TABLE || "mediconnect-prescriptions";
+const requireEnv = (name) => {
+    const value = process.env[name]?.trim();
+    if (!value) throw new Error(`Missing required configuration: ${name}`);
+    return value;
+};
+
+const INVENTORY_TABLE = requireEnv("TABLE_INVENTORY");
+const PRESCRIPTION_TABLE = requireEnv("TABLE_PRESCRIPTIONS");
 const SNS_TOPIC_ARN = process.env.SNS_TOPIC_ARN;
 
 exports.handler = async (event) => {

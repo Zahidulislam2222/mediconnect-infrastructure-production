@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 // ─── FEATURE #17: Lab Orders + Results (ORM/ORU) ───────────────────────────
 // Lab order management with LOINC codes.
 // Generates HL7 v2.x ORM^O01 (orders) and ORU^R01 (results).
@@ -12,13 +13,11 @@ import { writeAuditLog } from '../../../../shared/audit';
 import { validateUSCore } from '../../../../shared/us-core-profiles';
 import { safeError } from '../../../../shared/logger';
 import { publishEvent, EventType } from '../../../../shared/event-bus';
+import { setting } from '../../../../shared/settings';
 
-const TABLE = process.env.TABLE_LAB_ORDERS || 'mediconnect-lab-orders';
+const TABLE = setting("TABLE_LAB_ORDERS");
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── Common LOINC Lab Test Panels ──────────────────────────────────────────
 

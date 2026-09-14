@@ -1,6 +1,6 @@
 /**
  * MediConnect FHIR R4 Mapper & PII Scrubber
- * Standard: FHIR R4 (HL7), HIPAA Safe Harbor, GDPR
+ * FHIR R4 serialization and heuristic redaction; regex matching is not HIPAA de-identification.
  * Last Updated: Feb 2026
  */
 
@@ -11,13 +11,13 @@ const PII_REGEX = {
     // Matches: +49..., 0044..., (030)...
     PHONE: /(?:(?:\+|00)[1-9]\d{0,3}[\s.-]?)?(?:\(?\d{2,5}\)?[\s.-]?)?\d{3,4}[\s.-]?\d{3,4}\b/g,
     EMAIL: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g,
-    URL: /\b(https?|ftp|file):\/\/[-A-Z0-9+&@#\/%?=~_|!:,.;]*[-A-Z0-9+&@#\/%=~_|]/ig,
+    URL: /\b(https?|ftp|file):\/\/[-A-Z0-9+&@#/%?=~_|!:,.;]*[-A-Z0-9+&@#/%=~_|]/ig,
     IP_ADDR: /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g,
-    DOB: /\b(?:\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})\b/g 
+    DOB: /\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b/g 
 };
 
 /**
- * HIPAA Safe Harbor Compliant Scrubber
+ * Heuristic identifier scrubber. Names and other identifying context can remain.
  */
 export const scrubPII = (text: string): string => {
     if (!text) return "";
@@ -84,10 +84,15 @@ export const mapToFHIRDiagnosticReport = (
         issued: new Date().toISOString(),
         performer: [{ display: provider }],
         conclusion: `${analysis.risk}: ${analysis.reason}`,
-        extension: [{
-            url: "http://mediconnect.com/fhir/StructureDefinition/symptoms",
+        contained: [{
+            resourceType: "Observation",
+            id: "reported-symptoms",
+            status: "preliminary",
+            code: { text: "Patient-reported symptoms" },
+            subject: { reference: `Patient/${patientId}` },
             valueString: symptoms.join(", ")
-        }]
+        }],
+        result: [{ reference: "#reported-symptoms" }]
     };
 };
 

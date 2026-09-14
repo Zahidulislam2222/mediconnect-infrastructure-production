@@ -1,3 +1,4 @@
+import { getApiBrowserPolicy } from '../../shared/api-browser-policy';
 import express from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
@@ -10,9 +11,11 @@ import { GetParametersCommand } from "@aws-sdk/client-ssm";
 import { safeLog, safeError } from '../../shared/logger';
 import { getRegionalSSMClient } from '../../shared/aws-config';
 
+import { setting } from '../../shared/settings';
+
 dotenv.config();
 
-const app = express();
+export const app = express();
 app.set('trust proxy', 1);
 
 // 🟢 1. HEALTH CHECKS (NO LIMITER)
@@ -55,46 +58,11 @@ const PORT = process.env.PORT || 8082;
 let isAppReady = false;
 
 // --- 1. ENTERPRISE CORS CONFIGURATION ---
-const allowedOrigins: string[] = process.env.ALLOWED_ORIGINS 
-    ? process.env.ALLOWED_ORIGINS.split(',').map(url => url.trim()) 
-    : [];
-
-const mobileOrigins =[
-    'capacitor://localhost',
-    'http://localhost',
-    'https://localhost'
-];
-
-if (process.env.NODE_ENV !== 'production') {
-    allowedOrigins.push('http://localhost:5173', 'http://localhost:8080');
-}
-
-const corsOptions = {
-    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-        if (!origin) return callback(null, true);
-        if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
-        if (mobileOrigins.indexOf(origin) !== -1) return callback(null, true);
-
-        safeError(`⛔ CORS Blocked: ${origin}`);
-        callback(new Error('Strict CORS Policy: Origin not allowed'));
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders:['Content-Type', 'Authorization', 'X-Internal-Secret', 'X-User-ID', 'Prefer', 'If-Match', 'x-user-region']
-};
+const browserPolicy = getApiBrowserPolicy();
+const corsOptions = browserPolicy.cors;
 
 // --- 2. SECURITY MIDDLEWARE ---
-app.use(helmet({
-    hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
-    contentSecurityPolicy: {
-        directives: {
-            defaultSrc:["'self'"],
-            connectSrc:["'self'", "https://*.amazonaws.com", "https://*.googleapis.com", "https://*.azure.com"],
-            scriptSrc: ["'self'"],
-            imgSrc: ["'self'", "data:", "https://*"],
-        }
-    }
-}));
+app.use(helmet(browserPolicy.helmet));
 
 app.use(cors(corsOptions)); 
 app.options('*', cors(corsOptions));
@@ -116,7 +84,7 @@ app.use(morgan((tokens, req, res) => {
 
 // --- 4. SECRETS LOADER ---
 async function loadSecrets() {
-    const region = process.env.AWS_REGION || 'us-east-1';
+    const region = setting("AWS_REGION");
     const ssm = getRegionalSSMClient(region);
     try {
         safeLog(`Synchronizing Doctor secrets with AWS Vault...`);
@@ -201,5 +169,7 @@ const startServer = async () => {
     }
 };
 
-startServer(); 
+if (require.main === module) {
+    void startServer();
+}
 // git push

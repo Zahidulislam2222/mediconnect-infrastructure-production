@@ -19,6 +19,7 @@ import { SQSClient, SendMessageCommand, GetQueueUrlCommand } from "@aws-sdk/clie
 import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { safeLog, safeError } from './logger';
 import { KAFKA_ENABLED, KAFKA_DUAL_WRITE, publishToKafka, KAFKA_TOPICS } from './kafka';
+import { setting } from './settings';
 
 // --- SQS Client Factory (follows same pattern as aws-config.ts) ---
 
@@ -272,7 +273,7 @@ export async function publishEvent(
         category,
         timestamp: new Date().toISOString(),
         region: normalizedRegion,
-        source: meta?.source || process.env.SERVICE_NAME || "unknown",
+        source: meta?.source || setting("SERVICE_NAME"),
         correlationId: meta?.correlationId || generateCorrelationId(),
         payload,
         meta: {

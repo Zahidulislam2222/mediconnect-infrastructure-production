@@ -4,6 +4,9 @@ import { OpenAI } from "openai";
 import { getSSMParameter } from '../../../shared/aws-config';
 import { logger } from '../../../shared/logger';
 import { scrubPII } from "./fhir-mapper";
+import { requiredEnv, requiredPositiveInteger } from '../../../shared/settings';
+import { AIUnavailableError } from './clinical-assessment';
+import { parseVertexText } from './vertex-response';
 
 export interface AIResponse {
     text: string;
@@ -60,14 +63,7 @@ export class AICircuitBreaker {
                     return response;
                 } catch (azureError: any) {
                     logger.error("❌ ALL AI PROVIDERS FAILED.");
-                    return {
-                        text: JSON.stringify({
-                            risk: "Medium",
-                            reason: "AI Clinical Service is temporarily degraded. Standard protocols suggest immediate clinical review."
-                        }),
-                        provider: "System Recovery",
-                        model: "Emergency-Fallback"
-                    };
+                    throw new AIUnavailableError();
                 }
             }
         }
@@ -87,7 +83,7 @@ export class AICircuitBreaker {
                 return await this.callVertexVision(cleanPrompt, imageBase64, region);
             } catch (vError: any) {
                 logger.error("❌ ALL VISION PROVIDERS FAILED.");
-                throw new Error("Imaging AI Service Unavailable");
+                throw new Error("Imaging AI Service Unavailable", { cause: vError });
             }
         }
     }
@@ -96,8 +92,8 @@ export class AICircuitBreaker {
 
     private async callBedrock(
         prompt: string, region: string,
-        modelId: string = process.env.MODEL_GENERATION_BEDROCK || "anthropic.claude-3-haiku-20240307-v1:0",
-        maxTokens: number = parseInt(process.env.MODEL_GENERATION_MAX_TOKENS || "500", 10),
+        modelId: string = requiredEnv("MODEL_GENERATION_BEDROCK"),
+        maxTokens: number = requiredPositiveInteger("MODEL_GENERATION_MAX_TOKENS"),
     ): Promise<AIResponse> {
         const client = this.getBedrockClient(region);
         const command = new InvokeModelCommand({
@@ -118,8 +114,8 @@ export class AICircuitBreaker {
 
     private async callVertexAI(
         prompt: string, region: string,
-        modelName: string = process.env.MODEL_GENERATION_VERTEX || "gemini-2.0-flash-lite",
-        maxTokens: number = parseInt(process.env.MODEL_GENERATION_MAX_TOKENS || "500", 10),
+        modelName: string = requiredEnv("MODEL_GENERATION_VERTEX"),
+        maxTokens: number = requiredPositiveInteger("MODEL_GENERATION_MAX_TOKENS"),
     ): Promise<AIResponse> {
         const { accessToken, projectId } = await this.getGCPAuth(region);
 
@@ -139,7 +135,7 @@ export class AICircuitBreaker {
         const data = await response.json();
         if (!response.ok) throw new Error(`Vertex_Error_${response.status}`);
         return {
-            text: data.candidates?.[0]?.content?.parts?.[0]?.text || "",
+            text: parseVertexText(data),
             provider: "GCP Vertex AI",
             model: modelName,
         };
@@ -147,8 +143,8 @@ export class AICircuitBreaker {
 
     private async callAzureOpenAI(
         prompt: string, region: string,
-        deployment: string = process.env.MODEL_GENERATION_AZURE || "gpt-4o-mini",
-        maxTokens: number = parseInt(process.env.MODEL_GENERATION_MAX_TOKENS || "500", 10),
+        deployment: string = requiredEnv("MODEL_GENERATION_AZURE"),
+        maxTokens: number = requiredPositiveInteger("MODEL_GENERATION_MAX_TOKENS"),
     ): Promise<AIResponse> {
         if (!this.azureClient) {
             // 🟢 Pass Region down to fetch the correct regional Azure credentials
@@ -204,14 +200,7 @@ export class AICircuitBreaker {
                     return response;
                 } catch (azureError: any) {
                     logger.error("❌ ALL AI PROVIDERS FAILED (config).");
-                    return {
-                        text: JSON.stringify({
-                            risk: "Medium",
-                            reason: "AI Clinical Service is temporarily degraded. Standard protocols suggest immediate clinical review."
-                        }),
-                        provider: "System Recovery",
-                        model: "Emergency-Fallback"
-                    };
+                    throw new AIUnavailableError();
                 }
             }
         }
@@ -221,13 +210,15 @@ export class AICircuitBreaker {
 
     private async callBedrockVision(prompt: string, imageBase64: string, region: string): Promise<AIResponse> {
         const client = this.getBedrockClient(region);
+        const modelId = requiredEnv("MODEL_VISION_BEDROCK");
+        const maxTokens = requiredPositiveInteger("MODEL_VISION_MAX_TOKENS");
         const command = new InvokeModelCommand({
-            modelId: "anthropic.claude-3-5-sonnet-20240620-v1:0", 
+            modelId,
             contentType: "application/json",
             accept: "application/json",
             body: JSON.stringify({
                 anthropic_version: "bedrock-2023-05-31",
-                max_tokens: 1000,
+                max_tokens: maxTokens,
                 messages: [{
                     role: "user",
                     content: [
@@ -239,15 +230,16 @@ export class AICircuitBreaker {
         });
         const res = await client.send(command);
         const body = JSON.parse(new TextDecoder().decode(res.body));
-        return { text: body.content[0].text, provider: "AWS Bedrock", model: "Claude 3.5 Sonnet Vision" };
+        return { text: body.content[0].text, provider: "AWS Bedrock", model: modelId };
     }
 
     private async callVertexVision(prompt: string, imageBase64: string, region: string): Promise<AIResponse> {
         const { accessToken, projectId } = await this.getGCPAuth(region);
+        const modelName = requiredEnv("MODEL_VISION_VERTEX");
         
         // 🟢 GDPR FIX: Switch to EU endpoint
         const location = region.toUpperCase() === 'EU' ? 'europe-west3' : 'us-central1';
-        const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/gemini-1.5-flash:generateContent`;
+        const url = `https://${location}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${location}/publishers/google/models/${modelName}:generateContent`;
 
         const response = await fetch(url, {
             method: "POST",
@@ -263,7 +255,8 @@ export class AICircuitBreaker {
             })
         });
         const data = await response.json();
-        return { text: data.candidates?.[0]?.content?.parts?.[0]?.text || "", provider: "GCP Vertex AI", model: "Gemini 1.5 Vision" };
+        if (!response.ok) throw new Error(`Vertex_Error_${response.status}`);
+        return { text: parseVertexText(data), provider: "GCP Vertex AI", model: modelName };
     }
 
     // --- HELPERS ---

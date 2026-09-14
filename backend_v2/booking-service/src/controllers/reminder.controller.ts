@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../shared/region-context';
 // ─── FEATURE #18: Appointment Reminders (SNS) ──────────────────────────────
 // SMS/email reminders via AWS SNS for upcoming appointments.
 // Reminder scheduling: 24h before, 1h before.
@@ -12,16 +13,14 @@ import { getRegionalClient, getRegionalSNSClient } from '../../../shared/aws-con
 import { writeAuditLog } from '../../../shared/audit';
 import { safeLog, safeError } from '../../../shared/logger';
 import { publishEvent, EventType } from '../../../shared/event-bus';
+import { setting } from '../../../shared/settings';
 
-const TABLE_APPOINTMENTS = process.env.TABLE_APPOINTMENTS || 'mediconnect-appointments';
-const TABLE_REMINDERS = process.env.TABLE_REMINDERS || 'mediconnect-reminders';
-const TABLE_PATIENTS = process.env.DYNAMO_TABLE || 'mediconnect-patients';
-const TABLE_DOCTORS = process.env.DYNAMO_TABLE_DOCTORS || 'mediconnect-doctors';
+const TABLE_APPOINTMENTS = setting("TABLE_APPOINTMENTS");
+const TABLE_REMINDERS = setting("TABLE_REMINDERS");
+const TABLE_PATIENTS = setting("DYNAMO_TABLE");
+const TABLE_DOCTORS = setting("DYNAMO_TABLE_DOCTORS");
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── Reminder Templates ────────────────────────────────────────────────────
 

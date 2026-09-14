@@ -50,6 +50,10 @@ spec:
               value: "__AWS_ROLE_ARN__"
             - name: AWS_WEB_IDENTITY_TOKEN_FILE
               value: "__TOKEN_FILE__"
+            - name: TABLE_CHAT_CONNECTIONS
+              value: "__TABLE_CHAT_CONNECTIONS__"
+            - name: TABLE_CHAT_HISTORY
+              value: "__TABLE_CHAT_HISTORY__"
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/var/run/secrets/gcp/gcp-wif-config.json"
 

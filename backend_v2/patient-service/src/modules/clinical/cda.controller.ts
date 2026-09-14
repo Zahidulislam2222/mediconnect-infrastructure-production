@@ -1,19 +1,18 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 import { Request, Response } from "express";
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { generateCCD } from '../../../../shared/cda-generator';
 import { writeAuditLog } from '../../../../shared/audit';
 import { safeError } from '../../../../shared/logger';
+import { TABLE_NAMES, setting } from '../../../../shared/settings';
 
-const TABLE_PATIENTS = process.env.DYNAMO_TABLE || "mediconnect-patients";
-const TABLE_EHR = "mediconnect-health-records";
-const TABLE_RX = "mediconnect-prescriptions";
-const TABLE_VITALS = "mediconnect-iot-vitals";
+const TABLE_PATIENTS = setting("DYNAMO_TABLE");
+const TABLE_EHR = TABLE_NAMES.ehr;
+const TABLE_RX = setting('TABLE_PRESCRIPTIONS');
+const TABLE_VITALS = setting('DYNAMO_TABLE_VITALS');
 
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 /** GET /patients/:patientId/cda — Generate CCD document for patient */
 export const generatePatientCDA = async (req: Request, res: Response) => {
@@ -24,7 +23,7 @@ export const generatePatientCDA = async (req: Request, res: Response) => {
 
     // Authorization: patient can export own, doctor can export assigned
     const isOwner = authUser.sub === patientId;
-    const isDoctor = authUser['cognito:groups']?.some((g: string) => ['doctor', 'doctors'].includes(g.toLowerCase()));
+    const isDoctor = authUser.isDoctor === true;
     if (!isOwner && !isDoctor) {
         await writeAuditLog(authUser.sub, patientId, "UNAUTHORIZED_CDA_EXPORT", "Blocked CDA generation", { region, ipAddress: req.ip });
         return res.status(403).json({ error: "Access denied" });

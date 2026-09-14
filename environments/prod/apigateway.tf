@@ -1,9 +1,9 @@
 # ── US WebSocket API ─────────────────────────────────────────────────
 
 resource "aws_apigatewayv2_api" "ws_chat_us" {
-  provider              = aws.us
-  name                  = "mediconnect-ws-chat"
-  protocol_type         = "WEBSOCKET"
+  provider                   = aws.us
+  name                       = "mediconnect-ws-chat"
+  protocol_type              = "WEBSOCKET"
   route_selection_expression = "$request.body.action"
 }
 
@@ -22,36 +22,36 @@ resource "aws_apigatewayv2_stage" "ws_chat_us_production" {
   access_log_settings {
     destination_arn = aws_cloudwatch_log_group.apigw_us.arn
     format = jsonencode({
-      requestId      = "$context.requestId"
-      ip             = "$context.identity.sourceIp"
-      caller         = "$context.identity.caller"
-      user           = "$context.identity.user"
-      requestTime    = "$context.requestTime"
-      routeKey       = "$context.routeKey"
-      status         = "$context.status"
-      connectionId   = "$context.connectionId"
-      errorMessage   = "$context.error.message"
+      requestId    = "$context.requestId"
+      ip           = "$context.identity.sourceIp"
+      caller       = "$context.identity.caller"
+      user         = "$context.identity.user"
+      requestTime  = "$context.requestTime"
+      routeKey     = "$context.routeKey"
+      status       = "$context.status"
+      connectionId = "$context.connectionId"
+      errorMessage = "$context.error.message"
     })
   }
 }
 
 resource "aws_apigatewayv2_authorizer" "ws_us_authorizer" {
-  provider                     = aws.us
-  api_id                       = aws_apigatewayv2_api.ws_chat_us.id
-  authorizer_type              = "REQUEST"
-  authorizer_uri               = "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:950110266426:function:mediconnect-ws-authorizer/invocations"
-  name                         = "WSAuthorizer"
-  identity_sources             = ["route.request.querystring.token"]
+  provider         = aws.us
+  api_id           = aws_apigatewayv2_api.ws_chat_us.id
+  authorizer_type  = "REQUEST"
+  authorizer_uri   = "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:950110266426:function:mediconnect-ws-authorizer/invocations"
+  name             = "WSAuthorizer"
+  identity_sources = ["route.request.querystring.ticket"]
 }
 
 resource "aws_apigatewayv2_integration" "ws_us_failover" {
-  provider             = aws.us
-  api_id               = aws_apigatewayv2_api.ws_chat_us.id
-  integration_type     = "AWS_PROXY"
-  integration_method   = "POST"
-  integration_uri      = "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:950110266426:function:mediconnect-failover-proxy/invocations"
+  provider                  = aws.us
+  api_id                    = aws_apigatewayv2_api.ws_chat_us.id
+  integration_type          = "AWS_PROXY"
+  integration_method        = "POST"
+  integration_uri           = "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:950110266426:function:mediconnect-failover-proxy/invocations"
   content_handling_strategy = "CONVERT_TO_TEXT"
-  passthrough_behavior = "WHEN_NO_MATCH"
+  passthrough_behavior      = "WHEN_NO_MATCH"
 }
 
 resource "aws_apigatewayv2_route" "ws_us_connect" {
@@ -93,9 +93,9 @@ resource "aws_apigatewayv2_route" "ws_us_send_message" {
 # ── EU WebSocket API ─────────────────────────────────────────────────
 
 resource "aws_apigatewayv2_api" "ws_chat_eu" {
-  provider              = aws.eu
-  name                  = "mediconnect-ws-chat"
-  protocol_type         = "WEBSOCKET"
+  provider                   = aws.eu
+  name                       = "mediconnect-ws-chat"
+  protocol_type              = "WEBSOCKET"
   route_selection_expression = "$request.body.action"
 }
 
@@ -114,36 +114,36 @@ resource "aws_apigatewayv2_stage" "ws_chat_eu_production" {
   access_log_settings {
     destination_arn = aws_cloudwatch_log_group.apigw_eu.arn
     format = jsonencode({
-      requestId      = "$context.requestId"
-      ip             = "$context.identity.sourceIp"
-      caller         = "$context.identity.caller"
-      user           = "$context.identity.user"
-      requestTime    = "$context.requestTime"
-      routeKey       = "$context.routeKey"
-      status         = "$context.status"
-      connectionId   = "$context.connectionId"
-      errorMessage   = "$context.error.message"
+      requestId    = "$context.requestId"
+      ip           = "$context.identity.sourceIp"
+      caller       = "$context.identity.caller"
+      user         = "$context.identity.user"
+      requestTime  = "$context.requestTime"
+      routeKey     = "$context.routeKey"
+      status       = "$context.status"
+      connectionId = "$context.connectionId"
+      errorMessage = "$context.error.message"
     })
   }
 }
 
 resource "aws_apigatewayv2_authorizer" "ws_eu_authorizer" {
-  provider                     = aws.eu
-  api_id                       = aws_apigatewayv2_api.ws_chat_eu.id
-  authorizer_type              = "REQUEST"
-  authorizer_uri               = "arn:aws:apigateway:eu-central-1:lambda:path/2015-03-31/functions/arn:aws:lambda:eu-central-1:950110266426:function:mediconnect-ws-authorizer/invocations"
-  name                         = "WSAuthorizer"
-  identity_sources             = ["route.request.querystring.token"]
+  provider         = aws.eu
+  api_id           = aws_apigatewayv2_api.ws_chat_eu.id
+  authorizer_type  = "REQUEST"
+  authorizer_uri   = "arn:aws:apigateway:eu-central-1:lambda:path/2015-03-31/functions/arn:aws:lambda:eu-central-1:950110266426:function:mediconnect-ws-authorizer/invocations"
+  name             = "WSAuthorizer"
+  identity_sources = ["route.request.querystring.ticket"]
 }
 
 resource "aws_apigatewayv2_integration" "ws_eu_failover" {
-  provider             = aws.eu
-  api_id               = aws_apigatewayv2_api.ws_chat_eu.id
-  integration_type     = "AWS_PROXY"
-  integration_method   = "POST"
-  integration_uri      = "arn:aws:apigateway:eu-central-1:lambda:path/2015-03-31/functions/arn:aws:lambda:eu-central-1:950110266426:function:mediconnect-failover-proxy/invocations"
+  provider                  = aws.eu
+  api_id                    = aws_apigatewayv2_api.ws_chat_eu.id
+  integration_type          = "AWS_PROXY"
+  integration_method        = "POST"
+  integration_uri           = "arn:aws:apigateway:eu-central-1:lambda:path/2015-03-31/functions/arn:aws:lambda:eu-central-1:950110266426:function:mediconnect-failover-proxy/invocations"
   content_handling_strategy = "CONVERT_TO_TEXT"
-  passthrough_behavior = "WHEN_NO_MATCH"
+  passthrough_behavior      = "WHEN_NO_MATCH"
 
   request_templates = {
     "application/json" = jsonencode({

@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 // ─── FEATURE #14: FHIR AllergyIntolerance Resource ─────────────────────────
 // CRUD endpoints for patient allergy data. Used by RxNorm drug-allergy checks.
 // Table: mediconnect-allergies (PK: patientId, SK: allergyId)
@@ -10,13 +11,11 @@ import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
 import { validateUSCore } from '../../../../shared/us-core-profiles';
 import { safeError } from '../../../../shared/logger';
+import { setting } from '../../../../shared/settings';
 
-const TABLE = process.env.TABLE_ALLERGIES || 'mediconnect-allergies';
+const TABLE = setting("TABLE_ALLERGIES");
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── Allergy Categories & Severity (FHIR R4 ValueSets) ────────────────────
 

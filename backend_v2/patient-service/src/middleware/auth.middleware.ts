@@ -1,14 +1,16 @@
+import { resolveAuthRegion } from '../../../shared/region-context';
 import { Request, Response, NextFunction } from 'express';
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import { COGNITO_CONFIG } from '../../../shared/aws-config';
 import { safeLog, safeError } from '../../../shared/logger';
+import { getSensitiveOperationSettings } from '../../../shared/settings';
 
 // Cache verifiers in memory
 const verifiers: Record<string, any> = {};
 
 const getVerifier = async (userRegion: string) => {
     // 1. Normalize Region
-    const isEU = userRegion?.toUpperCase().includes('EU');
+    const isEU = resolveAuthRegion(userRegion) === 'EU';
     const regionKey = isEU ? 'EU' : 'US';
 
     if (verifiers[regionKey]) return verifiers[regionKey];
@@ -28,14 +30,14 @@ const getVerifier = async (userRegion: string) => {
             userPoolId: config.USER_POOL_ID,
             tokenUse: "id",
             // Allow both Patient and Doctor apps to use this API
-            clientId: [config.CLIENT_PATIENT, config.CLIENT_DOCTOR].filter(Boolean),
+            clientId: [config.CLIENT_PATIENT, config.CLIENT_DOCTOR, config.CLIENT_ADMIN].filter(Boolean),
         });
 
         verifiers[regionKey] = verifier;
         return verifier;
     } catch (error: any) {
         safeError(`❌ Auth Init Error: ${error.message}`);
-        throw new Error(`Failed to initialize Auth for ${regionKey}`);
+        throw new Error(`Failed to initialize Auth for ${regionKey}`, { cause: error });
     }
 };
 
@@ -51,12 +53,13 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
         
         // Handle array headers safely
         const rawRegion = req.headers['x-user-region'];
-        const userRegion = Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion as string || "us-east-1");
+        const userRegion = resolveAuthRegion(rawRegion);
 
         const v = await getVerifier(userRegion);
         
         // 4. Verify (Signature + Expiry + Audience)
         const payload = await v.verify(token);
+        req.headers['x-user-region'] = userRegion;
 
         // 5. Context Injection
         const groups = (payload['cognito:groups'] as string[]) || [];
@@ -69,9 +72,13 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
             fhirId: payload["custom:fhir_id"] || payload.sub,
             region: userRegion,
             isDoctor,
+            isAdmin: groups.some((group: string) => group.toLowerCase() === 'admin'),
             isPatient: !isDoctor,
-            mfaVerified: payload['custom:mfa_verified'] === 'true' ||
-                         (payload.amr && Array.isArray(payload.amr) && payload.amr.includes('mfa')),
+            // Profile attributes and MFA enrollment are not session authentication evidence.
+            // The verified issuer must actually assert the standard OIDC authentication methods.
+            mfaVerified: Array.isArray(payload.amr) &&
+                         payload.amr.every((method: unknown) => typeof method === 'string') &&
+                         payload.amr.includes('mfa'),
             authTime: payload.auth_time,
         };
 
@@ -86,21 +93,28 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
 };
 
 /**
- * HIPAA §164.312(d): MFA enforcement for sensitive operations.
- * Apply after authMiddleware on routes that access PHI.
+ * Require recent session MFA after authMiddleware for privileged privacy operations.
+ * Native Cognito session-amr issuance/step-up must be established before enabling these flows.
+ * Pool MFA settings, enrollment and remembered devices do not establish this per-session claim.
  */
 export const requireMFA = (req: Request, res: Response, next: NextFunction) => {
     const user = (req as any).user;
     if (!user) {
         return res.status(401).json({ error: 'Unauthorized: Authentication required' });
     }
-    // In production, Cognito enforces MFA at pool level.
-    // This middleware verifies the MFA claim is present in the token.
-    // Skip enforcement in non-production to allow local development.
-    if (process.env.NODE_ENV === 'production' && !user.mfaVerified) {
+    let maxAuthAgeSeconds: number;
+    try {
+        ({ maxAuthAgeSeconds } = getSensitiveOperationSettings());
+    } catch {
+        return res.status(503).json({ error: 'SENSITIVE_OPERATION_CONFIGURATION_UNAVAILABLE' });
+    }
+    const now = Math.floor(Date.now() / 1000);
+    if (user.mfaVerified !== true || typeof user.authTime !== 'number' ||
+        !Number.isSafeInteger(user.authTime) || user.authTime <= 0 || user.authTime > now ||
+        now - user.authTime > maxAuthAgeSeconds) {
         return res.status(403).json({
-            error: 'MFA required',
-            message: 'Multi-factor authentication is required for this operation. Please enable MFA in your account settings.'
+            error: 'MFA_STEP_UP_REQUIRED',
+            message: 'Recent verified multi-factor authentication is required for this operation.'
         });
     }
     next();

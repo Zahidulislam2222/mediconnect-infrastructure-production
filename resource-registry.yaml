@@ -12,10 +12,39 @@
 #   MISSING_APP = Terraform manages it but no app code references it
 #   ORPHANED    = In Terraform but confirmed unused
 #   CODE_READY  = Terraform code written but not yet applied
+# Registry status describes source coverage, not current cloud existence. The owner intentionally
+# retired costly cloud resources; retained entries are portfolio/showcase evidence unless a fresh
+# native inventory proves them live.
 # ============================================================================
 
-last_updated: "2026-04-05"
-last_verified_by: "verify_app_vs_iac.sh"
+last_updated: "2026-09-11"
+last_verified_by: "verify_app_vs_iac.sh (129 PASS / 0 FAIL / 0 WARN)"
+operating_mode: "SHOWCASE_REFERENCE — retirement is not fully verified; two booking Cloud Run services report Ready; no apply authorized"
+booking_provenance_verification:
+  recorded_date: "2026-09-11"
+  inventory: "GCP Cloud Asset Inventory770; billing read succeeded; two known booking services confirmed"
+  build_metadata: "Two services and active traffic revisions described successfully; no selected build annotations"
+  source_parity: "BLOCKED — no digest-linked immutable source recovered; no application edit, invocation or deployment"
+  exact_digest_lookup: "Two Image not found results; metadata Ready is not application health"
+  scoped_build_history: "Four successful exact-digest Cloud Build history queries across global and observed service regions returned zero matches; API was verified enabled; no build or API activation"
+  github_attestation_lookup: "Exact observed digest repository-attestation read returned HTTP404; attestation count unavailable and immutable source parity not established"
+  local_image_inventory: "UNAVAILABLE — Docker engine pipe absent; no daemon or stack started"
+configuration_boundary_audit:
+  status: "PARTIAL"
+  hardcoded_registry_entries: 0
+  documented_backend_variables: 163
+  documented_frontend_variables: 54
+  reason: "The nine registered hardcoded table names now use validated settings and safe examples. A broader audit still finds additional business-module defaults that must move to the central boundary."
+
+
+cms_article_migration_configuration:
+  recorded_date: "2026-09-15"
+  source: "../mediconnect-cms/scripts/sync-articles.js"
+  settings: "../mediconnect-cms/scripts/migration-settings.cjs"
+  destination_variables: [CMS_SYNC_AWS_REGION, CMS_SYNC_DYNAMODB_TABLE, CMS_SYNC_S3_BUCKET]
+  status: "LOCAL_CONFIGURATION_ONLY — no destination selected or live migration executed"
+  coverage: "Preserves the existing ARTICLE#id consumer contract; destinations must be inventoried and reviewed before any real execution"
+  regional_verification: "Both regional settings exercised against loopback fixtures only; no regional cloud deployment claimed"
 
 # --------------------------------------------------------------------------
 # DynamoDB Tables (38 tables × 2 regions = 76 resources)
@@ -138,7 +167,7 @@ dynamodb:
 
   - name: mediconnect-prescriptions
     tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
-    app_files: [backend_v2/doctor-service, legacy_lambdas/mediconnect-prescription-service]
+    app_files: [backend_v2/doctor-service, backend_v2/patient-service/src/modules/clinical/cda.controller.ts, legacy_lambdas/mediconnect-prescription-service]
     env_var: TABLE_PRESCRIPTIONS
     status: OK
 
@@ -192,63 +221,72 @@ dynamodb:
 
   - name: mediconnect-iot-vitals
     tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
-    app_files: [backend_v2/patient-service/src/modules/iot]
+    app_files: [backend_v2/patient-service/src/modules/iot, backend_v2/patient-service/src/modules/clinical/cda.controller.ts]
     env_var: DYNAMO_TABLE_VITALS
     status: OK
 
-  # -- Hardcoded tables (no env var override) --
+  # -- Tables migrated to the validated configuration boundary on 2026-09-08 --
   - name: mediconnect-drug-interactions
     tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
     app_files: [backend_v2/doctor-service (interaction checks), legacy_lambdas/mediconnect-prescription-service]
-    hardcoded: true
+    env_var: TABLE_DRUG_INTERACTIONS
+    hardcoded: false
     status: OK
 
   - name: mediconnect-chat-history
     tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
     app_files: [backend_v2/communication-service, backend_v2/patient-service (GDPR erasure)]
-    hardcoded: true
+    env_var: TABLE_CHAT_HISTORY
+    hardcoded: false
     status: OK
 
   - name: mediconnect-chat-connections
     tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
     app_files: [backend_v2/communication-service (WebSocket connections)]
-    hardcoded: true
+    env_var: TABLE_CHAT_CONNECTIONS
+    hardcoded: false
     status: OK
 
   - name: mediconnect-consent-ledger
     tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
     app_files: [backend_v2/patient-service (GDPR consent, export)]
-    hardcoded: true
+    env_var: TABLE_CONSENT_LEDGER
+    hardcoded: false
     status: OK
 
   - name: mediconnect-knowledge-base
     tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
     app_files: [backend_v2/patient-service, legacy_lambdas/mediconnect-chatbot]
-    hardcoded: true
+    env_var: TABLE_KNOWLEDGE_BASE
+    hardcoded: false
     status: OK
 
   - name: mediconnect-dicom-studies
     tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
     app_files: [backend_v2/dicom-service/services/metadata_store.py]
-    hardcoded: true
+    env_var: TABLE_DICOM_STUDIES
+    hardcoded: false
     status: OK
 
   - name: mediconnect-hl7-messages
     tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
     app_files: [backend_v2/patient-service/src/modules/clinical/hl7.controller.ts]
-    hardcoded: true
+    env_var: TABLE_HL7_MESSAGES
+    hardcoded: false
     status: OK
 
   - name: mediconnect-health-records
     tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
     app_files: [backend_v2/doctor-service, backend_v2/patient-service, legacy_lambdas/mediconnect-ehr-service]
-    hardcoded: true
+    env_var: TABLE_EHR
+    hardcoded: false
     status: OK
 
   - name: mediconnect-pharmacy-inventory
     tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
     app_files: [backend_v2/doctor-service (prescription fulfillment)]
-    hardcoded: true
+    env_var: TABLE_INVENTORY
+    hardcoded: false
     status: OK
 
   # -- Tables only in TF (no app code reference found via grep) --
@@ -628,8 +666,9 @@ ssm:
     status: OK
 
   - path: /mediconnect/stripe/*
+    configuration: "BILLING_STRIPE_PARAMETER_PATH references the preserved parameter path; no resource created or imported. Billing currency/scale are centrally validated; runtime activation and payment-provider reconciliation remain unverified."
     tf_file: environments/prod/ssm_us.tf + ssm_eu.tf
-    app_files: [backend_v2/booking-service/src/index.ts]
+    app_files: [backend_v2/booking-service/src/index.ts, backend_v2/booking-service/src/controllers/billing.controller.ts, backend_v2/shared/settings.ts]
     status: OK
 
   - path: /mediconnect/prod/kms/*
@@ -644,7 +683,7 @@ ssm:
 
   - path: /mediconnect/prod/mqtt/endpoint
     tf_file: environments/prod/ssm_us.tf + ssm_eu.tf
-    app_files: [backend_v2/patient-service/src/modules/iot]
+    app_files: [backend_v2/patient-service/src/modules/iot, backend_v2/patient-service/src/modules/clinical/cda.controller.ts]
     status: OK
 
 # --------------------------------------------------------------------------
@@ -653,7 +692,7 @@ ssm:
 iot:
   - name: mediconnect-wearable (thing type)
     tf_file: environments/prod/iot.tf
-    app_files: [backend_v2/patient-service/src/modules/iot]
+    app_files: [backend_v2/patient-service/src/modules/iot, backend_v2/patient-service/src/modules/clinical/cda.controller.ts]
     status: OK
 
 # --------------------------------------------------------------------------
@@ -879,3 +918,136 @@ gap_summary:
       count: 3
       status: "FIXED — added to ecr.tf (US + EU)"
       fixed_date: "2026-04-06"
+
+# Local-only continuation; no resource creation or migration execution is implied.
+eu_us_privacy_continuation_20260909:
+  status: LOCAL_VERIFICATION_IN_PROGRESS
+  resource_change: "Existing regional patient/audit/clinical tables, buckets and analytics datasets only; no new deployed resources"
+  region_configuration: [PRIVACY_US_REGION, PRIVACY_EU_REGION]
+  privacy_modules: [shared/privacy-operations.ts, shared/privacy-analytics.ts, shared/privacy-refund.ts, shared/fhir-patient.ts]
+  required_followup: "Final source/IaC checks, full affected gates, live integration and independent review"
+  clinical_release: BLOCKED
+
+websocket_ticket_reference:
+  status: CODE_READY
+  deployed: false
+  source: backend_v2/shared/socket-ticket.ts
+  authorizer: backend_v2/ws-authorizer/index.mjs
+  existing_table: mediconnect-chat-connections
+  regions: [us-east-1, eu-central-1]
+  terraform: [environments/prod/apigateway.tf, environments/prod/lambda_us.tf, environments/prod/lambda_eu.tf, environments/prod/dynamodb_us.tf, environments/prod/dynamodb_eu.tf, environments/prod/websocket-ticket-policy.tf]
+  intended_changes: "Single-use tickets, ticket-only expiration attribute, least-privilege conditional-delete authorizer policies"
+  validation: "LOCAL PASS — Terraform validate 0 errors/0 warnings; app/IaC 129/0/0; source ticket tests pass; not deployed"
+
+patient_data_access_followup:
+  recorded_date: "2026-09-09"
+  status: LOCAL_TESTS_PASS_NOT_DEPLOYED
+  source: [backend_v2/shared/patient-access.ts, backend_v2/shared/fhir-vitals.ts]
+  existing_resources: [TABLE_GRAPH, DYNAMO_TABLE, DYNAMO_TABLE_VITALS, TABLE_BB_CONNECTIONS]
+  region_source: "Authenticated US/EU context; PRIVACY_US_REGION and PRIVACY_EU_REGION"
+  new_resources: false
+  deployed: false
+
+api_browser_policy_followup:
+  recorded_date: "2026-09-09"
+  status: LOCAL_TESTS_PASS_NOT_DEPLOYED
+  source: backend_v2/shared/api-browser-policy.ts
+  configuration_owner: backend_v2/shared/settings.ts
+  services: [patient, doctor, booking, communication, staff]
+  new_resources: false
+  deployed: false
+
+monitoring_socket_followup:
+  recorded_date: "2026-09-09"
+  status: LOCAL_BEHAVIORAL_TESTS_PASS_NOT_DEPLOYED
+  source: backend_v2/patient-service/src/modules/iot/monitoring-access.ts
+  existing_resources: [TABLE_GRAPH, DYNAMO_TABLE, MQTT_BROKER_URL]
+  authentication: "Regional Cognito ID-token verification in Socket.IO auth payload; credentials excluded from URL"
+  authorization: "Owner or linked doctor, regional rooms, patient-state and audit checks before each delivery"
+  client_configuration: [VITE_MONITORING_SOCKET_URL_US, VITE_MONITORING_SOCKET_URL_EU]
+  session_configuration: MONITORING_MAX_SESSION_SECONDS
+  new_resources: false
+  deployed: false
+
+sensitive_operation_mfa_followup:
+  recorded_date: "2026-09-09"
+  status: LOCAL_GUARD_TESTS_PASS_PROVIDER_STEP_UP_UNVERIFIED
+  source: backend_v2/patient-service/src/middleware/auth.middleware.ts
+  existing_resources: "Configured regional Cognito user pools and patient/doctor/admin app clients"
+  configuration_owner: backend_v2/shared/settings.ts
+  configuration: SENSITIVE_OPERATION_AUTH_MAX_AGE_SECONDS
+  new_resources: false
+  deployed: false
+  release_requirement: "Establish authentic per-session MFA proof; profile flags, enrollment and remembered devices are insufficient"
+
+vitals_egress_analytics_followup:
+  recorded_date: "2026-09-09"
+  status: LOCAL_BEHAVIORAL_GATES_PASS_SECURITY_REFRESH_RUNNING
+  existing_resources: [DYNAMO_TABLE_VITALS, TABLE_AUDIT, PRIVACY_BQ_IOT_US, PRIVACY_BQ_IOT_EU]
+  configuration: [PRIVACY_BQ_ENDPOINT, PRIVACY_BQ_TIMEOUT_MS, IOT_ANALYTICS_TABLE, MONITORING_HIGH_HEART_RATE_THRESHOLD]
+  new_resources: false
+  deployed: false
+  limitation: "Live provider behavior, durable replay and clinical policy approval remain unverified"
+
+owner_power_loss_stop_20260909t155055z:
+  status: PAUSED_BY_OWNER
+  recorded_utc: "2026-09-09T15:50:55.101854+00:00"
+  verified_local: "Backend65tests/buildsPASS; care-plan/vitals fixes local only; lint warnings remain"
+  unfinished: "Standalone US/EU clinical-route regression fails; planned15-route guards not implemented"
+  recovery: "Umbrella memory/RESUME-ACTIVE.md"
+  new_resources: false
+  deployment_performed: false
+  resume_condition: "Explicit owner request"
+
+clinical_route_access_recovery:
+  recorded_utc: "2026-09-09T17:31:07.037466+00:00"
+  status: LOCAL_FULL_BACKEND_GATES_PASS_REVIEW_PENDING
+  resources: "Existing regional patient, approved-doctor, care-graph and audit tables; no new resource"
+  source: "shared/patient-access-http.ts and patient-service/src/routes/patient.routes.ts"
+  evidence: "Backend67tests/five builds, lint0errors1063warnings, offline18/18, Semgrep408targets0findings0errors, app/IaC129/0/0PASS; installed hook385candidates exit0; independent review pending"
+  deployed: false
+
+local_source_recheck_20260913:
+  terraform_validate: "PASS — installed Windows Terraform, local configuration only"
+  showcase_verifier: "Local source/trigger guards PASS; live parity not checked"
+  app_vs_iac: "129 PASS / 0 FAIL / 0 WARN"
+  evidence: "Private project memory: resume-app-vs-iac-20260913.log"
+  scope: "Local source coverage only; no new live inventory, provenance proof, migration or deployment"
+
+web_backend_priority_recheck_20260913:
+  priority: "Website/backend/CMS/operations first; native mobile development paused by owner"
+  app_vs_iac: "129 PASS / 0 FAIL / 0 WARN"
+  native_inventory: "GCP770 assets; billing metadata read; both configured booking targets matched once"
+  source_provenance: "Two active traffic revisions read; zero selected build annotations or digest-linked source proofs"
+  cms_typecheck: "PASS — local installed TypeScript, no service startup"
+  backend_business_changes: false
+  deployment_performed: false
+  evidence: "Private project memory: web-backend-priority-baseline-20260913.json"
+
+doctor_pharmacy_runtime_discovery:
+  recorded_at: '2026-09-14T20:24:43.470283+00:00'
+  status: READ_ONLY_DISCOVERY_SOURCE_PARITY_BLOCKED
+  native_inventory:
+    gcp_assets: 770
+    gcp_cloud_run_services: 14
+    gcp_billing_metadata: read; enabled
+    aws_resources: 405
+    aws_inventory_complete: true
+    aws_billing: NOT_QUERIED — fresh approval required for one $0.01 request
+    azure: UNAVAILABLE — authentication refresh required
+  doctor_services:
+    count: 2
+    metadata_ready: true
+    traffic_revision_digests: 2
+    source_commit_labels: 0
+    selected_build_annotations: 0
+    artifact_registry: Both exact digest lookups Image not found
+    cloud_build: Four successful exact-digest queries; zero matches
+    github_attestations: Both exact-digest repository queries returned not found
+    template_tag: Both reference 64b995aa859bfa2ebcee125a78239db2e8342dcc; local commit
+      exists; mutable tag is a lead, not immutable source proof
+  runtime_invoked: false
+  backend_application_edited: false
+  infrastructure_mutated: false
+  next: Trace workflow/artifact evidence for observed commit tag; no backend runtime
+    edit before drift reconciliation

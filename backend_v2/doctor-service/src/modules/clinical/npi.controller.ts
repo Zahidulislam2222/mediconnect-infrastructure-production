@@ -1,13 +1,11 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 import { Request, Response } from "express";
 import { writeAuditLog } from '../../../../shared/audit';
 import { safeError } from '../../../../shared/logger';
 
 const NPPES_BASE = "https://npiregistry.cms.hhs.gov/api";
 
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 interface NPPESResult {
     npi: string;

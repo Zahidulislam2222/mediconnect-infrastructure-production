@@ -2,13 +2,24 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, PutCommand, ScanCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { BedrockRuntimeClient, InvokeModelCommand } from "@aws-sdk/client-bedrock-runtime";
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-const bedrock = new BedrockRuntimeClient({ region: "us-east-1" });
+const requireEnv = (name) => {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`Missing required configuration: ${name}`);
+  return value;
+};
+
+const region = requireEnv("AWS_REGION");
+const chatHistoryTable = requireEnv("TABLE_CHAT_HISTORY");
+const knowledgeBaseTable = requireEnv("TABLE_KNOWLEDGE_BASE");
+const bedrockModelId = requireEnv("BEDROCK_MODEL_ID");
+const allowedOrigin = requireEnv("ALLOWED_ORIGIN");
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region }));
+const bedrock = new BedrockRuntimeClient({ region });
 
 export const handler = async (event) => {
   // CORS Headers are mandatory for Frontend access
   const headers = {
-    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Origin": allowedOrigin,
     "Access-Control-Allow-Headers": "Content-Type,Authorization",
     "Access-Control-Allow-Methods": "OPTIONS,GET,POST"
   };
@@ -28,7 +39,7 @@ export const handler = async (event) => {
 
         // Query DynamoDB for the chat thread
         const historyData = await ddb.send(new QueryCommand({
-            TableName: "mediconnect-chat-history",
+            TableName: chatHistoryTable,
             KeyConditionExpression: "conversationId = :cid",
             ExpressionAttributeValues: { ":cid": conversationId },
             ScanIndexForward: true // true = oldest first (timeline order)
@@ -49,12 +60,12 @@ export const handler = async (event) => {
         const { message, patientId } = body;
 
         // Fetch Knowledge Base
-        const dbData = await ddb.send(new ScanCommand({ TableName: "mediconnect-knowledge-base" }));
+        const dbData = await ddb.send(new ScanCommand({ TableName: knowledgeBaseTable }));
         const knowledgeContext = dbData.Items ? dbData.Items.map(item => item.content).join("\n") : "";
 
         // AI Inference (Bedrock)
         const input = {
-          modelId: "amazon.nova-2-lite-v1:0", 
+          modelId: bedrockModelId,
           contentType: "application/json",
           accept: "application/json",
           body: JSON.stringify({
@@ -75,7 +86,7 @@ export const handler = async (event) => {
 
         // Save AI Interaction
         await ddb.send(new PutCommand({
-            TableName: "mediconnect-chat-history",
+            TableName: chatHistoryTable,
             Item: {
                 conversationId: `AI#${patientId}`, // Segregated ID for AI chats
                 timestamp: new Date().toISOString(),

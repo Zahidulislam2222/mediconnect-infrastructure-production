@@ -44,6 +44,8 @@ module "dynamodb_eu" {
     }
 
     "mediconnect-chat-connections" = {
+      ttl_enabled            = true
+      ttl_attribute          = "ticketExpiresAt"
       hash_key               = "connectionId"
       deletion_protection    = true
       point_in_time_recovery = true
@@ -345,8 +347,8 @@ module "dynamodb_eu" {
       point_in_time_recovery = true
       global_secondary_indexes = [
         {
-          name     = "StatusIndex"
-          hash_key = "status"
+          name      = "StatusIndex"
+          hash_key  = "status"
           range_key = "periodEndPayoutId"
         },
       ]
@@ -363,8 +365,8 @@ module "dynamodb_eu" {
       ttl_attribute          = "ttl"
       global_secondary_indexes = [
         {
-          name     = "PatientIndex"
-          hash_key = "patientId"
+          name      = "PatientIndex"
+          hash_key  = "patientId"
           range_key = "createdAt"
         },
       ]

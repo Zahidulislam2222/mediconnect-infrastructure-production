@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 // ─── FEATURE #11: eCR (Electronic Case Reporting) ──────────────────────────
 // Reportable condition triggers (COVID-19, TB, measles, hepatitis, STIs).
 // Generates eICR documents as FHIR Composition resources.
@@ -11,14 +12,12 @@ import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
 import { safeError } from '../../../../shared/logger';
 import { validateUSCore } from '../../../../shared/us-core-profiles';
+import { setting } from '../../../../shared/settings';
 
-const TABLE = process.env.TABLE_ECR || 'mediconnect-ecr-reports';
-const TABLE_PATIENTS = process.env.DYNAMO_TABLE || 'mediconnect-patients';
+const TABLE = setting("TABLE_ECR");
+const TABLE_PATIENTS = setting("DYNAMO_TABLE");
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── Reportable Conditions (CDC RCTC — Reportable Condition Trigger Codes) ─
 
@@ -299,7 +298,7 @@ export const listECRs = async (req: Request, res: Response) => {
 
         const db = getRegionalClient(region);
 
-        let filterParts: string[] = [];
+        const filterParts: string[] = [];
         const values: any = {};
 
         if (patientId) {

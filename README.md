@@ -1,26 +1,40 @@
 # MediConnect — Enterprise Healthcare Infrastructure
 
+> **Start here: [engineering reviewer guide](REVIEWER-GUIDE.md).** It separates historical
+> operation, retained inactive infrastructure, locally tested code and future scale targets.
+> The historical feature inventory below is preserved; it is not a current deployment or
+> compliance certificate. [Capacity and reliability design](architecture/CAPACITY-AND-RELIABILITY.md)
+> records the1M+ concurrency objective and the validation still required.
+
 <div align="center">
 
-![Status](https://img.shields.io/badge/Status-Production-brightgreen)
-![HIPAA](https://img.shields.io/badge/HIPAA-Compliant-22C55E)
-![GDPR](https://img.shields.io/badge/GDPR-Compliant-3B82F6)
+![Status](https://img.shields.io/badge/Status-Portfolio_Showcase-2563EB)
+![HIPAA](https://img.shields.io/badge/HIPAA-Control_Implementation-22C55E)
+![GDPR](https://img.shields.io/badge/GDPR-Control_Implementation-3B82F6)
 ![FHIR](https://img.shields.io/badge/FHIR_R4-35_Resources-8B5CF6)
-![SOC 2](https://img.shields.io/badge/SOC_2-96%25-22C55E)
+![SOC 2](https://img.shields.io/badge/SOC_2-Control_Mapping-22C55E)
 ![HL7](https://img.shields.io/badge/HL7_v2.5.1-4_Message_Types-E11D48)
 ![SMART](https://img.shields.io/badge/SMART_on_FHIR-2.0-06B6D4)
 ![Cloud](https://img.shields.io/badge/Cloud-AWS%20%7C%20GCP%20%7C%20Azure-F97316)
 ![IaC](https://img.shields.io/badge/Terraform-414_Resources-7B42BC)
-![Cost](https://img.shields.io/badge/Idle%20Cost-%241%2Fmo-22C55E)
+![Cloud Runtime](https://img.shields.io/badge/Cloud_Runtime-Intentionally_Retired-64748B)
 ![Tests](https://img.shields.io/badge/Tests-650%2B_Assertions-22C55E)
 ![Scans](https://img.shields.io/badge/Compliance_Scans-20_Frameworks-06B6D4)
 ![Kafka](https://img.shields.io/badge/Kafka-7_Topics-000000)
 ![LightRAG](https://img.shields.io/badge/LightRAG-Graph_RAG-FF6B35)
 
-**Production-grade, multi-cloud healthcare backend with 7 microservices, 4 Lambda functions, 35 FHIR R4 resource types, Kafka event streaming, and AI-powered chatbot.**
-**Forensically verified HIPAA / GDPR / HL7 FHIR R4 / SOC 2 / ISO 27001 / PCI-DSS / NIST 800-53 / EU AI Act compliance — proven in code, scans, and tests.**
+**Portfolio implementation of a multi-cloud healthcare backend with 7 microservices, 4 Lambda functions, 35 FHIR R4 resource types, Kafka event streaming, and an AI-assisted chatbot.**
+
+> **Current operating status (verified 2026-09-08):** the Kubernetes, Terraform, CI/CD,
+> database, Secrets Manager, and multi-cloud definitions are intentionally retained as engineering
+> evidence. Costly cloud resources were removed by the owner and these definitions are not proof
+> that those services are currently running. The GitHub cloud-deployment workflow is disabled and
+> cloud targets default off. Re-enabling or applying this infrastructure can incur cloud charges.
+> Control implementations and historical scan results are not compliance certification.
 
 [Live Demo](https://askme-82f72.web.app) · [Frontend Repo](https://github.com/Zahidulislam2222/mediconnect-hub) · [Author](https://zahidul-islam.vercel.app)
+
+[Current infrastructure/showcase status](SHOWCASE-STATUS.md)
 
 </div>
 
@@ -47,7 +61,12 @@
 
 ## Overview
 
-MediConnect is a **production-grade global telemedicine platform** built on a three-cloud Zero-Cost Idle architecture. It handles the complete clinical lifecycle — from patient registration with biometric identity verification through AI-assisted consultations, e-prescriptions with RxNorm drug interaction checking, DICOM medical imaging, prior authorization workflows, to population health analytics via FHIR Bulk $export.
+MediConnect is a **production-oriented portfolio implementation** of a global telemedicine platform
+designed around a three-cloud architecture. The repository preserves the complete clinical and
+infrastructure design even where the corresponding paid cloud resources are intentionally absent.
+It covers the clinical lifecycle from patient registration and identity verification through
+AI-assisted consultations, e-prescriptions, DICOM imaging, prior authorization workflows, and FHIR
+Bulk Data export.
 
 ### Key Engineering Achievements
 
@@ -55,17 +74,17 @@ MediConnect is a **production-grade global telemedicine platform** built on a th
 |------------|--------|
 | **35 FHIR R4 Resource Types** | Full interoperability layer with US Core profile validation on all write paths |
 | **10 Terminology Systems** | ICD-10-CM, ICD-11, SNOMED CT, LOINC, RxNorm, CVX, CPT/HCPCS, NDC, NPI, DEA |
-| **Multi-Cloud Failover** | Active-active AKS/EKS clusters with automatic GCP Cloud Run failover (5s) |
-| **Zero-Cost Idle** | ~$1/month when no users active (vs ~$300/month traditional always-on) |
+| **Multi-Cloud Failover** | Retained AKS/EKS and GCP Cloud Run failover implementation; not currently verified live |
+| **Cost-controlled retirement** | Costly cloud resources intentionally removed; no current operating-cost claim |
 | **AI Circuit Breaker** | AWS Bedrock → GCP Vertex AI → Azure OpenAI for 99.99% AI availability |
 | **Multi-Region Data Residency** | US data in `us-east-1`, EU data in `eu-central-1` — GDPR Schrems II compliant |
 | **650+ Automated Assertions** | 12 backend TS + 12 Python + 4 frontend + 125 compliance + 4 verification scripts |
-| **414 Terraform Resources** | Full IaC coverage across AWS (370), GCP (40), Azure (4) — 129 PASS / 0 FAIL verify |
+| **Terraform portfolio** | 154 resource blocks and 16 module blocks retained; current remote state read found 412 addresses, while live/state parity is not established |
 | **20 Compliance Framework Scans** | Prowler + Checkov + Trivy + Healthcare Scanner across all 3 clouds |
 | **Kafka Event Streaming** | 7 topics, MSK Serverless (US + EU), feature-flagged alongside SQS |
 | **AI Chatbot (LightRAG)** | Graph-based RAG, rate limiting per tier, PII scrubbing, Redis caching |
 | **Subscription System** | Discount Pass model (Plus $19/mo, Premium $39/mo), Stripe Connect payouts |
-| **0 npm Vulnerabilities** | OIDC Workload Identity replacing all static keys |
+| **Keyless deployment design** | OIDC workload-identity implementation retained; current vulnerability status must be established by a fresh scan |
 
 ---
 

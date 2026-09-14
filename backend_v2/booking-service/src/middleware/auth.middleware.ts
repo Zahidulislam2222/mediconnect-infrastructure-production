@@ -1,3 +1,4 @@
+import { resolveAuthRegion } from '../../../shared/region-context';
 import { Request, Response, NextFunction } from 'express';
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import { COGNITO_CONFIG } from '../../../shared/aws-config';
@@ -11,16 +12,12 @@ const verifiers: Record<string, any> = {
 };
 
 // Standardized Region Extractor
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    const r = Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-    return r.toUpperCase().includes('EU') ? 'eu-central-1' : 'us-east-1';
-};
+const extractRegion = (req: Request): string => resolveAuthRegion(req.headers['x-user-region']);
 
 const getVerifier = async (region: string) => {
     if (verifiers[region]) return verifiers[region];
 
-    const regionKey = region === 'eu-central-1' ? 'EU' : 'US';
+    const regionKey = resolveAuthRegion(region);
     const config = COGNITO_CONFIG[regionKey];
 
     if (!config.USER_POOL_ID || !config.CLIENT_PATIENT) {
@@ -51,6 +48,7 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
 
         // 🔐 Cryptographic Verification
         const payload = await v.verify(token);
+        req.headers['x-user-region'] = region;
 
         // 🟢 UNIFORMITY FIX: Align roles and IDs with all other microservices
         const groups = (payload['cognito:groups'] as string[]) || [];
@@ -70,11 +68,11 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
     } catch (err: any) {
         // 🟢 HIPAA AUDIT: Log the specific service failure
         const ip = req.ip || req.headers['x-forwarded-for'] || 'UNKNOWN';
-        const region = extractRegion(req);
+        const region = (req as any).user?.region;
         
         safeError(`Booking Auth Failed [${region}]: ${err.message}`);
         
-        if (!err.message.includes('expired')) {
+        if (region && !err.message.includes('expired')) {
             await writeAuditLog(
                 "SYSTEM", 
                 "BOOKING", 

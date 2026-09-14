@@ -1,17 +1,16 @@
+import { requestJurisdiction } from '../../../shared/region-context';
 import { Request, Response } from 'express';
 import { getRegionalClient } from '../../../shared/aws-config';
 import { PutCommand, QueryCommand, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { writeAuditLog } from '../../../shared/audit';
 import { safeError } from '../../../shared/logger';
 import { v4 as uuidv4 } from 'uuid';
+import { setting } from '../../../shared/settings';
 
-const TABLE_APPOINTMENTS = process.env.TABLE_APPOINTMENTS || "mediconnect-appointments";
-const TABLE_TRANSACTIONS = process.env.TABLE_TRANSACTIONS || "mediconnect-transactions";
+const TABLE_APPOINTMENTS = setting("TABLE_APPOINTMENTS");
+const TABLE_TRANSACTIONS = setting("TABLE_TRANSACTIONS");
 
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // --- Built-in CPT Code Reference ---
 // AMA CPT license required for full database; these are commonly used codes

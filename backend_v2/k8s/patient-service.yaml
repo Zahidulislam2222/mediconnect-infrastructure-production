@@ -51,6 +51,18 @@ spec:
               value: "__AWS_ROLE_ARN__"
             - name: AWS_WEB_IDENTITY_TOKEN_FILE
               value: "__TOKEN_FILE__"
+            - name: TABLE_CHAT_HISTORY
+              value: "__TABLE_CHAT_HISTORY__"
+            - name: TABLE_CONSENT_LEDGER
+              value: "__TABLE_CONSENT_LEDGER__"
+            - name: TABLE_KNOWLEDGE_BASE
+              value: "__TABLE_KNOWLEDGE_BASE__"
+            - name: TABLE_DICOM_STUDIES
+              value: "__TABLE_DICOM_STUDIES__"
+            - name: TABLE_HL7_MESSAGES
+              value: "__TABLE_HL7_MESSAGES__"
+            - name: TABLE_EHR
+              value: "__TABLE_EHR__"
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/var/run/secrets/gcp/gcp-wif-config.json"
 

@@ -6,8 +6,14 @@ import { ChimeSDKMediaPipelinesClient, DeleteMediaCapturePipelineCommand } from 
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, ScanCommand } from "@aws-sdk/lib-dynamodb";
 
-// AWS_REGION set automatically by Lambda runtime
-const REGION = process.env.AWS_REGION || "us-east-1";
+const requireEnv = (name) => {
+    const value = process.env[name]?.trim();
+    if (!value) throw new Error(`Missing required configuration: ${name}`);
+    return value;
+};
+
+// AWS_REGION is set automatically by Lambda runtime.
+const REGION = requireEnv("AWS_REGION");
 
 // Regional clients (matches shared/aws-config.ts factory pattern)
 const chimeClient = new ChimeSDKMediaPipelinesClient({ region: REGION });
@@ -16,7 +22,7 @@ const ddb = DynamoDBDocumentClient.from(
     { marshallOptions: { removeUndefinedValues: true, convertEmptyValues: true } }
 );
 
-const TABLE_SESSIONS = process.env.TABLE_SESSIONS || "mediconnect-video-sessions";
+const TABLE_SESSIONS = requireEnv("TABLE_SESSIONS");
 
 export const handler = async (event) => {
     const detail = event.detail;

@@ -5,6 +5,7 @@ import { getRegionalClient } from '../../../../shared/aws-config';
 import { PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { v4 as uuidv4 } from "uuid";
 import { writeAuditLog } from '../../../../shared/audit';
+import { TABLE_NAMES, setting } from '../../../../shared/settings';
 
 // 1. UPLOAD SCAN
 export const uploadDicom = async (req: Request, res: Response) => {
@@ -13,7 +14,7 @@ export const uploadDicom = async (req: Request, res: Response) => {
     
     if (!file) return res.status(400).json({ error: "No DICOM file provided" });
 
-    const dicomServiceUrl = process.env.DICOM_SERVICE_URL || 'http://dicom-service:80/api/v1/upload';
+    const dicomServiceUrl = setting("DICOM_SERVICE_URL");
 
     try {
         const formData = new FormData();
@@ -34,7 +35,7 @@ export const uploadDicom = async (req: Request, res: Response) => {
 
         const db = getRegionalClient(user.region);
         await db.send(new PutCommand({
-            TableName: process.env.TABLE_EHR || "mediconnect-health-records",
+            TableName: TABLE_NAMES.ehr,
             Item: {
                 patientId: user.sub,
                 recordId: uuidv4(),
@@ -63,7 +64,7 @@ export const getPatientScans = async (req: Request, res: Response) => {
     const db = getRegionalClient(user.region);
     
     const cmd = new QueryCommand({
-        TableName: "mediconnect-health-records",
+        TableName: TABLE_NAMES.ehr,
         KeyConditionExpression: "patientId = :pid",
         FilterExpression: "#type = :type",
         ExpressionAttributeNames: { "#type": "type" },

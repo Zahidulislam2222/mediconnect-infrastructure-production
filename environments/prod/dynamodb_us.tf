@@ -14,8 +14,8 @@ module "dynamodb_us" {
       stream_view_type       = "NEW_AND_OLD_IMAGES"
       global_secondary_indexes = [
         {
-          name     = "StatusIndex"
-          hash_key = "status"
+          name      = "StatusIndex"
+          hash_key  = "status"
           range_key = "createdAt"
         },
         {
@@ -44,6 +44,8 @@ module "dynamodb_us" {
     }
 
     "mediconnect-chat-connections" = {
+      ttl_enabled            = true
+      ttl_attribute          = "ticketExpiresAt"
       hash_key               = "connectionId"
       deletion_protection    = true
       point_in_time_recovery = true
@@ -121,7 +123,7 @@ module "dynamodb_us" {
       deletion_protection    = true
       point_in_time_recovery = true
       stream_enabled         = true
-      stream_view_type = "NEW_IMAGE"
+      stream_view_type       = "NEW_IMAGE"
       global_secondary_indexes = [
         {
           name      = "DoctorIndex"
@@ -350,8 +352,8 @@ module "dynamodb_us" {
       point_in_time_recovery = true
       global_secondary_indexes = [
         {
-          name     = "StatusIndex"
-          hash_key = "status"
+          name      = "StatusIndex"
+          hash_key  = "status"
           range_key = "periodEndPayoutId"
         },
       ]
@@ -368,8 +370,8 @@ module "dynamodb_us" {
       ttl_attribute          = "ttl"
       global_secondary_indexes = [
         {
-          name     = "PatientIndex"
-          hash_key = "patientId"
+          name      = "PatientIndex"
+          hash_key  = "patientId"
           range_key = "createdAt"
         },
       ]

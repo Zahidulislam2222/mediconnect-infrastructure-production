@@ -5,8 +5,17 @@
 import https from "https";
 import http from "http";
 
-const REGION = process.env.AWS_REGION || "us-east-1";
-const TIMEOUT_MS = parseInt(process.env.PROXY_TIMEOUT_MS || "5000", 10);
+const requireEnv = (name) => {
+    const value = process.env[name]?.trim();
+    if (!value) throw new Error(`Missing required configuration: ${name}`);
+    return value;
+};
+
+const REGION = requireEnv("AWS_REGION");
+const TIMEOUT_MS = Number.parseInt(requireEnv("PROXY_TIMEOUT_MS"), 10);
+if (!Number.isSafeInteger(TIMEOUT_MS) || TIMEOUT_MS <= 0) {
+    throw new Error("Invalid positive integer configuration: PROXY_TIMEOUT_MS");
+}
 
 function makeRequest(url, method, body, originalHeaders) {
     return new Promise((resolve, reject) => {

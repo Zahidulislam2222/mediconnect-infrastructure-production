@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 import { Request, Response } from "express";
 import { PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
@@ -9,20 +10,18 @@ import { getRegionalClient, getRegionalS3Client } from '../../../../shared/aws-c
 import { writeAuditLog } from '../../../../shared/audit';
 import { safeError } from '../../../../shared/logger';
 import { validateUSCore } from '../../../../shared/us-core-profiles';
+import { TABLE_NAMES, setting } from '../../../../shared/settings';
 
-const TABLE_EHR = "mediconnect-health-records";
+const TABLE_EHR = TABLE_NAMES.ehr;
 
 // 🟢 COMPILER FIX: Safely extract region string
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // Helper: Resolve Bucket Name based on Region
 const getBucketName = (region: string) => {
     return region.toUpperCase().includes('EU') 
-        ? (process.env.EHR_BUCKET_EU || "mediconnect-ehr-records-eu")
-        : (process.env.EHR_BUCKET_US || "mediconnect-ehr-records");
+        ? (setting("EHR_BUCKET_EU"))
+        : (setting("EHR_BUCKET_US"));
 };
 
 export const getUploadUrl = async (req: Request, res: Response) => {
@@ -127,7 +126,7 @@ export const handleEhrAction = async (req: Request, res: Response) => {
 
     try {
         switch (action) {
-            case "list_records":
+            case "list_records":{
                 const listCmd = new QueryCommand({
                     TableName: TABLE_EHR,
                     KeyConditionExpression: "patientId = :pid",
@@ -150,8 +149,9 @@ export const handleEhrAction = async (req: Request, res: Response) => {
 
                 await writeAuditLog(authUser.sub, patientId, "ACCESS_LIST", `Viewed ${items.length} records`, { region: userRegion, ipAddress: req.ip });
                 return res.json(processedItems);
+}
 
-            case "add_clinical_note":
+            case "add_clinical_note":{
                 const { note, title, fileName, icd10Code, icd10Display } = req.body;
                 const noteId = uuidv4();
 
@@ -204,8 +204,9 @@ export const handleEhrAction = async (req: Request, res: Response) => {
 
                 await writeAuditLog(authUser.sub, patientId, "CREATE_FHIR_RESOURCE", `Resource: ClinicalImpression/${noteId}`, { region: userRegion, ipAddress: req.ip });
                 return res.json({ success: true, fhirId: noteId });
+}
 
-            case "save_record_metadata":
+            case "save_record_metadata":{
                 const { fileName: fName, fileType, s3Key, description } = req.body;
                 const recordId = uuidv4();
                 
@@ -246,10 +247,11 @@ export const handleEhrAction = async (req: Request, res: Response) => {
 
                 await writeAuditLog(authUser.sub, patientId, "UPLOAD_FILE", `File: ${fName} saved`, { region: userRegion, ipAddress: req.ip });
                 return res.json({ success: true, recordId });
+}
 
             // 🟢 GDPR FIX: Right to Erasure (Soft Delete)
             // Allows patient to 'delete' view, but maintains HIPAA retention in backend
-            case "delete_record":
+            case "delete_record":{
                 const { recordIdToDelete } = req.body;
                 if (!recordIdToDelete) return res.status(400).json({ error: "Missing recordId" });
                 
@@ -268,6 +270,7 @@ export const handleEhrAction = async (req: Request, res: Response) => {
 
                 await writeAuditLog(authUser.sub, patientId, "DELETE_RECORD", `Soft deleted record ${recordIdToDelete}`, { region: userRegion, ipAddress: req.ip });
                 return res.json({ success: true, message: "Record removed from view." });
+}
 
             case "request_upload":
                 return getUploadUrl(req, res);

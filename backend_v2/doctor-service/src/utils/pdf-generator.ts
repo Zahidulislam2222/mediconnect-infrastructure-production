@@ -2,7 +2,8 @@ import PDFDocument from "pdfkit";
 import { PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { SignCommand } from "@aws-sdk/client-kms";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
-import { v4 as uuidv4 } from "uuid";
+import { v4 as uuidv4 } from "uuid";
+import { setting } from '../../../shared/settings';
 
 import { 
     getRegionalS3Client, 
@@ -31,8 +32,8 @@ export class PDFGenerator {
         const s3Client = getRegionalS3Client(region);
         const isEU = region.toUpperCase() === 'EU' || region === 'eu-central-1';
         const bucketName = isEU 
-            ? (process.env.S3_BUCKET_PRESCRIPTIONS_EU || "mediconnect-prescriptions-eu")
-            : (process.env.S3_BUCKET_PRESCRIPTIONS_US || "mediconnect-prescriptions");
+            ? (setting("S3_BUCKET_PRESCRIPTIONS_EU"))
+            : (setting("S3_BUCKET_PRESCRIPTIONS_US"));
 
         const s3Key = `prescriptions/${data.prescriptionId}.pdf`;
         await s3Client.send(new PutObjectCommand({

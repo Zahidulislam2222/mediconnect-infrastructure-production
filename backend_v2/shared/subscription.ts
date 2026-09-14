@@ -15,6 +15,7 @@
  */
 
 import { z } from 'zod';
+import { setting } from './settings';
 
 // ─── SUBSCRIPTION PLANS ─────────────────────────────────────────────────
 
@@ -152,8 +153,8 @@ export const GP_SPECIALTIES = [
 
 // ─── DynamoDB TABLE NAMES ───────────────────────────────────────────────
 
-export const TABLE_SUBSCRIPTIONS = process.env.TABLE_SUBSCRIPTIONS || 'mediconnect-subscriptions';
-export const TABLE_DOCTOR_PAYOUTS = process.env.TABLE_DOCTOR_PAYOUTS || 'mediconnect-doctor-payouts';
+export const TABLE_SUBSCRIPTIONS = setting("TABLE_SUBSCRIPTIONS");
+export const TABLE_DOCTOR_PAYOUTS = setting("TABLE_DOCTOR_PAYOUTS");
 
 // ─── TYPES — DynamoDB Records ───────────────────────────────────────────
 

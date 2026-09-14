@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../shared/region-context';
 import { Request, Response, NextFunction } from 'express';
 import { getRegionalClient, getSecret, getSSMParameter } from '../../../shared/aws-config';
 import { PutCommand, QueryCommand, GetCommand, DeleteCommand, TransactWriteCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
@@ -12,6 +13,8 @@ import { google } from 'googleapis';
 import { pushAppointmentToBigQuery, pushRevenueToBigQuery } from './billing.controller';
 import { sendNotification } from '../../../shared/notifications';
 import { publishEvent, EventType } from '../../../shared/event-bus';
+
+import { setting } from '../../../shared/settings';
 import {
     PlanId,
     SubscriptionStatus,
@@ -32,12 +35,12 @@ interface AuthRequest extends Request {
     };
 }
 
-const TABLE_APPOINTMENTS = process.env.TABLE_APPOINTMENTS || "mediconnect-appointments";
-const TABLE_LOCKS = process.env.TABLE_LOCKS || "mediconnect-booking-locks";
-const TABLE_PATIENTS = process.env.TABLE_PATIENTS || "mediconnect-patients";
-const TABLE_DOCTORS = process.env.TABLE_DOCTORS || "mediconnect-doctors"; // 🟢 Replaced Postgres
-const TABLE_TRANSACTIONS = process.env.TABLE_TRANSACTIONS || "mediconnect-transactions";
-const TABLE_GRAPH = process.env.TABLE_GRAPH || "mediconnect-graph-data";
+const TABLE_APPOINTMENTS = setting("TABLE_APPOINTMENTS");
+const TABLE_LOCKS = setting("TABLE_LOCKS");
+const TABLE_PATIENTS = setting("TABLE_PATIENTS");
+const TABLE_DOCTORS = setting("TABLE_DOCTORS"); // 🟢 Replaced Postgres
+const TABLE_TRANSACTIONS = setting("TABLE_TRANSACTIONS");
+const TABLE_GRAPH = setting("TABLE_GRAPH");
 const STRIPE_SECRET_NAME = "/mediconnect/stripe/keys";
 const CLEANUP_SECRET_PARAM = "/mediconnect/prod/cleanup/secret";
 
@@ -52,10 +55,7 @@ const catchAsync = (fn: any) => (req: Request, res: Response, next: NextFunction
 };
 
 // 🟢 GDPR FIX: Strictly route DB calls to the user's legal jurisdiction
-export const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
+export const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // --- CONTROLLER METHODS ---
 
@@ -65,7 +65,6 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
     
     let stripeInstance: Stripe | null = null;
     let paymentIntentId: string | null = null;
-    let lockKey: string | null = null;
 
     const { patientName, doctorId, doctorName, timeSlot, paymentToken, priority = "Low", reason = "General Checkup" } = req.body;
 
@@ -83,14 +82,12 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         return res.status(400).json({ message: "Security Block: Cannot book appointments in the past." });
     }
     
-    lockKey = `${doctorId}#${normalizedTime}`;
+    const lockKey = `${doctorId}#${normalizedTime}`;
     const transactionId = randomUUID();
     const appointmentId = randomUUID();
     const timestamp = new Date().toISOString();
 
     let patientAge = "N/A";
-    let patientAvatar: string | null = null;
-    let amountToCharge = 5000; 
 
     const [patientRes, doctorRes] = await Promise.all([
         docClient.send(new GetCommand({ TableName: TABLE_PATIENTS, Key: { patientId } })),
@@ -105,10 +102,21 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         return res.status(404).json({ message: "Doctor is currently unavailable or unverified." });
     }
 
+    // Encryption availability is checked before reserving a slot or contacting the payment provider.
+    let encryptedPatientName: string;
+    let encryptedDoctorName: string;
+    try {
+        const names = await encryptPHI({ patientName: patientRes.Item.name, doctorName: doctorRes.Item.name }, region);
+        encryptedPatientName = names.patientName;
+        encryptedDoctorName = names.doctorName;
+    } catch {
+        return res.status(503).json({ code: 'PHI_ENCRYPTION_UNAVAILABLE', error: 'Protected booking data could not be saved.' });
+    }
+
     // Safely extract data
     const actualPatientName = patientRes.Item.name || patientName || "Unknown Patient";
     const actualDoctorName = doctorRes.Item.name || doctorName || "Medical Provider";
-    patientAvatar = patientRes.Item.avatar || null;
+    const patientAvatar = patientRes.Item.avatar || null;
     if (patientRes.Item.dob) {
         const dob = new Date(patientRes.Item.dob);
         patientAge = Math.abs(new Date(Date.now() - dob.getTime()).getUTCFullYear() - 1970).toString();
@@ -119,7 +127,7 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
     // ─── SUBSCRIPTION DISCOUNT CHECK (Loophole #2: server-side only) ────────
     // Read subscription from DB, NEVER from JWT or client request (loophole #10)
     let discountApplied = 0;
-    let originalPrice = fee;
+    const originalPrice = fee;
     let isFreeGpVisit = false;
     let subscriptionId: string | undefined;
 
@@ -129,7 +137,7 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
             TableName: TABLE_SUBSCRIPTIONS,
             Key: { patientId },
         }));
-        let sub = subResult.Item as SubscriptionRecord | undefined;
+        const sub = subResult.Item as SubscriptionRecord | undefined;
 
         // If no direct subscription, check if patient is a family member on someone else's plan
         if (!sub || sub.status !== SubscriptionStatus.ACTIVE) {
@@ -169,7 +177,7 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         logger.warn(`Subscription check failed for ${patientId}: ${subErr.message}`);
     }
 
-    amountToCharge = Math.round(fee * 100);
+    const amountToCharge = Math.round(fee * 100);
 
     // 2. Atomic Locking (Condition: attribute_not_exists)
     // ─── LOCK TTL FIX ──────────────────────────────────────────────────────
@@ -277,30 +285,16 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         } catch (captureError: any) {
             // Capture failed — release lock, do NOT write to DB
             logger.error("Payment capture failed. Releasing lock.", { appointmentId, paymentIntentId, error: captureError.message });
-            try { await stripeInstance.paymentIntents.cancel(paymentIntentId); } catch (e) { }
+            try { await stripeInstance.paymentIntents.cancel(paymentIntentId); } catch { logger.warn('BOOKING_COMPENSATION_FAILED'); }
             if (lockKey) {
-                try { await docClient.send(new DeleteCommand({ TableName: TABLE_LOCKS, Key: { lockId: lockKey } })); } catch (e) { }
+                try { await docClient.send(new DeleteCommand({ TableName: TABLE_LOCKS, Key: { lockId: lockKey } })); } catch { logger.warn('BOOKING_COMPENSATION_FAILED'); }
             }
             return res.status(402).json({ error: "Payment capture failed. Your card was not charged.", details: captureError.message });
         }
     }
 
-    // Step 2: TransactWriteItems (Atomic Commit to Regional DB) — only after payment confirmed
-    // FIX #7: Encrypt PHI (patient/doctor names) before storing in DynamoDB
-    let encryptedPatientName = actualPatientName;
-    let encryptedDoctorName = actualDoctorName;
-    try {
-        const encryptedNames = await encryptPHI({ patientName: actualPatientName, doctorName: actualDoctorName }, region);
-        encryptedPatientName = encryptedNames.patientName;
-        encryptedDoctorName = encryptedNames.doctorName;
-        // Update FHIR resource participant display names with encrypted values
-        if (fhirResource && Array.isArray(fhirResource.participant)) {
-            fhirResource.participant[0].actor.display = encryptedPatientName;
-            fhirResource.participant[1].actor.display = encryptedDoctorName;
-        }
-    } catch (encErr: any) {
-        logger.error("[BOOKING] PHI encryption failed, storing plaintext as fallback", { error: encErr.message });
-    }
+    fhirResource.participant[0].actor.display = encryptedPatientName;
+    fhirResource.participant[1].actor.display = encryptedDoctorName;
 
     try {
         await docClient.send(new TransactWriteCommand({
@@ -459,7 +453,7 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
             }
         }
         if (lockKey) {
-            try { await docClient.send(new DeleteCommand({ TableName: TABLE_LOCKS, Key: { lockId: lockKey } })); } catch (e) { }
+            try { await docClient.send(new DeleteCommand({ TableName: TABLE_LOCKS, Key: { lockId: lockKey } })); } catch { logger.warn('BOOKING_COMPENSATION_FAILED'); }
         }
         res.status(500).json({ error: "System Error. Your payment has been refunded." });
     }
@@ -529,7 +523,7 @@ export const getAppointments = catchAsync(async (req: Request, res: Response) =>
 
     let exclusiveStartKey: any = undefined;
     if (startKey) {
-        try { exclusiveStartKey = JSON.parse(decodeURIComponent(startKey as string)); } catch (e) { }
+        try { exclusiveStartKey = JSON.parse(decodeURIComponent(startKey as string)); } catch { logger.warn('BOOKING_COMPENSATION_FAILED'); }
     }
 
     if (patientId) {
@@ -724,7 +718,7 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
     }
 
     // 2. Update Appointment Status
-    let fhirResource = apt.resource;
+    const fhirResource = apt.resource;
     if (fhirResource) {
         fhirResource.status = "cancelled";
         fhirResource.cancelationReason = { coding: [{ system: "http://terminology.hl7.org/CodeSystem/appointment-cancellation-reason", code: "pat", display: "Patient" }], text: "Cancelled by patient" };
@@ -804,7 +798,7 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
 
             // Only delete graph-data if no other active appointments exist
             if (!otherApts.Items || otherApts.Items.length === 0) {
-                const graphTable = process.env.TABLE_GRAPH || 'mediconnect-graph-data';
+                const graphTable = setting("TABLE_GRAPH");
                 // Delete PATIENT→DOCTOR relationship
                 await docClient.send(new DeleteCommand({
                     TableName: graphTable,
@@ -977,7 +971,7 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
     await decryptAppointmentNames(apt, region);
     try {
         // 1. FHIR & DYNAMODB CRASH FIX
-        let fhirResource = apt.resource;
+        const fhirResource = apt.resource;
         if (fhirResource) {
             fhirResource.status = "cancelled"; 
             if (Array.isArray(fhirResource.participant)) {
@@ -985,7 +979,7 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
             }
         }
 
-        let updateExpression = "set #s = :s, refundId = :r, lastUpdated = :now, #res = :resource";
+        const updateExpression = "set #s = :s, refundId = :r, lastUpdated = :now, #res = :resource";
         const expressionAttributeValues: any = { 
             ":s": newStatus, 
             ":r": refundId, 
@@ -1122,7 +1116,7 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
                 }));
 
                 if (!otherApts.Items || otherApts.Items.length === 0) {
-                    const graphTable = process.env.TABLE_GRAPH || 'mediconnect-graph-data';
+                    const graphTable = setting("TABLE_GRAPH");
                     await docClient.send(new DeleteCommand({
                         TableName: graphTable,
                         Key: { PK: `PATIENT#${apt.patientId}`, SK: `DOCTOR#${apt.doctorId}` }
@@ -1141,7 +1135,7 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
         if (apt.patientId) {
             try {
                 const patientRecord = await docClient.send(new GetCommand({
-                    TableName: process.env.DYNAMO_TABLE || 'mediconnect-patients',
+                    TableName: setting("DYNAMO_TABLE"),
                     Key: { patientId: apt.patientId },
                     ProjectionExpression: 'email'
                 }));

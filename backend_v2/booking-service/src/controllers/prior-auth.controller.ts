@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../shared/region-context';
 // ─── FEATURE #23: Prior Authorization Workflow ─────────────────────────────
 // Insurance pre-approval requests for procedures, medications, and services.
 // FHIR ClaimResponse resource. Tracks auth status (pending → approved/denied).
@@ -9,13 +10,11 @@ import { v4 as uuidv4 } from 'uuid';
 import { PutCommand, QueryCommand, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient } from '../../../shared/aws-config';
 import { writeAuditLog } from '../../../shared/audit';
+import { setting } from '../../../shared/settings';
 
-const TABLE_PRIOR_AUTH = process.env.TABLE_PRIOR_AUTH || 'mediconnect-prior-auth';
+const TABLE_PRIOR_AUTH = setting("TABLE_PRIOR_AUTH");
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── Prior Auth Categories ──────────────────────────────────────────────────
 

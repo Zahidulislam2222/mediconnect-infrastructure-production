@@ -1,34 +1,38 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
+import { canReadPatientClinicalData } from '../../../../shared/patient-access';
+import { mapVitalObservations } from '../../../../shared/fhir-vitals';
+import { projectVitalData, projectVitalAnalytics } from '../../../../shared/vital-data';
+import { resolveAuthRegion } from '../../../../shared/region-context';
+import { BIGQUERY_INSERT_SCOPE, BIGQUERY_INSERT_RESPONSE_KIND } from '../../../../shared/bigquery-protocol';
+import { z } from 'zod';
 import { Request, Response } from "express";
-import { getRegionalClient, getSSMParameter } from '../../../../shared/aws-config';
+import { getRegionalClient } from '../../../../shared/aws-config';
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { GoogleAuth } from "google-auth-library";
 import { writeAuditLog } from "../../../../shared/audit";
 import { safeError } from '../../../../shared/logger';
 import { createHash } from 'crypto';
+import { getVitalsSettings, getPrivacyAnalyticsSettings, requiredEnv, setting } from '../../../../shared/settings';
 
 export const getVitals = async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
     try {
         // FHIR search alias: subject → patientId
-        const patientId = (req.query.patientId || req.query.subject || req.query.patient) as string;
-        const limitParam = req.query.limit as string || "1";
-        const limit = parseInt(limitParam, 10);
-
+        const query = z.object({
+            patientId: z.string().regex(/^[A-Za-z0-9.-]{1,64}$/),
+            limit: z.coerce.number().int().positive().max(getVitalsSettings().historyLimit),
+        }).safeParse({ patientId: req.query.patientId || req.query.subject || req.query.patient, limit: req.query.limit ?? 1 });
+        if (!query.success) return res.status(400).json({ error: 'Invalid patient or history limit' });
+        const { patientId, limit } = query.data;
         const requesterId = (req as any).user?.id;
-        const requesterRole = (req as any).user?.role;
-        const userRegion = (req as any).user?.region || (req.headers['x-user-region'] as string) || "us-east-1";
-
-        if (!patientId) return res.status(400).json({ error: "patientId required" });
-
-        // HIPAA: IDOR Authorization Check
-        const isAuthorized = (requesterId === patientId) || (requesterRole === 'doctor' || requesterRole === 'provider');
-
-        if (!isAuthorized) {
-            await writeAuditLog(requesterId || "UNKNOWN", patientId, "UNAUTHORIZED_PHI_READ", "Attempted to read vitals without permission", { ipAddress: req.ip });
-            return res.status(403).json({ error: "Access Denied: Unauthorized access to patient telemetry." });
+        if (!requesterId) return res.status(401).json({ error: 'Authentication required' });
+        const userRegion = requestJurisdiction(req);
+        if (!await canReadPatientClinicalData(req, patientId)) {
+            return res.status(403).json({ error: 'Access to this patient is not authorized' });
         }
 
         // 🟢 ARCHITECTURE FIX: Dynamic Table Name Evaluation
-        const TABLE_VITALS = process.env.DYNAMO_TABLE_VITALS || "mediconnect-iot-vitals";
+        const TABLE_VITALS = setting("DYNAMO_TABLE_VITALS");
         const dynamicDb = getRegionalClient(userRegion);
 
         const response = await dynamicDb.send(new QueryCommand({
@@ -40,7 +44,7 @@ export const getVitals = async (req: Request, res: Response) => {
         }));
 
         // 🟢 HIPAA FIX: Immutable Audit Log for viewing Protected Health Information (PHI)
-        await writeAuditLog(requesterId, patientId, "READ_VITALS", `Viewed ${response.Items?.length || 0} recent vitals`, { region: userRegion, ipAddress: req.ip });
+        await writeAuditLog(requesterId, patientId, "READ_VITALS", `Viewed ${response.Items?.length || 0} recent vitals`, { region: userRegion, ipAddress: req.ip, requirePersistence: true });
 
         if (!response.Items || response.Items.length === 0) {
             return res.status(404).json({
@@ -50,105 +54,73 @@ export const getVitals = async (req: Request, res: Response) => {
             });
         }
 
-        const rawVitals = response.Items[0];
+        const history = response.Items.map(row => projectVitalData(row, patientId));
 
-        // FHIR R4 MAPPING (Heart Rate, Temperature, SpO2, Blood Pressure)
-        const bundleId = `vitals-${patientId}-${Date.now()}`;
+        const entries = mapVitalObservations(patientId, history);
         const fhirBundle = {
-            resourceType: "Bundle",
-            id: bundleId,
-            type: "searchset",
-            timestamp: new Date().toISOString(),
-            total: response.Items.length,
-            link: [{ relation: "self", url: `/vitals?patientId=${patientId}&limit=${limit}` }],
-            entry: response.Items.flatMap((item: any) => {
-                const ts = item.timestamp || item.createdAt;
-                const observations: any[] = [];
-                if (item.heartRate != null) {
-                    observations.push({
-                        fullUrl: `urn:uuid:hr-${item.vitalId || ts}`,
-                        resource: { resourceType: "Observation", status: "final", category: [{ coding: [{ system: "http://terminology.hl7.org/CodeSystem/observation-category", code: "vital-signs", display: "Vital Signs" }] }], code: { coding: [{ system: "http://loinc.org", code: "8867-4", display: "Heart rate" }] }, subject: { reference: `Patient/${patientId}` }, effectiveDateTime: ts, issued: ts, valueQuantity: { value: item.heartRate, unit: "beats/minute", system: "http://unitsofmeasure.org", code: "/min" } }
-                    });
-                }
-                if (item.temperature != null) {
-                    observations.push({
-                        fullUrl: `urn:uuid:temp-${item.vitalId || ts}`,
-                        resource: { resourceType: "Observation", status: "final", category: [{ coding: [{ system: "http://terminology.hl7.org/CodeSystem/observation-category", code: "vital-signs", display: "Vital Signs" }] }], code: { coding: [{ system: "http://loinc.org", code: "8310-5", display: "Body temperature" }] }, subject: { reference: `Patient/${patientId}` }, effectiveDateTime: ts, issued: ts, valueQuantity: { value: item.temperature, unit: "degrees Celsius", system: "http://unitsofmeasure.org", code: "Cel" } }
-                    });
-                }
-                if (item.oxygenSaturation != null) {
-                    observations.push({
-                        fullUrl: `urn:uuid:spo2-${item.vitalId || ts}`,
-                        resource: { resourceType: "Observation", status: "final", category: [{ coding: [{ system: "http://terminology.hl7.org/CodeSystem/observation-category", code: "vital-signs", display: "Vital Signs" }] }], code: { coding: [{ system: "http://loinc.org", code: "2708-6", display: "Oxygen saturation" }] }, subject: { reference: `Patient/${patientId}` }, effectiveDateTime: ts, issued: ts, valueQuantity: { value: item.oxygenSaturation, unit: "%", system: "http://unitsofmeasure.org", code: "%" } }
-                    });
-                }
-                if (observations.length === 0) {
-                    observations.push({
-                        fullUrl: `urn:uuid:obs-${item.vitalId || ts}`,
-                        resource: { resourceType: "Observation", status: "final", category: [{ coding: [{ system: "http://terminology.hl7.org/CodeSystem/observation-category", code: "vital-signs", display: "Vital Signs" }] }], code: { coding: [{ system: "http://loinc.org", code: "8867-4", display: "Heart rate" }] }, subject: { reference: `Patient/${patientId}` }, effectiveDateTime: ts, issued: ts, valueQuantity: { value: item.heartRate || 0, unit: "beats/minute", system: "http://unitsofmeasure.org", code: "/min" } }
-                    });
-                }
-                return observations;
-            })
+            resourceType: 'Bundle', type: 'searchset', total: entries.length,
+            entry: entries,
         };
 
         res.json({
-            vitals: rawVitals,
-            history: response.Items,
+            vitals: history[0],
+            history,
             fhirBundle: fhirBundle,
             region: userRegion
         });
 
     } catch (err: any) {
         safeError("Vitals Error:", err.message);
-        res.status(500).json({ error: "Internal Server Error during vitals retrieval." });
+        res.status(503).json({ error: "Vitals are temporarily unavailable." });
     }
 };
 
- /* 🟢 GDPR 2026: Regional IoT BigQuery Sync
- * Routes EU wearables to Frankfurt (iot_eu) and US wearables to Virginia (iot).
+/** Confirm the configured regional streaming insert, including row-level errors.
+ * Salted identifiers remain pseudonymous patient data, not anonymized information.
+ * No automatic replay: streaming insert acknowledgment is not an exactly-once guarantee.
  */
-export const pushVitalToBigQuery = async (patientId: string, vitalData: any, region: string) => {
+export const pushVitalToBigQuery = async (patientId: string, vitalData: unknown, regionValue: string) => {
     try {
-
-        const auth = new GoogleAuth({
-            scopes: ['https://www.googleapis.com/auth/cloud-platform']
-        });
-
+        const region = resolveAuthRegion(regionValue);
+        const data = projectVitalAnalytics(vitalData, patientId);
+        const config = getPrivacyAnalyticsSettings(region);
+        const pseudonym = createHash('sha256').update(patientId + requiredEnv('HIPAA_SALT')).digest('hex');
+        const auth = new GoogleAuth({ scopes: [BIGQUERY_INSERT_SCOPE] });
         const client = await auth.getClient();
-        const accessToken = (await client.getAccessToken()).token;
-        const projectId = await auth.getProjectId(); // Auto-detected from WIF config
-
-        // 🟢 DATA SOVEREIGNTY: Select Dataset based on Region
-        const datasetName = region.toUpperCase() === 'EU' ? 'iot_eu' : 'iot';
-        const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/datasets/${datasetName}/tables/vitals_raw/insertAll`;
-
-        // 3. Push to BigQuery
-        await fetch(url, {
-            method: "POST",
-            headers: {
-                "Authorization": `Bearer ${accessToken}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                kind: "bigquery#tableDataInsertAllRequest",
-                rows: [{
-                    json: {
-                        data: JSON.stringify({
-                            patientId: createHash('sha256').update(patientId + (process.env.HIPAA_SALT || 'mediconnect_salt')).digest('hex'),
-                            timestamp: new Date().toISOString(),
-                            region: region,
-                            heartRate: vitalData.heartRate,
-                            systolicBP: vitalData.systolicBP,
-                            diastolicBP: vitalData.diastolicBP,
-                            oxygenLevel: vitalData.oxygenLevel
-                        })
-                    }
-                }]
-            })
+        const token = (await client.getAccessToken()).token;
+        const projectId = await auth.getProjectId();
+        if (!token || !projectId) throw new Error('IOT_ANALYTICS_AUTH_REQUIRED');
+        const endpoint = config.endpoint.replace(/\/$/, '');
+        const url = `${endpoint}/projects/${encodeURIComponent(projectId)}/datasets/${encodeURIComponent(config.iotDataset)}/tables/${encodeURIComponent(config.iotTable)}/insertAll`;
+        const response = await fetch(url, {
+            method: 'POST', redirect: 'error', signal: AbortSignal.timeout(config.timeoutMs),
+            headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ skipInvalidRows: false, ignoreUnknownValues: false,
+                rows: [{ json: { data: JSON.stringify({ ...data, patientId: pseudonym, region }) } }] }),
         });
-        
-    } catch (err: any) {
-        safeError(`❌ BigQuery IoT Sync Failed [${region}]:`, err.message);
+        if (!response.ok) throw new Error('IOT_ANALYTICS_HTTP_FAILURE');
+        const result = z.object({ kind: z.literal(BIGQUERY_INSERT_RESPONSE_KIND),
+            insertErrors: z.array(z.unknown()).optional() }).parse(await response.json());
+        if (result.insertErrors?.length) throw new Error('IOT_ANALYTICS_ROW_REJECTED');
+    } catch {
+        // Provider response bodies, tokens and raw records must not enter operational logs.
+        throw new Error('IOT_ANALYTICS_WRITE_UNCONFIRMED');
     }
 };
+
+/** The bridge awaits both delivery and its failure audit; neither means durable replay exists. */
+export async function recordVitalAnalytics(patientId: string, data: unknown, regionValue: string) {
+    const region = resolveAuthRegion(regionValue);
+    try {
+        await pushVitalToBigQuery(patientId, data, region);
+    } catch {
+        try {
+            await writeAuditLog('SYSTEM', patientId, 'IOT_ANALYTICS_UNCONFIRMED',
+                'Telemetry analytics acknowledgment failed; reconciliation required',
+                { region, requirePersistence: true });
+        } catch {
+            throw new Error('IOT_ANALYTICS_FAILURE_AUDIT_UNAVAILABLE');
+        }
+        throw new Error('IOT_ANALYTICS_WRITE_UNCONFIRMED');
+    }
+}

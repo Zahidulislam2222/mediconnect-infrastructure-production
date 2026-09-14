@@ -1,3 +1,5 @@
+import { isPatientOwner } from '../../../../shared/patient-access';
+import { requestJurisdiction } from '../../../../shared/region-context';
 // ─── FEATURE #28: Blue Button 2.0 ─────────────────────────────────────────
 // CMS Blue Button 2.0 API integration for Medicare/Medicaid data access.
 // OAuth2 flow with CMS sandbox. Fetches EOB, Coverage, and Patient data.
@@ -12,13 +14,11 @@ import { PutCommand, GetCommand, UpdateCommand, QueryCommand } from '@aws-sdk/li
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
 import { encryptToken, decryptToken } from '../../../../shared/kms-crypto';
+import { setting } from '../../../../shared/settings';
 
-const TABLE_BB_CONNECTIONS = process.env.TABLE_BB_CONNECTIONS || 'mediconnect-bluebutton-connections';
+const TABLE_BB_CONNECTIONS = setting("TABLE_BB_CONNECTIONS");
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── CMS Blue Button Configuration ─────────────────────────────────────────
 
@@ -36,17 +36,18 @@ const BB_CONFIG = {
 };
 
 function getConfig() {
-    const env = process.env.BB_ENVIRONMENT || 'sandbox';
+    const env = setting("BB_ENVIRONMENT");
     return env === 'production' ? BB_CONFIG.production : BB_CONFIG.sandbox;
 }
 
-function getClientId() { return process.env.BB_CLIENT_ID || ''; }
-function getClientSecret() { return process.env.BB_CLIENT_SECRET || ''; }
-function getCallbackUrl() { return process.env.BB_CALLBACK_URL || 'http://localhost:8081/bluebutton/callback'; }
+function getClientId() { return setting("BB_CLIENT_ID"); }
+function getClientSecret() { return setting("BB_CLIENT_SECRET"); }
+function getCallbackUrl() { return setting("BB_CALLBACK_URL"); }
 
 // ─── GET /bluebutton/authorize — Start OAuth2 flow ──────────────────────────
 
 export const startBlueButtonAuth = async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
     try {
         const user = (req as any).user;
         const config = getConfig();
@@ -92,6 +93,7 @@ export const startBlueButtonAuth = async (req: Request, res: Response) => {
 // ─── GET /bluebutton/callback — OAuth2 callback handler ─────────────────────
 
 export const handleBlueButtonCallback = async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
     try {
         const { code, state, error: oauthError } = req.query;
 
@@ -237,8 +239,10 @@ async function fetchFromCMS(accessToken: string, endpoint: string): Promise<any>
 // ─── GET /bluebutton/patient/:patientId — Get CMS patient data ──────────────
 
 export const getBlueButtonPatient = async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
     try {
         const { patientId } = req.params;
+        if (!isPatientOwner(req, patientId)) return res.status(403).json({ error: 'Account owner access required' });
         const region = extractRegion(req);
         const db = getRegionalClient(region);
 
@@ -265,8 +269,10 @@ export const getBlueButtonPatient = async (req: Request, res: Response) => {
 // ─── GET /bluebutton/eob/:patientId — Get Explanation of Benefits ───────────
 
 export const getBlueButtonEOB = async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
     try {
         const { patientId } = req.params;
+        if (!isPatientOwner(req, patientId)) return res.status(403).json({ error: 'Account owner access required' });
         const region = extractRegion(req);
         const db = getRegionalClient(region);
 
@@ -290,8 +296,10 @@ export const getBlueButtonEOB = async (req: Request, res: Response) => {
 // ─── GET /bluebutton/coverage/:patientId — Get Coverage data ────────────────
 
 export const getBlueButtonCoverage = async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
     try {
         const { patientId } = req.params;
+        if (!isPatientOwner(req, patientId)) return res.status(403).json({ error: 'Account owner access required' });
         const region = extractRegion(req);
         const db = getRegionalClient(region);
 
@@ -315,8 +323,10 @@ export const getBlueButtonCoverage = async (req: Request, res: Response) => {
 // ─── GET /bluebutton/status/:patientId — Get connection status ──────────────
 
 export const getBlueButtonStatus = async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
     try {
         const { patientId } = req.params;
+        if (!isPatientOwner(req, patientId)) return res.status(403).json({ error: 'Account owner access required' });
         const region = extractRegion(req);
         const db = getRegionalClient(region);
 
@@ -348,16 +358,13 @@ export const getBlueButtonStatus = async (req: Request, res: Response) => {
 // ─── DELETE /bluebutton/disconnect/:patientId — Disconnect Blue Button ──────
 
 export const disconnectBlueButton = async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
     try {
         const { patientId } = req.params;
+        if (!isPatientOwner(req, patientId)) return res.status(403).json({ error: 'Account owner access required' });
         const user = (req as any).user;
         const region = extractRegion(req);
         const db = getRegionalClient(region);
-
-        // Only the patient themselves or a doctor/admin can disconnect
-        if (user.id !== patientId && !user.isDoctor && !user.isAdmin) {
-            return res.status(403).json({ error: 'Not authorized to disconnect this account' });
-        }
 
         const connection = await getConnection(db, patientId, region);
         if (!connection) {

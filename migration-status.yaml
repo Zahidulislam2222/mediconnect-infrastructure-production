@@ -6,26 +6,111 @@
 # Run `bash verify_migration.sh` to verify claims in this file.
 # ============================================================================
 
-last_updated: "2026-04-06T18:00:00Z"
-last_verified_by: "verify_app_vs_iac.sh (127 PASS / 0 FAIL / 33 WARN)"
+last_updated: "2026-09-08T19:52:49Z"
+last_verified_by: "verify_app_vs_iac.sh 129/0/0, verify_migration.sh showcase PASS, frontend 43 unit + 10 E2E PASS, static-container HTTP/security checks, Terraform validate, GitHub workflow read-back"
+
+release_readiness_checkpoint:
+  recorded_date: "2026-09-09"
+  status: "LOCAL_AUDIT_RESUMED_RELEASE_BLOCKED"
+  source_changes: "Payment cancellation/status/replay guards; session/consent and clinical missing-data fixes; honest demonstration notices; no cloud resource changes"
+  scoped_verification: "Full backend gate passes: config boundary, five service HTTP liveness tests, five synthetic AI tests and six isolated bill-payment regressions. Frontend final evidence is recorded in the private dossier."
+  release_gate: "BLOCKED — GDPR erasure, historical private-key revocation, real provider/payment/FHIR integration, configuration refactor, mobile build and independent review incomplete"
+  deployment_performed: false
+  infrastructure_mutations_performed: false
+
+booking_runtime_reconciliation:
+  recorded_date: "2026-09-11"
+  discovery: "Current GCP Cloud Asset Inventory770 and billing metadata verified; earlier AWS/Azure evidence was not refreshed"
+  metadata: "Two inventory-discovered booking Cloud Run services and their traffic revisions report Ready"
+  source_provenance: "BLOCKED — both live digests retained; registry image lookup absent, retained workflow log unavailable; selected build annotations absent on both services and active revisions"
+  selected_build_metadata: "2026-09-11: two service and two traffic-revision describe calls succeeded; zero build-id/build-name/build-source-location annotations; no Cloud Build lookup or runtime invocation"
+  latest_read_only_gate: "2026-09-11: GCP Cloud Asset Inventory770; billing metadata read; both known services matched once; app/IaC129PASS/0FAIL/0WARN"
+  application_health: "NOT_TESTED — no runtime invocation"
+  infrastructure_mutations_performed: false
+  app_vs_iac: "PASS — 129 PASS / 0 FAIL / 0 WARN before this record update"
+  local_image_recovery: "UNAVAILABLE — Docker engine pipe absent; cache inventory not obtained; no daemon or container started"
+  exact_digest_lookup: "Both registry lookups returned Image not found; source/live parity remains unestablished"
+  scoped_build_history: "Four successful exact-digest Cloud Build history queries across global and observed service regions returned zero matches; API was verified enabled; no build or API activation"
+  github_attestation_lookup: "Exact observed digest repository-attestation read returned HTTP404; attestation count unavailable and immutable source parity not established"
+
+operating_mode:
+  status: "SHOWCASE_REFERENCE"
+  cloud_runtime: "RETIREMENT_NOT_FULLY_VERIFIED — two booking Cloud Run services report Ready; image provenance/local drift is under review"
+  source_policy: "Preserve infrastructure source as portfolio evidence; distinguish source coverage, provider metadata readiness and verified application health"
+  deploy_workflow:
+    github_state: "DISABLED_MANUALLY"
+    verified_at: "2026-09-08T16:45:00Z"
+    local_safety: "manual dispatch only; exact cloud-cost acknowledgement required; GCP, AKS, EKS and Lambda deployment default off"
+  apply_authorized: false
+
+static_frontend_publication:
+  status: "LIVE_STATIC_SHOWCASE"
+  verified_at: "2026-09-14T20:03:37.111148+00:00"
+  url: "https://mediconnect.zahidul-islam.com"
+  release: "20260915-pharmacy-01"
+  previous_release_retained: "20260914-connected-care-01"
+  evidence: "37/37 release hashes; public HTML hash/HTTP200; valid origin TLS; healthy restricted container; shared config/DNS unchanged;525 unit,55 browser,10 compiled-browser and9 public-browser checks pass; ZIP37/37 hashes and CRC verified"
+  verification_limits: "Unit runner used one worker and30-second test budget. Lint0errors49warnings. One built Gitleaks match is documented Capacitor executable-code false positive without suppression. Earlier browser timeout retained; traced5/5 and full55/55 passed unchanged. External providers blocked in public checks. Backend/provider/clinical acceptance incomplete."
+  backend_activated: false
+  retired_cloud_resources_recreated: false
+  shared_handoff_modified: false
+  independent_review: "Combined pharmacy helpers/callers and final delta PASS; unsupported initial review findings disposition retained; unchanged reviewed deployment helper reused"
+
+current_verification:
+  status: "BLOCKED"
+  verified_at: "2026-09-08T18:14:11Z"
+  app_vs_iac: "PASS — 129 PASS / 0 FAIL / 0 WARN"
+  terraform_validate: "PASS"
+  terraform_state:
+    total_addresses: 412
+    aws_provider_addresses: 367
+    gcp_provider_addresses: 40
+    azure_provider_addresses: 4
+  terraform_plan:
+    status: "INVALID — Azure authentication expired during refresh"
+    partial_result: "95 add / 53 change / 36 destroy; do not apply or treat as a final plan"
+  native_inventory:
+    aws_resource_explorer_indexed: 405
+    aws_retired_services:
+      us_east_1: "0 RDS clusters; 0 RDS instances; 0 Secrets Manager secrets"
+      eu_central_1: "0 RDS clusters; 0 RDS instances; 0 Secrets Manager secrets"
+      classification: "INTENTIONALLY_RETIRED — Secrets Manager integrations and RDS security-group/import references remain; full Aurora/RDS resource definitions not found"
+    gcp_cloud_asset_indexed: 770
+    azure_resource_graph: "BLOCKED — interactive reauthentication required"
+  billing_cross_check:
+    aws: "September unblended amount effectively zero at verification time"
+    gcp: "Billing enabled"
+    azure: "BLOCKED — authentication expired"
+  local_shell_gate: "Default showcase verification passes without cloud tools; --live requires Terraform and AWS CLI, which remain unavailable on the WSL PATH"
+  showcase_gate: "PASS — 71 Terraform files, 13 Kubernetes manifests, 36 legacy entry points; automatic push deploy absent; GCP/AKS/EKS/Lambda deployment opt-in"
+  application_gates:
+    frontend: "43 unit tests PASS; 10 E2E tests PASS; TypeScript PASS; build PASS; lint 43 warnings"
+    cms: "build PASS"
+    backend_python: "39 tests PASS"
+    backend_node: "build/typecheck PASS; five real HTTP liveness tests PASS"
+    configuration_boundary: "PASS scoped regression — 159 backend and 50 frontend variables documented, including model-router keys; registered table literals and Node/frontend bypass patterns absent"
+  shared_vps_preflight: "PASS read-only — Docker/Caddy healthy, 2 healthy containers, 6/6 managed hashes, no MediConnect DNS record; local hardened static package container/HTTP/security checks pass"
+  apply_authorized: false
 
 # --------------------------------------------------------------------------
 # Phase 0: Cloud Discovery
 # --------------------------------------------------------------------------
 phase_0:
-  status: "COMPLETE"
+  status: "REVERIFY_BLOCKED"
   aws:
-    status: "COMPLETE"
-    resources_discovered: 458
+    status: "REVERIFY_REQUIRED"
+    resources_discovered: 458  # historical Phase 0 count
+    current_indexed_resources: 405
     findings_count: 17
     source_file: "phase0-aws-summary.md"
   gcp:
-    status: "COMPLETE"
-    resources_discovered: 57  # real resources (834 indexed minus noise)
+    status: "REVERIFY_REQUIRED"
+    resources_discovered: 57  # historical classified count
+    current_indexed_resources: 770
     findings_count: 6
     source_file: "phase0-gcp-azure-summary.md"
   azure:
-    status: "COMPLETE"
+    status: "BLOCKED_AUTH"
     resources_discovered: 4
     findings_count: 6
     source_file: "phase0-gcp-azure-summary.md"
@@ -34,23 +119,24 @@ phase_0:
 # Phase 1: Write Terraform + Import
 # --------------------------------------------------------------------------
 phase_1:
-  status: "COMPLETE"
+  status: "REVERIFY_BLOCKED"
   aws:
-    status: "COMPLETE"
-    resources_in_state: 370
-    terraform_plan: "No changes"
+    status: "REVERIFY_REQUIRED"
+    resources_in_state: 367
+    terraform_plan: "INVALID/INCOMPLETE — Azure authentication expired; partial plan showed 95 add / 53 change / 36 destroy"
     completed_date: "2026-04-05"
   gcp:
-    status: "COMPLETE"
+    status: "REVERIFY_REQUIRED"
     resources_in_state: 40
     resources_target: 44  # 57 real minus noise (default SA, revisions, images, API toggles)
-    blocked_by_billing: 3  # 1 Artifact Registry + 2 Secret Manager (need GCP billing enabled)
+    blocked_by_billing: 0  # billing is currently enabled; resource/application status must be reverified
+    billing_status: "ENABLED"
     completed_date: "2026-04-05"
     notes: |
-      40/44 resources imported. 3 blocked by GCP billing being disabled.
-      Set gcp_billing_enabled=true after enabling billing to manage remaining 3.
+      40 resources remain in state. GCP billing is now enabled, so the prior billing blocker is
+      stale; reconcile live resources and the next complete Terraform plan before changing status.
   azure:
-    status: "COMPLETE"
+    status: "BLOCKED_AUTH"
     resources_in_state: 4
     resources_target: 4
     completed_date: "2026-04-05"
@@ -60,7 +146,7 @@ phase_1:
 # Phase 2: Compliance Hardening
 # --------------------------------------------------------------------------
 phase_2:
-  status: "CODE_READY"  # Azure + GCP code written, apply pending
+  status: "REVERIFY_BLOCKED"  # current plan is invalid until Azure reauthentication
   aws:
     status: "COMPLETE"
     findings_resolved: 17
@@ -132,7 +218,7 @@ phase_2:
         severity: "MEDIUM"
         status: "FIXED"
   gcp:
-    status: "CODE_READY"
+    status: "REVERIFY_REQUIRED"
     findings_resolved: 4
     findings_total: 6
     completed_date: "2026-04-05"
@@ -163,7 +249,7 @@ phase_2:
         severity: "LOW"
         status: "RESOLVED — Phase 0 was wrong, datasets have symptom_logs tables"
   azure:
-    status: "CODE_READY"
+    status: "BLOCKED_AUTH"
     findings_resolved: 0
     findings_total: 6
     completed_date: "2026-04-05"
@@ -214,7 +300,7 @@ phase_3:
 # Phase 4: Final Audit (cross-cloud)
 # --------------------------------------------------------------------------
 phase_4:
-  status: "IN_PROGRESS"
+  status: "BLOCKED"
   started_date: "2026-04-06"
   report_file: "compliance-report-phase4.md"
   scans_completed:
@@ -240,30 +326,30 @@ phase_4:
     - "User runs terraform apply for all IaC fixes"
     - "Set DEPLOY_GCP=false in GitHub repo variables"
     - "Re-run Prowler after apply to verify remediation"
-    - "Enable GCP billing when ready — unlocks 22 CMEK checks"
+    - "Reconcile GCP billing-enabled configuration and the previously deferred CMEK checks"
     - "Run Inferno against FHIR server for ONC g(10) testing"
     - "Run OWASP ZAP against live backend"
   notes: |
     All scans completed via D:\rag-production-stack docker-compose.
     20 compliance frameworks scanned across 3 clouds.
     96 Checkov checks fixed in IaC code. 34 Prowler critical findings addressed.
-    CI/CD fixed for GCP billing OFF scenario.
-    Azure + GCP compliance changes still CODE_READY — user applies.
+    CI/CD was previously adjusted for the billing-off scenario, but GCP billing is now enabled.
+    Azure authentication and a complete current plan are required before classifying apply work.
 
 # --------------------------------------------------------------------------
 # Pre-Phase 4: App vs IaC Audit
 # --------------------------------------------------------------------------
 app_vs_iac_audit:
   status: "COMPLETE"
-  completed_date: "2026-04-06"
+  completed_date: "2026-09-08"
   gaps_fixed: 15
   gaps_remaining: 0
   gaps_fixed_date: "2026-04-06"
   gaps_fixed_details: |
     12 SQS queues (6 categories × 2: queue + DLQ) added to sqs.tf (US + EU)
     3 ECR repos (admin, staff, dicom) added to ecr.tf (US + EU)
-    verify_app_vs_iac.sh: PASS — 127 pass, 0 fail, 32 warn
-  plan_file: "audit-app-vs-iac.md"
+    verify_app_vs_iac.sh: PASS — 129 pass, 0 fail, 0 warn (2026-09-08)
+  plan_file: "MISSING — audit-app-vs-iac.md was referenced historically but is absent"
   description: |
     Cross-check every resource the app code references against Terraform state.
     20 steps covering: DynamoDB, S3, SQS, SNS, Cognito, Lambda, API Gateway,
@@ -293,3 +379,115 @@ app_vs_iac_audit:
     - "Checkov (Terraform static analysis, HIPAA framework)"
     - "Prowler (live AWS runtime scan)"
     - "driftctl (cloud-vs-TF unmanaged resource detection)"
+
+# Local-only continuation; no resource creation or migration execution is implied.
+eu_us_privacy_continuation_20260909:
+  status: LOCAL_VERIFICATION_IN_PROGRESS
+  resource_change: "Existing regional patient/audit/clinical tables, buckets and analytics datasets only; no new deployed resources"
+  region_configuration: [PRIVACY_US_REGION, PRIVACY_EU_REGION]
+  privacy_modules: [shared/privacy-operations.ts, shared/privacy-analytics.ts, shared/privacy-refund.ts, shared/fhir-patient.ts]
+  required_followup: "Final source/IaC checks, full affected gates, live integration and independent review"
+  clinical_release: BLOCKED
+
+websocket_ticket_release:
+  status: LOCAL_IMPLEMENTATION
+  deployed: false
+  required: "Manual coordinated service/authorizer/API Gateway/TTL/IAM rollout only after all release gates; no cloud mutation performed"
+
+recovery_checkpoint_20260909:
+  status: CONTINUING_LOCAL_AUDIT
+  verified_before_current_edit: "59 backend tests and workspace builds pass, including actual monitoring socket authorization and distinct synthetic USA/EU Cognito pools"
+  current_unverified_edit: "None for the monitoring/MFA guard milestones; installed edit-hook exit0 verified, broader release audit remains open"
+  local_verification: "Frontend197 tests and15 browser tests, backend59 tests, affected types/builds pass; lint has warnings; Semgrep405 files/0 findings/0 errors; app/IaC129/0/0 and inert preservation pass"
+  authoritative_private_handoff: "Umbrella memory/RESUME-ACTIVE.md"
+  deployment_performed: false
+  apply_authorized: false
+
+sensitive_operation_mfa_release:
+  status: LOCAL_GUARD_TESTS_PASS_PROVIDER_INTEGRATION_BLOCKED
+  evidence: "Two failing-before and passing-after USA/EU HTTP regressions across development/test/production; full59-test backend/build gate pass"
+  runtime_change: false
+  required_followup: "Actual trusted session MFA issuance/reauthentication, independent review and remaining release gates"
+
+vitals_egress_analytics_verification:
+  recorded_date: "2026-09-09"
+  status: LOCAL_BEHAVIORAL_GATES_PASS_SECURITY_REFRESH_RUNNING
+  evidence: "Backend63tests/builds, lint0errors/1057warnings, Semgrep407targets0findings0errors, app/IaC129/0/0pass; hook refresh running"
+  new_resources: false
+  deployed: false
+  limitation: "Live provider behavior, durable replay and clinical policy approval remain unverified"
+
+owner_power_loss_stop_20260909t155055z:
+  status: PAUSED_BY_OWNER
+  recorded_utc: "2026-09-09T15:50:55.101854+00:00"
+  verified_local: "Backend65tests/buildsPASS; care-plan/vitals fixes local only; lint warnings remain"
+  unfinished: "Standalone US/EU clinical-route regression fails; planned15-route guards not implemented"
+  recovery: "Umbrella memory/RESUME-ACTIVE.md"
+  new_resources: false
+  deployment_performed: false
+  resume_condition: "Explicit owner request"
+
+clinical_route_access_recovery:
+  recorded_utc: "2026-09-09T17:31:07.037466+00:00"
+  status: LOCAL_FULL_BACKEND_GATES_PASS_REVIEW_PENDING
+  resources: "Existing regional patient, approved-doctor, care-graph and audit tables; no new resource"
+  source: "shared/patient-access-http.ts and patient-service/src/routes/patient.routes.ts"
+  evidence: "Backend67tests/five builds, lint0errors1063warnings, offline18/18, Semgrep408targets0findings0errors, app/IaC129/0/0PASS; installed hook385candidates exit0; independent review pending"
+  deployed: false
+
+local_source_recheck_20260913:
+  terraform_validate: "PASS — installed Windows Terraform, local configuration only"
+  showcase_verifier: "Local source/trigger guards PASS; live parity not checked"
+  app_vs_iac: "129 PASS / 0 FAIL / 0 WARN"
+  evidence: "Private project memory: resume-app-vs-iac-20260913.log"
+  scope: "Local source coverage only; no new live inventory, provenance proof, migration or deployment"
+
+web_backend_priority_recheck_20260913:
+  priority: "Website/backend/CMS/operations first; native mobile development paused by owner"
+  app_vs_iac: "129 PASS / 0 FAIL / 0 WARN"
+  native_inventory: "GCP770 assets; billing metadata read; both configured booking targets matched once"
+  source_provenance: "Two active traffic revisions read; zero selected build annotations or digest-linked source proofs"
+  cms_typecheck: "PASS — local installed TypeScript, no service startup"
+  backend_business_changes: false
+  deployment_performed: false
+  evidence: "Private project memory: web-backend-priority-baseline-20260913.json"
+
+cms_article_migration_local_verification:
+  recorded_date: "2026-09-15"
+  scope: "Article migration correction only; no real migration or CMS deployment"
+  acceptance: "8/8 local criteria met"
+  original_repository_gates: "49 tests PASS; strict migration settings and full CMS types PASS; build PASS; scoped lint PASS"
+  security: "Current-source Gitleaks62/0 and Semgrep62/0 findings/0 errors/0 skips; installed hook PASS; Bandit not applicable"
+  broader_lint: "UNAVAILABLE — no configured general CMS lint gate"
+  review: "Three fresh source slices and protocol delta PASS; unsupported reviewer runtime claims discarded"
+  behavior: "Actual CLI, HTTP pagination and AWS SDK transports exercised against loopback fixtures with fake credentials only"
+  source_parity: "Seven selected candidate/original files identical; original62-file inventory unchanged after gates"
+  limits: "Legacy asset uploader, CMS deployment/persistence/backup/provider acceptance and broader configuration audit remain unfinished"
+
+doctor_pharmacy_runtime_discovery:
+  recorded_at: '2026-09-14T20:24:43.470283+00:00'
+  status: READ_ONLY_DISCOVERY_SOURCE_PARITY_BLOCKED
+  native_inventory:
+    gcp_assets: 770
+    gcp_cloud_run_services: 14
+    gcp_billing_metadata: read; enabled
+    aws_resources: 405
+    aws_inventory_complete: true
+    aws_billing: NOT_QUERIED — fresh approval required for one $0.01 request
+    azure: UNAVAILABLE — authentication refresh required
+  doctor_services:
+    count: 2
+    metadata_ready: true
+    traffic_revision_digests: 2
+    source_commit_labels: 0
+    selected_build_annotations: 0
+    artifact_registry: Both exact digest lookups Image not found
+    cloud_build: Four successful exact-digest queries; zero matches
+    github_attestations: Both exact-digest repository queries returned not found
+    template_tag: Both reference 64b995aa859bfa2ebcee125a78239db2e8342dcc; local commit
+      exists; mutable tag is a lead, not immutable source proof
+  runtime_invoked: false
+  backend_application_edited: false
+  infrastructure_mutated: false
+  next: Trace workflow/artifact evidence for observed commit tag; no backend runtime
+    edit before drift reconciliation

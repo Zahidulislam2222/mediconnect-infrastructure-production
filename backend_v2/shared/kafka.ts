@@ -14,6 +14,7 @@
 
 import { Kafka, Producer, Consumer, logLevel, SASLOptions } from 'kafkajs';
 import { safeLog, safeError } from './logger';
+import { setting } from './settings';
 
 
 // ─── Configuration ──────────────────────────────────────────────────────
@@ -22,7 +23,7 @@ export const KAFKA_ENABLED = process.env.KAFKA_ENABLED === 'true';
 export const KAFKA_DUAL_WRITE = process.env.KAFKA_DUAL_WRITE === 'true';
 
 const isProduction = process.env.NODE_ENV === 'production';
-const LOCAL_BROKER = process.env.KAFKA_BROKER || 'localhost:9092';
+const LOCAL_BROKER = setting("KAFKA_BROKER");
 
 const normalizeRegion = (region: string = 'us-east-1'): string => {
     const r = region?.toUpperCase();
@@ -57,7 +58,7 @@ async function getKafkaClient(region: string): Promise<Kafka> {
 
     if (kafkaClients[target]) return kafkaClients[target];
 
-    let config: any = {
+    const config: any = {
         clientId: 'mediconnect',
         logLevel: logLevel.WARN,
     };

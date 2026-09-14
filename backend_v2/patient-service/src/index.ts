@@ -1,3 +1,6 @@
+import { getApiBrowserPolicy } from '../../shared/api-browser-policy';
+import { attachMonitoringAuthorization, emitAuthorizedMonitoring, validateTelemetryJurisdiction } from './modules/iot/monitoring-access';
+import { resolveAuthRegion } from '../../shared/region-context';
 // C:\Dev\mediconnect-project\mediconnect-infrastructure-develop\backend_v2\patient-service\src\index.ts
 import express from 'express';
 import cors from 'cors';
@@ -19,11 +22,14 @@ import { handleEmergencyDetection } from './modules/iot/emergency';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { createRateLimitStore } from '../../shared/rate-limit-store'; // 🟢 FIX #9: Redis distributed rate limiting
 
-import { pushVitalToBigQuery } from './modules/iot/vitals';
+import { recordVitalAnalytics } from './modules/iot/vitals';
+import { projectVitalData } from '../../shared/vital-data';
+
+import { setting, getMonitoringSettings } from '../../shared/settings';
 
 dotenv.config();
 
-const app = express();
+export const app = express();
 app.set('trust proxy', 1);
 
 // 🟢 1. HEALTH CHECKS (NO LIMITER)
@@ -67,49 +73,16 @@ const PORT = process.env.PORT || 8081;
 let isAppReady = false;
 
 // --- 1. COMPLIANT CORS ---
-const allowedOrigins: string[] = process.env.ALLOWED_ORIGINS 
-    ? process.env.ALLOWED_ORIGINS.split(',').map(url => url.trim()) 
-    : [];
-
-const mobileOrigins = [
-    'capacitor://localhost',    
-    'http://localhost',         
-    'https://localhost'         
-];
-
-if (process.env.NODE_ENV !== 'production') {
-    allowedOrigins.push('http://localhost:5173', 'http://localhost:8080');
-}
-
-const corsOptions = {
-    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-        if (!origin) return callback(null, true);
-        if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
-        if (mobileOrigins.indexOf(origin) !== -1) return callback(null, true);
-
-        safeError(`⛔ CORS Blocked: ${origin}`);
-        callback(new Error('Strict CORS Policy: Origin not allowed'));
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Internal-Secret', 'X-User-ID', 'Prefer', 'If-Match', 'x-user-region']
-};
+const browserPolicy = getApiBrowserPolicy();
+const corsOptions = browserPolicy.cors;
 
 const io = new Server(httpServer, {
     cors: corsOptions
 });
+attachMonitoringAuthorization(io);
 
 // --- 2. SECURITY MIDDLEWARE ---
-app.use(helmet({
-    hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
-    contentSecurityPolicy: {
-        directives: {
-            defaultSrc: ["'self'"],
-            connectSrc: ["'self'", "https://*.amazonaws.com", "https://*.googleapis.com", "wss://*.amazonaws.com", "https://*.azure.com"],
-            imgSrc: ["'self'", "data:", "https://*"],
-        }
-    }
-}));
+app.use(helmet(browserPolicy.helmet));
 
 app.use(cors(corsOptions));
 app.use(express.json({ limit: '5mb' }));
@@ -129,7 +102,7 @@ app.use(morgan((tokens, req, res) => {
 
 // --- 3. 100% COMPLIANT VAULT SYNC ---
 async function loadSecrets() {
-    const region = process.env.AWS_REGION || 'us-east-1';
+    const region = setting("AWS_REGION");
     const ssm = getRegionalSSMClient(region);
 
     try {
@@ -202,7 +175,8 @@ const startIoTBridge = async () => {
 
     try {
         const brokerHost = process.env.MQTT_BROKER_URL.replace('mqtts://', '').replace('wss://', '').split('/')[0];
-        const brokerRegion = brokerHost.split('.')[2] || 'us-east-1';
+        const brokerJurisdiction = resolveAuthRegion(brokerHost.split('.')[2]);
+        const brokerRegion = setting(brokerJurisdiction === 'EU' ? 'PRIVACY_EU_REGION' : 'PRIVACY_US_REGION');
 
         safeLog(`📡 Calculating Secure SigV4 Connection for[${brokerRegion}]...`);
 
@@ -236,30 +210,25 @@ const startIoTBridge = async () => {
 
         mqttClient.on('message', async (topic, message) => {
             try {
-                const payload = JSON.parse(message.toString());
-                const patientId = topic.split('/').pop() || "unknown";
-                const heartRate = Number(payload.heartRate);
-                const region = payload.region || brokerRegion;
+                const raw = JSON.parse(message.toString());
+                const patientId = topic.split('/').pop() || '';
+                const region = validateTelemetryJurisdiction(raw, brokerJurisdiction);
+                const payload = projectVitalData(raw, patientId);
+                const heartRate = payload.heartRate;
 
-                if (heartRate > 150) {
+                if (typeof heartRate === 'number' && heartRate > getMonitoringSettings().highHeartRateThreshold) {
                     await handleEmergencyDetection(patientId, heartRate, 'EMERGENCY_AUTO_IOT', region);
-                    io.to(`patient_${patientId}`).emit('critical_vital_alert', {
+                    await emitAuthorizedMonitoring(io, patientId, region, 'critical_vital_alert', {
                         message: "High Heart Rate Detected!", heartRate, level: "CRITICAL"
                     });
                 }
-                io.to(`patient_${patientId}`).emit('vital_update', { ...payload, timestamp: new Date().toISOString() });
+                await emitAuthorizedMonitoring(io, patientId, region, 'vital_update', { ...payload, receivedAt: new Date().toISOString() });
                 
-                pushVitalToBigQuery(patientId, payload, region).catch((err: any) => safeError(err));
+                await recordVitalAnalytics(patientId, payload, region);
 
             } catch (e) { safeError("MQTT Message Error"); }
         });
 
-        io.on('connection', (socket) => {
-            socket.on('join_monitoring', (pid) => {
-                socket.join(`patient_${pid}`);
-                safeLog(`👁️ Monitoring session started for patient: ${pid}`);
-            });
-        });
     } catch (error: any) {
         safeError("❌ Failed to initialize IoT Bridge:", error.message);
     }
@@ -308,4 +277,6 @@ const startServer = async () => {
     }
 };
 
-startServer();
+if (require.main === module) {
+    void startServer();
+}

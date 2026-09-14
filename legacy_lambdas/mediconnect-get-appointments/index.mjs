@@ -4,9 +4,14 @@ import { DynamoDBDocumentClient, QueryCommand, GetCommand } from "@aws-sdk/lib-d
 const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
 
-// Environment variables for flexibility, with sensible defaults
-const TABLE_APPOINTMENTS = process.env.TABLE_APPOINTMENTS || "mediconnect-appointments";
-const TABLE_SCHEDULES = process.env.TABLE_SCHEDULES || "mediconnect-doctor-schedules"; 
+const requireEnv = (name) => {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`Missing required configuration: ${name}`);
+  return value;
+};
+
+const TABLE_APPOINTMENTS = requireEnv("TABLE_APPOINTMENTS");
+const TABLE_SCHEDULES = requireEnv("TABLE_SCHEDULES");
 
 export const handler = async (event) => {
   // Standard CORS headers

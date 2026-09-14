@@ -2,13 +2,12 @@
 DICOMweb Metadata Store
 ========================
 DynamoDB-backed DICOM study metadata index for QIDO-RS search queries.
-Table: mediconnect-dicom-studies (PK: patientId, SK: studyInstanceUID).
+Configured table key: patientId (PK), studyInstanceUID (SK).
 
 Stores study-level metadata on upload so that QIDO-RS can query by
 patient, date range, modality, and description without scanning S3.
 """
 
-import os
 import logging
 import time
 from typing import Optional, Dict, Any, List
@@ -17,6 +16,7 @@ import boto3
 from boto3.dynamodb.conditions import Key, Attr
 from botocore.config import Config
 from datetime import datetime, timezone
+from settings import required_resource_name
 
 logger = logging.getLogger("dicom-metadata-store")
 
@@ -40,7 +40,7 @@ def _get_table(region: str):
         _dynamo_resources[target] = boto3.resource(
             "dynamodb", region_name=target, config=_aws_config
         )
-    table_name = os.getenv("TABLE_DICOM_STUDIES", "mediconnect-dicom-studies")
+    table_name = required_resource_name("TABLE_DICOM_STUDIES")
     return _dynamo_resources[target].Table(table_name)
 
 

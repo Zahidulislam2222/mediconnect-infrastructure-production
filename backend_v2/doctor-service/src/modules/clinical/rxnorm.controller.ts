@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 import { Request, Response } from "express";
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { PutCommand, GetCommand } from "@aws-sdk/lib-dynamodb";
@@ -8,10 +9,7 @@ const RXNORM_BASE = "https://rxnav.nlm.nih.gov/REST";
 const TABLE_DRUG_CACHE = "mediconnect-drug-cache";
 const CACHE_TTL_HOURS = 24;
 
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // --- NLM API Helpers ---
 

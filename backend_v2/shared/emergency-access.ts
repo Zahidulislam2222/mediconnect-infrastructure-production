@@ -19,8 +19,9 @@ import { getRegionalClient } from './aws-config';
 import { writeAuditLog } from './audit';
 import { checkForBreach } from './breach-detection';
 import { safeError } from './logger';
+import { setting } from './settings';
 
-const TABLE_EMERGENCY = process.env.TABLE_EMERGENCY_ACCESS || 'mediconnect-emergency-access';
+const TABLE_EMERGENCY = setting("TABLE_EMERGENCY_ACCESS");
 const DEFAULT_DURATION_MINUTES = 60;
 
 // ─── Emergency Access Reasons (HIPAA-aligned) ────────────────────────────────

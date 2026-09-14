@@ -2,7 +2,7 @@
  * Model Router — Dynamic model selection per task type
  *
  * Wraps AICircuitBreaker to route prompts to the cheapest appropriate model
- * based on task type. All model IDs come from env vars with safe defaults.
+ * based on task type. All model IDs and token limits come from validated configuration.
  *
  * Task types:
  *   generation  — Main chatbot response (can be slightly more expensive)
@@ -17,6 +17,7 @@
 
 import { AICircuitBreaker, ModelConfig, AIResponse } from './ai-circuit-breaker';
 import { safeLog, safeError } from '../../../shared/logger';
+import { requiredEnv, requiredPositiveInteger } from '../../../shared/settings';
 
 // ─── Types ─────────────────────────────────────────────────────────────
 
@@ -37,46 +38,51 @@ interface TaskModelConfig {
 // ─── Config Loader ─────────────────────────────────────────────────────
 
 function loadTaskConfig(): TaskModelConfig {
-    const buildConfig = (prefix: string, defaults: { bedrock: string; vertex: string; azure: string; maxTokens: string }): ModelConfig => ({
+    const buildConfig = (
+        bedrockName: string,
+        vertexName: string,
+        azureName: string,
+        maxTokensName: string,
+    ): ModelConfig => ({
         bedrock: {
-            modelId: process.env[`MODEL_${prefix}_BEDROCK`] || defaults.bedrock,
-            maxTokens: parseInt(process.env[`MODEL_${prefix}_MAX_TOKENS`] || defaults.maxTokens, 10),
+            modelId: requiredEnv(bedrockName),
+            maxTokens: requiredPositiveInteger(maxTokensName),
         },
         vertex: {
-            modelName: process.env[`MODEL_${prefix}_VERTEX`] || defaults.vertex,
-            maxTokens: parseInt(process.env[`MODEL_${prefix}_MAX_TOKENS`] || defaults.maxTokens, 10),
+            modelName: requiredEnv(vertexName),
+            maxTokens: requiredPositiveInteger(maxTokensName),
         },
         azure: {
-            deployment: process.env[`MODEL_${prefix}_AZURE`] || defaults.azure,
-            maxTokens: parseInt(process.env[`MODEL_${prefix}_MAX_TOKENS`] || defaults.maxTokens, 10),
+            deployment: requiredEnv(azureName),
+            maxTokens: requiredPositiveInteger(maxTokensName),
         },
     });
 
     return {
-        generation: buildConfig('GENERATION', {
-            bedrock: 'anthropic.claude-3-haiku-20240307-v1:0',
-            vertex: 'gemini-2.0-flash-lite',
-            azure: 'gpt-4o-mini',
-            maxTokens: '500',
-        }),
-        validation: buildConfig('VALIDATION', {
-            bedrock: 'anthropic.claude-3-haiku-20240307-v1:0',
-            vertex: 'gemini-2.0-flash-lite',
-            azure: 'gpt-4o-mini',
-            maxTokens: '300',
-        }),
-        planning: buildConfig('PLANNING', {
-            bedrock: 'anthropic.claude-3-haiku-20240307-v1:0',
-            vertex: 'gemini-2.0-flash-lite',
-            azure: 'gpt-4o-mini',
-            maxTokens: '400',
-        }),
-        evaluation: buildConfig('EVALUATION', {
-            bedrock: 'anthropic.claude-3-haiku-20240307-v1:0',
-            vertex: 'gemini-2.0-flash-lite',
-            azure: 'gpt-4o-mini',
-            maxTokens: '500',
-        }),
+        generation: buildConfig(
+            "MODEL_GENERATION_BEDROCK",
+            "MODEL_GENERATION_VERTEX",
+            "MODEL_GENERATION_AZURE",
+            "MODEL_GENERATION_MAX_TOKENS",
+        ),
+        validation: buildConfig(
+            "MODEL_VALIDATION_BEDROCK",
+            "MODEL_VALIDATION_VERTEX",
+            "MODEL_VALIDATION_AZURE",
+            "MODEL_VALIDATION_MAX_TOKENS",
+        ),
+        planning: buildConfig(
+            "MODEL_PLANNING_BEDROCK",
+            "MODEL_PLANNING_VERTEX",
+            "MODEL_PLANNING_AZURE",
+            "MODEL_PLANNING_MAX_TOKENS",
+        ),
+        evaluation: buildConfig(
+            "MODEL_EVALUATION_BEDROCK",
+            "MODEL_EVALUATION_VERTEX",
+            "MODEL_EVALUATION_AZURE",
+            "MODEL_EVALUATION_MAX_TOKENS",
+        ),
     };
 }
 

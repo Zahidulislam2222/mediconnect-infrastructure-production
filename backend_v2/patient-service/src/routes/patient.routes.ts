@@ -1,3 +1,5 @@
+import { readFhirPatient } from '../../../shared/fhir-patient';
+import { resolveAuthRegion } from '../../../shared/region-context';
 import { Router, Request, Response } from 'express';
 import { getRegionalClient } from '../../../shared/aws-config';
 import { ScanCommand, GetCommand } from "@aws-sdk/lib-dynamodb";
@@ -8,16 +10,16 @@ import {
     updateProfile,
     verifyIdentity,
     deleteProfile,
+    reviewErasure,
     getPatientById,
     searchPatients,
-    extractRegion,
     exportPatientData
 } from '../controllers/patient.controller';
 import { uploadDicom } from '../modules/clinical/imaging.controller';
 import multer from 'multer';
 
 // 🟢 BOTH MIDDLEWARES IMPORTED HERE
-import { authMiddleware } from '../middleware/auth.middleware';
+import { authMiddleware, requireMFA } from '../middleware/auth.middleware';
 import { requireIdentityVerification } from '../middleware/verification.middleware';
 import { writeAuditLog } from '../../../shared/audit';
 import { getConsent, updateConsent, withdrawConsent } from '../modules/gdpr/consent.controller';
@@ -43,6 +45,8 @@ import {
     VerifyIdentityBody,
 } from '../../../shared/validation';
 import { z } from 'zod';
+import { TABLE_NAMES } from '../../../shared/settings';
+import { patientClinicalAccess } from '../../../shared/patient-access-http';
 
 // Inline Zod schemas for routes missing validation
 const UpdateConsentBody = z.object({ policyVersion: z.string().min(1), consentType: z.string().min(1) });
@@ -62,16 +66,18 @@ const StartExportQuery = z.object({ _type: z.string().optional(), _since: z.stri
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } });
 
 const router = Router();
+const patientFromPath = patientClinicalAccess(req => req.params.patientId);
+const patientFromBody = patientClinicalAccess(req => req.body?.patientId);
 
 // ==========================================
 // 📖 1. PUBLIC ROUTES (No Token Required)
 // ==========================================
 export const getPublicKnowledge = async (req: Request, res: Response) => {
     try {
-        const userRegion = extractRegion(req);
+        const userRegion = resolveAuthRegion(req.headers['x-user-region']);
         const dynamicDb = getRegionalClient(userRegion);
         
-        const { Items } = await dynamicDb.send(new ScanCommand({ TableName: "mediconnect-knowledge-base" }));
+        const { Items } = await dynamicDb.send(new ScanCommand({ TableName: TABLE_NAMES.knowledgeBase }));
         if (!Items || Items.length === 0) return res.json([]);
 
         const fhirArticles = Items.map((art: any) => ({
@@ -83,6 +89,7 @@ export const getPublicKnowledge = async (req: Request, res: Response) => {
         }));
         res.json(fhirArticles);
     } catch (error: any) {
+        if (error.message === 'INVALID_AUTH_REGION') return res.status(400).json({ error: 'Invalid region' });
         res.status(500).json({ error: "Knowledge Base Unavailable" });
     }
 };
@@ -90,11 +97,11 @@ export const getPublicKnowledge = async (req: Request, res: Response) => {
 export const getPublicArticle = async (req: Request, res: Response) => {
     try {
         const { id } = req.params;
-        const userRegion = extractRegion(req);
+        const userRegion = resolveAuthRegion(req.headers['x-user-region']);
         const dynamicDb = getRegionalClient(userRegion);
 
         const { Item: art } = await dynamicDb.send(new GetCommand({ 
-            TableName: "mediconnect-knowledge-base", 
+            TableName: TABLE_NAMES.knowledgeBase,
             Key: { topic: id } 
         }));
         
@@ -116,6 +123,7 @@ export const getPublicArticle = async (req: Request, res: Response) => {
         
         res.json(fhirArticle);
     } catch (error) {
+        if (error instanceof Error && error.message === 'INVALID_AUTH_REGION') return res.status(400).json({ error: 'Invalid region' });
         res.status(500).json({ error: "Content currently unavailable" });
     }
 };
@@ -138,7 +146,14 @@ router.post('/fhir/token', smartToken);
 // 🔒 2. SECURE BOUNDARY (Token Required)
 // ==========================================
 // The "Security Guard" checks everyone who passes this line
+router.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 router.use(authMiddleware);
+router.get('/fhir/Patient/:id', readFhirPatient);
+router.post('/privacy/erasure/:patientId/review', requireMFA, reviewErasure);
+router.post('/privacy/erasure/:patientId/resume', requireMFA, (req, res, next) => {
+    if ((req as any).user?.isAdmin !== true) return res.status(403).json({ error: 'Administrative access required' });
+    return deleteProfile(req, res, next);
+});
 
 // ==========================================
 // 🏥 3. LOBBY ROUTES (No ID Verification Needed)
@@ -180,22 +195,22 @@ router.get('/hl7/supported', getSupportedTypes);
 // ==========================================
 // 📄 6. CDA/C-CDA DOCUMENT EXPORT
 // ==========================================
-router.get('/patients/:patientId/cda', generatePatientCDA);
+router.get('/patients/:patientId/cda', patientFromPath, generatePatientCDA);
 
 // ==========================================
 // 🛡️ 7. ALLERGY / INTOLERANCE (FHIR)
 // ==========================================
 router.get('/allergies/common', getCommonAllergens);
-router.get('/patients/:patientId/allergies', getPatientAllergies);
-router.post('/patients/:patientId/allergies', validate({ body: CreateAllergyBody }), createAllergy);
-router.put('/patients/:patientId/allergies/:allergyId', validate({ body: UpdateAllergyBody }), updateAllergy);
-router.delete('/patients/:patientId/allergies/:allergyId', deleteAllergy);
+router.get('/patients/:patientId/allergies', patientFromPath, getPatientAllergies);
+router.post('/patients/:patientId/allergies', patientFromPath, validate({ body: CreateAllergyBody }), createAllergy);
+router.put('/patients/:patientId/allergies/:allergyId', patientFromPath, validate({ body: UpdateAllergyBody }), updateAllergy);
+router.delete('/patients/:patientId/allergies/:allergyId', patientFromPath, deleteAllergy);
 
 // ==========================================
 // 🏛️ 8. eCR (Electronic Case Reporting)
 // ==========================================
 router.get('/public-health/reportable-conditions', getReportableConditions);
-router.post('/public-health/ecr', validate({ body: CreateECRBody }), createECR);
+router.post('/public-health/ecr', patientFromBody, validate({ body: CreateECRBody }), createECR);
 router.get('/public-health/ecr', listECRs);
 router.get('/public-health/ecr/:reportId', getECR);
 
@@ -204,9 +219,9 @@ router.get('/public-health/ecr/:reportId', getECR);
 // ==========================================
 router.get('/immunizations/cvx/search', searchCVXCodes);
 router.get('/immunizations/cvx/groups', getCVXGroups);
-router.post('/immunizations', validate({ body: RecordImmunizationBody }), recordImmunization);
-router.get('/immunizations/:patientId', getPatientImmunizations);
-router.put('/immunizations/:patientId/:immunizationId', validate({ body: UpdateImmunizationBody }), updateImmunization);
+router.post('/immunizations', patientFromBody, validate({ body: RecordImmunizationBody }), recordImmunization);
+router.get('/immunizations/:patientId', patientFromPath, getPatientImmunizations);
+router.put('/immunizations/:patientId/:immunizationId', patientFromPath, validate({ body: UpdateImmunizationBody }), updateImmunization);
 
 // ==========================================
 // 📦 10. BULK FHIR $export
@@ -221,16 +236,16 @@ router.get('/fhir/export-jobs', listExportJobs);
 // ==========================================
 router.get('/sdoh/z-codes', getSDOHCodes);
 router.get('/sdoh/screening', getScreeningQuestionnaire);
-router.post('/sdoh/assessments', validate({ body: SubmitSDOHBody }), submitSDOHAssessment);
-router.get('/sdoh/assessments/:patientId', getPatientSDOHAssessments);
-router.get('/sdoh/observations/:patientId', getSDOHObservations);
+router.post('/sdoh/assessments', patientFromBody, validate({ body: SubmitSDOHBody }), submitSDOHAssessment);
+router.get('/sdoh/assessments/:patientId', patientFromPath, getPatientSDOHAssessments);
+router.get('/sdoh/observations/:patientId', patientFromPath, getSDOHObservations);
 
 // ==========================================
 // 🔗 12. MASTER PATIENT INDEX (MPI)
 // ==========================================
 router.post('/mpi/search', validate({ body: SearchMPIBody }), searchMPI);
 router.post('/mpi/link', validate({ body: LinkPatientsBody }), linkPatients);
-router.get('/mpi/links/:patientId', getPatientLinks);
+router.get('/mpi/links/:patientId', patientFromPath, getPatientLinks);
 router.get('/mpi/duplicates', scanDuplicates);
 
 // ==========================================
@@ -257,7 +272,7 @@ router.delete('/bluebutton/disconnect/:patientId', disconnectBlueButton);
 // 🚀 15. SMART ON FHIR LAUNCH (Gap #4 FIX)
 // ==========================================
 router.get('/fhir/launch', getSmartLaunchContext);
-router.get('/fhir/launch/:patientId', getSmartLaunchContext);
-router.post('/fhir/launch-context', registerLaunchContext);
+router.get('/fhir/launch/:patientId', patientFromPath, getSmartLaunchContext);
+router.post('/fhir/launch-context', patientFromBody, registerLaunchContext);
 
 export default router;

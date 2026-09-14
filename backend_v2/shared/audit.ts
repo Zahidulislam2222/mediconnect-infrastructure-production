@@ -12,6 +12,7 @@ export interface AuditMetadata {
     region?: string;      // 🟢 Mandatory for GDPR Routing
     ipAddress?: string;   // HIPAA 2026 requirement
     role?: string;        // Role-based auditing
+    requirePersistence?: boolean;
     [key: string]: any;
 }
 
@@ -98,5 +99,6 @@ export const writeAuditLog = async (
             targetRegion,
             details
         });
+        if (metadata?.requirePersistence) throw new Error('AUDIT_PERSISTENCE_REQUIRED', { cause: error });
     }
 };

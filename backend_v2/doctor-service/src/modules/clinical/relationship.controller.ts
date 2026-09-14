@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 import { Request, Response } from "express";
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
 // 🟢 ARCHITECTURE FIX: Use Shared Factory (Prevents Region Lock & Socket Exhaustion)
@@ -9,10 +10,7 @@ import { safeError } from '../../../../shared/logger';
 const TABLE_GRAPH = "mediconnect-graph-data";
 
 // 🟢 COMPILER FIX: Safely extract region string
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 export const getRelationships = async (req: Request, res: Response) => {
     try {

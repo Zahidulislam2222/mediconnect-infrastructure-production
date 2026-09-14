@@ -13,14 +13,15 @@ import {
     PLANS,
     TABLE_SUBSCRIPTIONS,
 } from '../../../shared/subscription';
+import { TABLE_NAMES, setting } from '../../../shared/settings';
 
 const STRIPE_SECRET_NAME = "/mediconnect/stripe/keys";
 const STRIPE_WEBHOOK_SECRET_NAME = "/mediconnect/stripe/webhook_secret";
 
-const TABLE_TRANSACTIONS = process.env.TABLE_TRANSACTIONS || "mediconnect-transactions";
-const TABLE_PRESCRIPTIONS = process.env.TABLE_PRESCRIPTIONS || "mediconnect-prescriptions";
-const TABLE_APPOINTMENTS = process.env.TABLE_APPOINTMENTS || "mediconnect-appointments";
-const TABLE_INVENTORY = process.env.TABLE_INVENTORY || "mediconnect-pharmacy-inventory";
+const TABLE_TRANSACTIONS = setting("TABLE_TRANSACTIONS");
+const TABLE_PRESCRIPTIONS = setting("TABLE_PRESCRIPTIONS");
+const TABLE_APPOINTMENTS = setting("TABLE_APPOINTMENTS");
+const TABLE_INVENTORY = TABLE_NAMES.inventory;
 
 // ─── IDEMPOTENCY FIX ───────────────────────────────────────────────────────
 // Stripe can retry webhooks up to 100x. The original code had a partial check
@@ -36,7 +37,7 @@ const TABLE_INVENTORY = process.env.TABLE_INVENTORY || "mediconnect-pharmacy-inv
 //   Attributes: type, processedAt, region
 //   TTL: expiresAt (30 days — Stripe retries stop after ~3 days)
 // ────────────────────────────────────────────────────────────────────────────
-const TABLE_WEBHOOK_EVENTS = process.env.TABLE_WEBHOOK_EVENTS || "mediconnect-webhook-events";
+const TABLE_WEBHOOK_EVENTS = setting("TABLE_WEBHOOK_EVENTS");
 const WEBHOOK_EVENT_TTL_DAYS = 30;
 
 /**
@@ -88,7 +89,7 @@ async function claimWebhookEvent(
 export const handleStripeWebhook = async (req: Request, res: Response) => {
     let event: Stripe.Event;
 
-    let region = process.env.AWS_REGION || "us-east-1";
+    let region = setting("AWS_REGION");
     try {
         const unverifiedPayload = JSON.parse(req.body.toString());
         if (unverifiedPayload.data?.object?.metadata?.region) {
@@ -264,7 +265,7 @@ async function handlePaymentFailure(paymentIntent: Stripe.PaymentIntent, regiona
                 amount: (paymentIntent.amount || 0) / 100,
                 status: "FAILED"
             }, region).catch(e => safeError("BigQuery revenue failure sync failed"));
-        } catch {}
+        } catch { safeError("REVENUE_SYNC_FAILED"); }
     }
 
     // Push appointment status to BigQuery (tracks PAYMENT_FAILED status from webhook)
@@ -590,7 +591,7 @@ async function handleDisputeCreated(dispute: Stripe.Dispute, regionalDb: any, re
     try {
         sendNotification({
             region,
-            recipientEmail: process.env.ADMIN_EMAIL || '',
+            recipientEmail: setting("ADMIN_EMAIL"),
             subject: 'Payment Dispute Alert',
             message: `A payment dispute has been filed. Dispute ID: ${dispute.id}. Reason: ${dispute.reason}. Amount: $${((dispute.amount || 0) / 100).toFixed(2)}.`,
             type: 'GENERAL',
@@ -654,7 +655,7 @@ async function handleDisputeClosed(dispute: Stripe.Dispute, regionalDb: any, reg
     try {
         sendNotification({
             region,
-            recipientEmail: process.env.ADMIN_EMAIL || '',
+            recipientEmail: setting("ADMIN_EMAIL"),
             subject: `Payment Dispute ${disputeWon ? 'Won' : 'Lost'}`,
             message: `Dispute ${dispute.id} has been ${disputeWon ? 'won — funds retained' : 'lost — funds returned to customer'}. Amount: $${((dispute.amount || 0) / 100).toFixed(2)}.`,
             type: 'GENERAL',

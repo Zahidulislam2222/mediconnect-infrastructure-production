@@ -3,6 +3,7 @@ import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
 import { ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { publishEvent, EventType } from './event-bus';
 import { safeError } from './logger';
+import { setting } from './settings';
 
 // In-memory rate tracking for breach detection
 const accessCounts: Map<string, { count: number; firstSeen: number }> = new Map();
@@ -70,7 +71,7 @@ async function sendBreachAlert(
     }
 
     try {
-        const snsClient = new SNSClient({ region: region || process.env.AWS_REGION || 'us-east-1' });
+        const snsClient = new SNSClient({ region: region || setting("AWS_REGION") });
         await snsClient.send(new PublishCommand({
             TopicArn: snsTopicArn,
             Subject: `[MediConnect BREACH ALERT] ${alertType}: ${action}`,

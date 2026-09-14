@@ -147,8 +147,8 @@ describe('Notification Implementation — SES', () => {
     );
 
     assert(
-        notifications.includes('noreply@mediconnect.health'),
-        'Default sender is noreply@mediconnect.health'
+        notifications.includes('setting("SES_SENDER_EMAIL")'),
+        'Sender comes from required SES_SENDER_EMAIL configuration'
     );
 });
 

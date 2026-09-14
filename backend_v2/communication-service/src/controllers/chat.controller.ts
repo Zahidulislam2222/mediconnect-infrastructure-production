@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../shared/region-context';
 import { Request, Response, NextFunction } from "express";
 import {
     ApiGatewayManagementApi,
@@ -9,14 +10,15 @@ import { mapToFHIRCommunication, scrubPII } from "../utils/fhir-mapper";
 import { writeAuditLog } from "../../../shared/audit";
 import { safeLog, safeError } from "../../../shared/logger";
 import { encryptPHI, decryptPHI } from '../../../shared/kms-crypto';
+import { TABLE_NAMES, setting } from '../../../shared/settings';
 
 const catchAsync = (fn: any) => (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(fn(req, res, next)).catch(next);
 };
 
 const DB_TABLES = {
-    HISTORY: "mediconnect-chat-history",
-    CONNECTIONS: "mediconnect-chat-connections",
+    get HISTORY() { return TABLE_NAMES.chatHistory; },
+    get CONNECTIONS() { return TABLE_NAMES.chatConnections; },
     GRAPH: "mediconnect-graph-data"
 };
 
@@ -25,38 +27,8 @@ const generateConversationId = (userA: string, userB: string): string => {
     return `CONV#${sorted[0]}#${sorted[1]}`;
 };
 
-// 🟢 GDPR FIX: Extract region from headers or WebSocket payload
-export const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
-
-const normalizeWsEvent = async (req: Request) => {
-    const apiEvent = (req as any).apiGateway?.event || (req as any).event || req.body;
-    const context = apiEvent?.requestContext;
-    
-    let userId = context?.authorizer?.sub || context?.authorizer?.principalId;
-    let userRole = context?.authorizer?.role;
-
-    if (!userId && (req as any).user) {
-        userId = (req as any).user.sub;
-        userRole = (req as any).user.role;
-    }
-
-    const routeKey = apiEvent?.routeKey || context?.routeKey || req.query.routeKey || "$connect";
-    const connectionId = context?.connectionId || req.query.connectionId;
-    
-    const body = apiEvent?.body ? (typeof apiEvent.body === 'string' ? JSON.parse(apiEvent.body) : apiEvent.body) : apiEvent;
-    
-    // Fallback region extraction for WebSocket events that might not have standard headers
-    const region = (req.headers && req.headers['x-user-region']) || body?.region || "us-east-1";
-
-    return {
-        routeKey, connectionId, userId, userRole, body, region,
-        domainName: context?.domainName || req.headers.host,
-        stage: context?.stage || process.env.STAGE || 'prod'
-    };
-};
+// Use only the authenticated regional context.
+export const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 export const getChatHistory = catchAsync(async (req: Request, res: Response) => {
     try {
@@ -119,10 +91,17 @@ export const getChatHistory = catchAsync(async (req: Request, res: Response) => 
 
 export const handleWsEventHttp = catchAsync(async (req: Request, res: Response) => {
     try {
-        const event = await normalizeWsEvent(req);
-        if (!event.userId && event.routeKey !== "$disconnect") return res.status(401).json({ message: "Unauthorized" });
-
-        const result = await handleWebSocketEvent(event);
+        const user = (req as any).user;
+        if (!user?.sub) return res.status(401).json({ message: "Unauthorized" });
+        // HTTP callers cannot supply gateway identity or connection lifecycle events.
+        if (req.body.type !== 'message') {
+            return res.status(501).json({ code: 'CHAT_ACTION_NOT_IMPLEMENTED' });
+        }
+        const result = await handleWebSocketEvent({
+            routeKey: 'sendMessage', userId: user.sub, userRole: user.role,
+            region: requestJurisdiction(req),
+            body: { recipientId: req.body.recipientId, text: req.body.content },
+        });
         res.status(result.statusCode).json(result.body);
     } catch (error: any) {
         safeError("[CHAT] WebSocket event handling failed", { error: error.message });
@@ -166,7 +145,7 @@ export const handleWebSocketEvent = async (event: any) => {
             }
             return { statusCode: 200, body: {} };
 
-        case "sendMessage":
+        case "sendMessage":{
             const data = body.body || body; 
             const { recipientId, text } = data;
 
@@ -194,13 +173,12 @@ export const handleWebSocketEvent = async (event: any) => {
 
             // Encrypt message text as PHI before storage
             const scrubbedText = scrubPII(text);
-            let encryptedText = scrubbedText;
+            let encryptedText: string;
             try {
                 const encrypted = await encryptPHI({ text: scrubbedText }, region);
                 encryptedText = encrypted.text;
             } catch {
-                // Fallback: store scrubbed plaintext if encryption fails
-                safeError("[CHAT] PHI encryption failed for message, storing scrubbed plaintext");
+                return { statusCode: 503, body: { code: 'PHI_ENCRYPTION_UNAVAILABLE' } };
             }
 
             // Idempotency: use client-provided messageId to prevent duplicate storage
@@ -210,7 +188,7 @@ export const handleWebSocketEvent = async (event: any) => {
                     TableName: DB_TABLES.HISTORY,
                     Item: {
                         conversationId, timestamp, senderId: userId, recipientId,
-                        text: encryptedText, resource: fhirResource, isRead: false,
+                        text: encryptedText, resource: { ...fhirResource, payload: [{ contentString: encryptedText }] }, isRead: false,
                         messageId
                     },
                     ConditionExpression: "attribute_not_exists(conversationId) AND attribute_not_exists(#ts)",
@@ -248,6 +226,7 @@ export const handleWebSocketEvent = async (event: any) => {
 
             await Promise.all(deliveryPromises);
             return { statusCode: 200, body: { status: "Sent", conversationId } };
+}
 
         case "$disconnect":
             await regionalDb.send(new DeleteCommand({ TableName: DB_TABLES.CONNECTIONS, Key: { connectionId } }));

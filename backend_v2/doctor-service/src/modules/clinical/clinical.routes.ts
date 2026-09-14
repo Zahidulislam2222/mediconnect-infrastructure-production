@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 import { Router, Request, Response } from "express";
 import { v4 as uuidv4 } from "uuid";
 import { z } from 'zod';
@@ -31,10 +32,7 @@ import { writeAuditLog } from "../../../../shared/audit";
 
 const router = Router();
 
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // =============================================================================
 // VALIDATION SCHEMAS (Fix #13)

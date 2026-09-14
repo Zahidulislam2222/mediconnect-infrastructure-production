@@ -1,24 +1,30 @@
 name: "Enterprise Multi-Cloud Deploy (Mediconnect)"
 
 # ─────────────────────────────────────────────────────────────────
+# SHOWCASE SAFETY: the owner intentionally removed costly cloud resources.
+# This implementation is retained as portfolio evidence, but the workflow is
+# disabled in GitHub and no longer triggers on push. Re-enabling it requires a
+# deliberate manual dispatch plus the exact acknowledgement input below.
+#
 # Toggle cloud deploys via GitHub repo variables (Settings > Variables):
-#   DEPLOY_GCP = "false" | (unset = on by default)
+#   DEPLOY_GCP = "true" | (unset = off)
 #   DEPLOY_AKS = "true" | (unset = off)
 #   DEPLOY_EKS = "true" | (unset = off)
+#   DEPLOY_LAMBDAS = "true" | (unset = off)
 #
-# GCP Cloud Run deploys by default. Set DEPLOY_GCP=false to skip
-# (e.g., when GCP billing is disabled).
+# GCP Cloud Run is off by default, like AKS and EKS.
 #
 # When re-enabling K8s, also create these secrets if missing:
 #   EKS_ADMIN_ROLE_ARN, EKS_STAFF_ROLE_ARN
 # ─────────────────────────────────────────────────────────────────
 
 on:
-  push:
-    branches: [ "main" ]
-    paths:
-      - 'backend_v2/**'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      cloud_cost_acknowledgement:
+        description: "Exact value required: I_UNDERSTAND_CLOUD_DEPLOYMENT_CAN_COST_MONEY"
+        required: true
+        type: string
 
 permissions:
   id-token: write
@@ -38,10 +44,23 @@ env:
   EKS_CLUSTER: "mediconnect-eks-eu"
 
 jobs:
+  authorization-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require explicit cloud-cost acknowledgement
+        env:
+          ACKNOWLEDGEMENT: ${{ inputs.cloud_cost_acknowledgement }}
+        run: |
+          test "$ACKNOWLEDGEMENT" = "I_UNDERSTAND_CLOUD_DEPLOYMENT_CAN_COST_MONEY" || {
+            echo "Cloud deployment remains disabled: acknowledgement did not match."
+            exit 1
+          }
+
   # ═══════════════════════════════════════════════════════════════
   #  1. Test & Lint
   # ═══════════════════════════════════════════════════════════════
   test-and-lint:
+    needs: [authorization-gate]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -129,15 +148,15 @@ jobs:
       - if: vars.DEPLOY_EKS == 'true'
         run: aws ecr get-login-password --region eu-central-1 | docker login --username AWS --password-stdin ${{ env.AWS_ECR }}
 
-      # --- GCP GAR (when GCP enabled — set DEPLOY_GCP=false to skip) ---
-      - if: vars.DEPLOY_GCP != 'false'
+      # --- GCP GAR (showcase is off unless DEPLOY_GCP=true) ---
+      - if: vars.DEPLOY_GCP == 'true'
         uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
-      - if: vars.DEPLOY_GCP != 'false'
+      - if: vars.DEPLOY_GCP == 'true'
         uses: google-github-actions/setup-gcloud@v2
-      - if: vars.DEPLOY_GCP != 'false'
+      - if: vars.DEPLOY_GCP == 'true'
         run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
       - name: "Build and push container image"
@@ -145,8 +164,8 @@ jobs:
           TAG=${{ github.sha }}
           docker build -t local-img -f backend_v2/${{ matrix.service }}/Dockerfile .
 
-          # GCP Artifact Registry (when GCP enabled — default: on)
-          if [ "${{ vars.DEPLOY_GCP }}" != "false" ]; then
+          # GCP Artifact Registry (only when explicitly enabled)
+          if [ "${{ vars.DEPLOY_GCP }}" == "true" ]; then
             docker tag local-img ${{ env.GCP_GAR }}/${{ matrix.service }}:$TAG
             docker push ${{ env.GCP_GAR }}/${{ matrix.service }}:$TAG
           fi
@@ -469,7 +488,7 @@ jobs:
   #
   deploy-gcp:
     needs: [build-and-push]
-    if: vars.DEPLOY_GCP != 'false'
+    if: vars.DEPLOY_GCP == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -583,6 +602,7 @@ jobs:
   #
   deploy-lambdas:
     needs: [test-and-lint]
+    if: vars.DEPLOY_LAMBDAS == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

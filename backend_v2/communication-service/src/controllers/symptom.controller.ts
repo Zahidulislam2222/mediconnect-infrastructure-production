@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../shared/region-context';
 import { Request, Response } from "express";
 import { ComprehendMedicalClient, DetectEntitiesV2Command } from "@aws-sdk/client-comprehendmedical";
 import { AICircuitBreaker } from "../utils/ai-circuit-breaker";
@@ -10,28 +11,14 @@ import { jsPDF } from "jspdf";
 import { v4 as uuidv4 } from "uuid";
 import { GoogleAuth } from "google-auth-library";
 import { createHash } from "crypto";
+import { requiredEnv } from '../../../shared/settings';
+import { AIUnavailableError, parseClinicalAssessment } from '../utils/clinical-assessment';
 
 const aiService = new AICircuitBreaker();
 
 // 🟢 GDPR FIX: Extract Region Helper
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
-// --- HELPER: CLEAN JSON ---
-function cleanAndParseJSON(text: string) {
-    try {
-        let clean = text.replace(/```json/g, "").replace(/```/g, "").trim();
-        const firstOpen = clean.indexOf("{");
-        const lastClose = clean.lastIndexOf("}");
-        if (firstOpen !== -1 && lastClose !== -1) {
-            clean = clean.substring(firstOpen, lastClose + 1);
-            return JSON.parse(clean);
-        }
-        return null;
-    } catch (e: any) { return null; }
-}
 
 export const checkSymptoms = async (req: Request, res: Response) => {
     const user = (req as any).user;
@@ -61,7 +48,7 @@ export const checkSymptoms = async (req: Request, res: Response) => {
         // 3. AI CIRCUIT BREAKER (Azure -> Bedrock -> Vertex)
         const prompt = `Analyze these symptoms: ${symptoms.join(", ")}. Determine risk: High, Medium, or Low. Return ONLY JSON: {"risk": "High|Medium|Low", "reason": "Short explanation"}`;
         const aiResponse = await aiService.generateResponse(prompt, [], userRegion);
-        const analysis = cleanAndParseJSON(aiResponse.text) || { risk: "Medium", reason: "Analysis partial." };
+        const analysis = parseClinicalAssessment(aiResponse.text);
 
         // 4. FHIR R4 MAPPING
         const fhirReport = mapToFHIRDiagnosticReport(user.sub, symptoms as string[], analysis, aiResponse.provider);
@@ -138,12 +125,17 @@ export const checkSymptoms = async (req: Request, res: Response) => {
 
         res.json({
             success: true,
+            status: 'available',
+            provider: aiResponse.provider,
             analysis,
             pdfBase64,
             fhirResourceId: sessionId
         });
 
     } catch (error: any) {
+        if (error instanceof AIUnavailableError) {
+            return res.status(503).json({ success: false, status: 'unavailable', code: 'AI_ASSESSMENT_UNAVAILABLE' });
+        }
         safeError("[SYMPTOM] Symptom check failed", { error: error.message });
         res.status(500).json({ error: "Internal Server Error" });
     }
@@ -172,7 +164,7 @@ async function pushToBigQuery(userId: string, symptoms: string[], analysis: any,
                 kind: "bigquery#tableDataInsertAllRequest",
                 rows:[{
                     json: {
-                        user_id: createHash('sha256').update(userId + (process.env.HIPAA_SALT || 'mediconnect_salt')).digest('hex'),
+                        user_id: createHash('sha256').update(userId + requiredEnv('HIPAA_SALT')).digest('hex'),
                         timestamp: new Date().toISOString(),
                         symptoms: symptoms.join(", "),
                         risk_level: analysis.risk,

@@ -7,9 +7,9 @@ module "lambda_us" {
 
   functions = {
     "mediconnect-cognito-triggers" = {
-      runtime     = "nodejs22.x"
-      timeout     = 30
-      role_arn    = "arn:aws:iam::950110266426:role/mediconnect-lambda-shared-role"
+      runtime  = "nodejs22.x"
+      timeout  = 30
+      role_arn = "arn:aws:iam::950110266426:role/mediconnect-lambda-shared-role"
       environment_variables = {
         COGNITO_CLIENT_ID_US_ADMIN  = "3makppltr8e6eaanjab3e1lkh0"
         COGNITO_CLIENT_ID_US_STAFF  = "1rjvst6bo1o2sum28o4pvkf378"
@@ -20,6 +20,9 @@ module "lambda_us" {
     "mediconnect-ws-authorizer" = {
       role_arn = "arn:aws:iam::950110266426:role/service-role/mediconnect-ws-authorizer-role-5u712lso"
       environment_variables = {
+        TABLE_CHAT_CONNECTIONS       = "mediconnect-chat-connections"
+        PRIVACY_US_REGION            = "us-east-1"
+        PRIVACY_EU_REGION            = "eu-central-1"
         COGNITO_CLIENT_ID_US_PATIENT = "20lbag98p4vlj53eumfo11h7ac"
         COGNITO_USER_POOL_ID_US      = "us-east-1_fUsIfc7kL"
         COGNITO_CLIENT_ID_US_DOCTOR  = "6nsqer529j4c8gc688vflosomk"

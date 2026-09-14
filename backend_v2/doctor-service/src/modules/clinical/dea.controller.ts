@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 // ─── FEATURE #19: DEA Number Validation ────────────────────────────────────
 // Validates DEA (Drug Enforcement Administration) license numbers for
 // controlled substance prescribing authorization.
@@ -10,10 +11,7 @@ import { Request, Response } from 'express';
 import { writeAuditLog } from '../../../../shared/audit';
 import { safeError } from '../../../../shared/logger';
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── DEA Registrant Type Codes ─────────────────────────────────────────────
 

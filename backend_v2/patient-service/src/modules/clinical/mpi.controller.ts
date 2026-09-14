@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 // ─── FEATURE #22: Master Patient Index (MPI) ──────────────────────────────
 // Patient deduplication and matching using probabilistic scoring.
 // Matches on: name (phonetic), DOB, gender, phone, email, address.
@@ -10,15 +11,13 @@ import { v4 as uuidv4 } from 'uuid';
 import { PutCommand, ScanCommand, GetCommand, UpdateCommand, QueryCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
+import { setting } from '../../../../shared/settings';
 
-const TABLE_PATIENTS = process.env.DYNAMO_TABLE || 'mediconnect-patients';
-const TABLE_MPI = process.env.TABLE_MPI || 'mediconnect-mpi-links';
-const SOUNDEX_GSI = process.env.MPI_SOUNDEX_GSI || ''; // Set to GSI name when available (e.g., 'soundexLastName-index')
+const TABLE_PATIENTS = setting("DYNAMO_TABLE");
+const TABLE_MPI = setting("TABLE_MPI");
+const SOUNDEX_GSI = setting("MPI_SOUNDEX_GSI"); // Set to GSI name when available (e.g., 'soundexLastName-index')
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── Gap #6 FIX: GSI-ready phonetic search ──────────────────────────────────
 // When SOUNDEX_GSI is configured, narrows candidates to same phonetic block

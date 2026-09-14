@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../shared/region-context';
 // ─── FEATURE #24: Insurance Eligibility Check ─────────────────────────────
 // Real-time insurance eligibility verification before appointment booking.
 // FHIR CoverageEligibilityRequest/Response resources.
@@ -10,13 +11,11 @@ import { v4 as uuidv4 } from 'uuid';
 import { PutCommand, QueryCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient } from '../../../shared/aws-config';
 import { writeAuditLog } from '../../../shared/audit';
+import { setting } from '../../../shared/settings';
 
-const TABLE_ELIGIBILITY = process.env.TABLE_ELIGIBILITY || 'mediconnect-eligibility-checks';
+const TABLE_ELIGIBILITY = setting("TABLE_ELIGIBILITY");
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── Built-in Insurance Plans (Demo/Sandbox) ───────────────────────────────
 

@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { getRegionalClient } from '../../../shared/aws-config';
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { safeError } from '../../../shared/logger';
+import { safeError } from '../../../shared/logger';
+import { setting } from '../../../shared/settings';
 
 export const requireDoctorVerification = async (req: Request, res: Response, next: NextFunction) => {
     const user = (req as any).user;
@@ -10,7 +11,7 @@ export const requireDoctorVerification = async (req: Request, res: Response, nex
     try {
         const db = getRegionalClient(user.region);
         const result = await db.send(new GetCommand({
-            TableName: process.env.DYNAMO_TABLE || 'mediconnect-doctors',
+            TableName: setting("DYNAMO_TABLE"),
             Key: { doctorId: user.sub },
             ProjectionExpression: "isIdentityVerified, verificationStatus"
         }));

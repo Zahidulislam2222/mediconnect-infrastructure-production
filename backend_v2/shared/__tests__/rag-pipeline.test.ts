@@ -1,3 +1,4 @@
+import { ModelRouter } from '../../communication-service/src/utils/model-router';
 export {};
 // ─── RAG Pipeline Unit Tests ─────────────────────────────────────────────
 // Tests: Confidence scoring math, reranking logic, query complexity
@@ -199,7 +200,6 @@ describe('Query Complexity — Edge cases', () => {
 
 describe('Model Router Config — Defaults', () => {
     // Import the config loading logic
-    const { ModelRouter } = require('../../communication-service/src/utils/model-router');
     const router = new ModelRouter();
     const config = router.getConfig();
 

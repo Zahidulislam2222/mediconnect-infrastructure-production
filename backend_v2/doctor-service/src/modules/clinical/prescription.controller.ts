@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 import { Router, Request, Response } from "express";
 import { PDFGenerator } from "../../utils/pdf-generator";
 import { getRegionalClient, getRegionalS3Client } from '../../../../shared/aws-config';
@@ -10,23 +11,21 @@ import { validateUSCore } from '../../../../shared/us-core-profiles';
 import { sendNotification } from '../../../../shared/notifications';
 import { encryptPHI, decryptPHI } from '../../../../shared/kms-crypto';
 import { publishEvent, EventType } from '../../../../shared/event-bus';
+import { TABLE_NAMES, setting } from '../../../../shared/settings';
 
 const router = Router();
 const pdfGen = new PDFGenerator();
 const TABLE_RX = "mediconnect-prescriptions";
-const TABLE_DRUGS = "mediconnect-drug-interactions";
+const TABLE_DRUGS = TABLE_NAMES.drugInteractions;
 const TABLE_TRANSACTION = "mediconnect-transactions";
 const TABLE_GRAPH = "mediconnect-graph-data";
-const TABLE_ALLERGIES = process.env.TABLE_ALLERGIES || "mediconnect-allergies";
+const TABLE_ALLERGIES = setting("TABLE_ALLERGIES");
 const AUDIT_TABLE = "mediconnect-audit-logs";
 
-const DEFAULT_PHARMACY = process.env.DEFAULT_PHARMACY_ID || "CVS-001";
+const DEFAULT_PHARMACY = setting("DEFAULT_PHARMACY_ID");
 
 // 🟢 COMPILER FIX: Safely parse headers to prevent "string | string[]" build failures
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // --- LOGIC RESTORATION: Drug Interaction Check (Now GDPR Compliant) ---
 const checkInteractionSeverity = async (medication: string, region: string) => {
@@ -115,7 +114,7 @@ export const createPrescription = async (req: Request, res: Response) => {
     }
 
     // 🟢 FIX #2: Check drug interaction severity BEFORE creating prescription
-    let interactionWarnings: string[] = [];
+    const interactionWarnings: string[] = [];
     try {
         const interactionSeverity = await checkInteractionSeverity(medication, userRegion);
         if (interactionSeverity === "MAJOR") {
@@ -211,7 +210,7 @@ export const createPrescription = async (req: Request, res: Response) => {
 
     try {
         const invData = await docClient.send(new GetCommand({
-            TableName: "mediconnect-pharmacy-inventory",
+            TableName: TABLE_NAMES.inventory,
             Key: { pharmacyId: req.body.pharmacyId || DEFAULT_PHARMACY, drugId: medication }
         }));
         const realPrice = invData.Item?.price || 15.00;
@@ -224,7 +223,7 @@ export const createPrescription = async (req: Request, res: Response) => {
             encryptedPatientName = encryptedNames.patientName;
             encryptedDoctorName = encryptedNames.doctorName;
         } catch (encErr: any) {
-            safeError("[RX] PHI encryption failed, storing plaintext as fallback", encErr.message);
+            throw new Error('PHI_ENCRYPTION_UNAVAILABLE', { cause: encErr });
         }
         const rxData = { prescriptionId, patientName: encryptedPatientName, doctorName: encryptedDoctorName, medication, dosage, instructions, timestamp, price: realPrice, refillsRemaining: Number(req.body.refills) || 2, paymentStatus: "UNPAID" };
         const { pdfUrl, signature } = await pdfGen.generatePrescriptionPDF({ ...rxData, patientName, doctorName }, userRegion);
@@ -269,7 +268,7 @@ export const createPrescription = async (req: Request, res: Response) => {
         (async () => {
             try {
                 const patientRes = await docClient.send(new GetCommand({
-                    TableName: process.env.DYNAMO_TABLE_PATIENTS || "mediconnect-patients",
+                    TableName: setting("DYNAMO_TABLE_PATIENTS"),
                     Key: { patientId },
                     ProjectionExpression: "email, #n",
                     ExpressionAttributeNames: { "#n": "name" }
@@ -323,7 +322,7 @@ export const getPrescriptions = async (req: Request, res: Response) => {
             } catch (decErr) { /* Migration-safe: plaintext passes through */ }
             try {
                 // 🟢 SCOPE FIX: Changed 'medication' to 'rx.medication'
-                const inv = await docClient.send(new GetCommand({ TableName: "mediconnect-pharmacy-inventory", Key: { pharmacyId: DEFAULT_PHARMACY, drugId: rx.medication } }));
+                const inv = await docClient.send(new GetCommand({ TableName: TABLE_NAMES.inventory, Key: { pharmacyId: DEFAULT_PHARMACY, drugId: rx.medication } }));
                 return { ...rx, liveStock: inv.Item?.stock ?? 0, livePrice: inv.Item?.price ?? rx.price };
             } catch (e) { return { ...rx, liveStock: 0, livePrice: rx.price }; }
         }));
@@ -571,8 +570,8 @@ export const cancelPrescription = async (req: Request, res: Response) => {
         // Delete prescription PDF from S3
         try {
             const s3Bucket = userRegion.toUpperCase().includes('EU')
-                ? (process.env.S3_BUCKET_PRESCRIPTIONS_EU || 'mediconnect-prescriptions-eu')
-                : (process.env.S3_BUCKET_PRESCRIPTIONS_US || 'mediconnect-prescriptions');
+                ? (setting("S3_BUCKET_PRESCRIPTIONS_EU"))
+                : (setting("S3_BUCKET_PRESCRIPTIONS_US"));
             const s3Client = getRegionalS3Client(userRegion);
             await s3Client.send(new DeleteObjectCommand({
                 Bucket: s3Bucket,

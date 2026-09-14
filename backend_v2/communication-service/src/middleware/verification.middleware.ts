@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { getRegionalClient } from '../../../shared/aws-config';
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { logger } from "../../../shared/logger";
+import { logger } from "../../../shared/logger";
+import { setting } from '../../../shared/settings';
 
 export const requireIdentityVerification = async (req: Request, res: Response, next: NextFunction) => {
     const user = (req as any).user;
@@ -13,7 +14,7 @@ export const requireIdentityVerification = async (req: Request, res: Response, n
         if (user.isDoctor) {
             // Check Doctor Verification
             const result = await db.send(new GetCommand({
-                TableName: process.env.TABLE_DOCTORS || 'mediconnect-doctors',
+                TableName: setting("TABLE_DOCTORS"),
                 Key: { doctorId: user.id },
                 ProjectionExpression: "isIdentityVerified, verificationStatus"
             }));
@@ -24,12 +25,12 @@ export const requireIdentityVerification = async (req: Request, res: Response, n
         } else {
             // Check Patient Verification
             const result = await db.send(new GetCommand({
-                TableName: process.env.TABLE_PATIENTS || 'mediconnect-patients',
+                TableName: setting("TABLE_PATIENTS"),
                 Key: { patientId: user.id },
-                ProjectionExpression: "isIdentityVerified"
+                ProjectionExpression: "isIdentityVerified, erasure"
             }));
 
-            if (!result.Item || result.Item.isIdentityVerified !== true) {
+            if (!result.Item || result.Item.isIdentityVerified !== true || ['IN_PROGRESS', 'RETRY_REQUIRED', 'COMPLETED'].includes(result.Item.erasure?.state)) {
                 return res.status(403).json({ error: "HIPAA Security Block: You must complete Photo ID Verification before booking appointments." });
             }
         }

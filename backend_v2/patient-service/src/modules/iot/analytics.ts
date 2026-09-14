@@ -5,6 +5,7 @@ import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { getRegionalS3Client } from '../../../../shared/aws-config';
 import { safeError } from '../../../../shared/logger';
 import { createHash } from 'crypto';
+import { requiredEnv, setting } from '../../../../shared/settings';
 
 let bigquery: BigQuery;
 
@@ -31,7 +32,7 @@ export const analyticsHandler = async (event: any, region: string = "us-east-1")
                 if (newImage.status === 'COMPLETED' && oldImage.status !== 'COMPLETED') {
                     rowsToInsert.push({
                         appointment_id: newImage.appointmentId,
-                        patient_id: createHash('sha256').update(newImage.patientId + (process.env.HIPAA_SALT || 'mediconnect_salt')).digest('hex'),
+                        patient_id: createHash('sha256').update(newImage.patientId + requiredEnv('HIPAA_SALT')).digest('hex'),
                         doctor_id: newImage.doctorId,
                         timestamp: new Date().toISOString(),
                         specialization: newImage.specialization || 'General',
@@ -56,7 +57,7 @@ export const analyticsHandler = async (event: any, region: string = "us-east-1")
 
         // 🟢 GDPR FIX: Ensure Dead Letter Queue writes to the correct Legal Jurisdiction
         const regionalS3 = getRegionalS3Client(region);
-        const DLQ_BUCKET = process.env.DLQ_BUCKET || "mediconnect-data-lake-dlq";
+        const DLQ_BUCKET = setting("DLQ_BUCKET");
         const targetBucket = region.toUpperCase() === 'EU' ? `${DLQ_BUCKET}-eu` : DLQ_BUCKET;
         const dlqKey = `failed/${Date.now()}.json`;
 

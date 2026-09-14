@@ -58,6 +58,8 @@ spec:
               value: "__AWS_ROLE_ARN__"
             - name: AWS_WEB_IDENTITY_TOKEN_FILE
               value: "__TOKEN_FILE__"
+            - name: TABLE_INVENTORY
+              value: "__TABLE_INVENTORY__"
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/var/run/secrets/gcp/gcp-wif-config.json"
 

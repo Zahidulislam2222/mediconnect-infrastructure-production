@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../shared/region-context';
 import { Request, Response, NextFunction } from "express";
 import { ChimeSDKMeetingsClient, CreateMeetingCommand, CreateAttendeeCommand, DeleteMeetingCommand } from "@aws-sdk/client-chime-sdk-meetings";
 import { ChimeSDKMediaPipelinesClient, CreateMediaCapturePipelineCommand, DeleteMediaCapturePipelineCommand } from "@aws-sdk/client-chime-sdk-media-pipelines";
@@ -9,19 +10,17 @@ import { safeLog, safeError } from "../../../shared/logger";
 import { publishEvent, EventType } from '../../../shared/event-bus';
 import { GoogleAuth } from "google-auth-library";
 import { createHash } from "crypto";
+import { requiredEnv, setting } from '../../../shared/settings';
 
 const catchAsync = (fn: any) => (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(fn(req, res, next)).catch(next);
 };
 
-const TABLE_SESSIONS = process.env.TABLE_SESSIONS || "mediconnect-video-sessions";
-const BASE_RECORDING_BUCKET = process.env.RECORDING_BUCKET || "mediconnect-consultation-recordings";
+const TABLE_SESSIONS = setting("TABLE_SESSIONS");
+const BASE_RECORDING_BUCKET = setting("RECORDING_BUCKET");
 
 // 🟢 GDPR FIX: Extract region
-export const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
+export const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // POST /video/session - Create or Join a meeting
 export const createOrJoinSession = catchAsync(async (req: Request, res: Response) => {
@@ -135,7 +134,7 @@ async function pushAppointmentCompletedToBigQuery(aptData: { appointmentId: stri
         const dataset = region.toUpperCase() === 'EU' ? 'mediconnect_analytics_eu' : 'mediconnect_analytics';
         const url = `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/datasets/${dataset}/tables/appointments_stream/insertAll`;
 
-        const safePatientId = createHash('sha256').update(aptData.patientId + (process.env.HIPAA_SALT || 'mediconnect_salt')).digest('hex');
+        const safePatientId = createHash('sha256').update(aptData.patientId + requiredEnv('HIPAA_SALT')).digest('hex');
 
         await fetch(url, {
             method: 'POST',
@@ -195,11 +194,11 @@ export const endSession = catchAsync(async (req: Request, res: Response) => {
         const session = dbRes.Item;
 
         if (session?.pipelineId) {
-            try { await pipelineClient.send(new DeleteMediaCapturePipelineCommand({ MediaPipelineId: session.pipelineId })); } catch (e) { }
+            try { await pipelineClient.send(new DeleteMediaCapturePipelineCommand({ MediaPipelineId: session.pipelineId })); } catch (error: any) { if (error.name !== 'NotFoundException') throw new Error('CONSULTATION_CLEANUP_INCOMPLETE', { cause: error }); }
         }
 
         if (session?.meeting?.MeetingId) {
-            try { await chimeClient.send(new DeleteMeetingCommand({ MeetingId: session.meeting.MeetingId })); } catch (e) { }
+            try { await chimeClient.send(new DeleteMeetingCommand({ MeetingId: session.meeting.MeetingId })); } catch (error: any) { if (error.name !== 'NotFoundException') throw new Error('CONSULTATION_CLEANUP_INCOMPLETE', { cause: error }); }
             await regionalDb.send(new DeleteCommand({ TableName: TABLE_SESSIONS, Key: { appointmentId } }));
             
             await regionalDb.send(new UpdateCommand({

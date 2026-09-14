@@ -1,7 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 import { getRegionalClient } from '../../../shared/aws-config';
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
-import { safeError } from '../../../shared/logger';
+import { safeError } from '../../../shared/logger';
+import { setting } from '../../../shared/settings';
 
 export const requireIdentityVerification = async (req: Request, res: Response, next: NextFunction) => {
     const user = (req as any).user;
@@ -13,7 +14,7 @@ export const requireIdentityVerification = async (req: Request, res: Response, n
         if (user.isDoctor) {
             // Check Doctor Verification
             const result = await db.send(new GetCommand({
-                TableName: process.env.TABLE_DOCTORS || 'mediconnect-doctors',
+                TableName: setting("TABLE_DOCTORS"),
                 Key: { doctorId: user.id },
                 ProjectionExpression: "isIdentityVerified, verificationStatus"
             }));
@@ -24,7 +25,7 @@ export const requireIdentityVerification = async (req: Request, res: Response, n
         } else {
             // Check Patient Verification
             const result = await db.send(new GetCommand({
-                TableName: process.env.TABLE_PATIENTS || 'mediconnect-patients',
+                TableName: setting("TABLE_PATIENTS"),
                 Key: { patientId: user.id },
                 ProjectionExpression: "isIdentityVerified"
             }));

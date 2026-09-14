@@ -17,7 +17,7 @@ export function getSignedIoTUrl(
 ): string {
     const time = new Date();
     const dateStamp = time.toISOString().split('T')[0].replace(/-/g, '');
-    const amzDate = time.toISOString().replace(/[:\-]|\.\d{3}/g, '');
+    const amzDate = time.toISOString().replace(/[:-]|\.\d{3}/g, '');
     const service = 'iotdevicegateway';
     const algorithm = 'AWS4-HMAC-SHA256';
     const method = 'GET';

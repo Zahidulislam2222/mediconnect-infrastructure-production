@@ -1,14 +1,15 @@
 #!/bin/bash
 # ============================================================================
-# verify_migration.sh — Migration Completion Gate
+# verify_migration.sh — Showcase/Live Migration Verification Gate
 # ============================================================================
-# This script verifies IaC migration progress across ALL 3 clouds.
-# It checks Terraform state against Phase 0 discovery counts.
+# Default mode verifies that intentionally retired showcase infrastructure is
+# preserved and inert. Pass --live to run the original three-cloud state and
+# runtime checks when live infrastructure has been explicitly reactivated.
 #
 # MANDATORY: Run this before declaring ANY phase complete.
 # Paste the full output into the conversation as proof.
 #
-# Usage: bash verify_migration.sh
+# Usage: bash verify_migration.sh [--live]
 # ============================================================================
 
 set -euo pipefail
@@ -19,6 +20,112 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 BOLD='\033[1m'
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ "${1:-}" != "" ] && [ "${1:-}" != "--live" ]; then
+  echo "Usage: bash verify_migration.sh [--live]"
+  exit 2
+fi
+
+OPERATING_MODE=$(awk -F': ' '/^  status: "SHOWCASE_REFERENCE"/ {gsub(/"/, "", $2); print $2; exit}' "$SCRIPT_DIR/migration-status.yaml" | tr -d '\r')
+
+if [ "${1:-}" != "--live" ] && [ "$OPERATING_MODE" = "SHOWCASE_REFERENCE" ]; then
+  FAILURES=0
+  echo ""
+  echo -e "${BOLD}============================================================================${NC}"
+  echo -e "${BOLD}  MediConnect Retired-Cloud Showcase — Verification Report${NC}"
+  echo -e "${BOLD}============================================================================${NC}"
+  echo ""
+  echo "  Live cloud parity: SKIPPED — costly cloud runtime is intentionally retired."
+  echo "  Use --live only after the owner deliberately reactivates cloud infrastructure."
+  echo ""
+
+  REQUIRED_PATHS=(
+    ".github/workflows/deploy.yml"
+    "SHOWCASE-STATUS.md"
+    "environments/prod"
+    "backend_v2/k8s"
+    "legacy_lambdas"
+  )
+  for required_path in "${REQUIRED_PATHS[@]}"; do
+    if [ -e "$SCRIPT_DIR/$required_path" ]; then
+      echo -e "  Preserve ${required_path}: [${GREEN}PASS${NC}]"
+    else
+      echo -e "  Preserve ${required_path}: [${RED}FAIL${NC}] missing"
+      FAILURES=$((FAILURES + 1))
+    fi
+  done
+
+  WORKFLOW="$SCRIPT_DIR/.github/workflows/deploy.yml"
+  if grep -Eq '^[[:space:]]+push:' "$WORKFLOW"; then
+    echo -e "  Automatic push deploy: [${RED}FAIL${NC}] push trigger present"
+    FAILURES=$((FAILURES + 1))
+  else
+    echo -e "  Automatic push deploy: [${GREEN}PASS${NC}] absent"
+  fi
+
+  if grep -q 'I_UNDERSTAND_CLOUD_DEPLOYMENT_CAN_COST_MONEY' "$WORKFLOW" &&
+     grep -q "vars.DEPLOY_GCP == 'true'" "$WORKFLOW" &&
+     grep -q "vars.DEPLOY_AKS == 'true'" "$WORKFLOW" &&
+     grep -q "vars.DEPLOY_EKS == 'true'" "$WORKFLOW" &&
+     grep -q "vars.DEPLOY_LAMBDAS == 'true'" "$WORKFLOW"; then
+    echo -e "  Cloud opt-in guards:   [${GREEN}PASS${NC}] acknowledgement + GCP/AKS/EKS/Lambda explicit true"
+  else
+    echo -e "  Cloud opt-in guards:   [${RED}FAIL${NC}] incomplete"
+    FAILURES=$((FAILURES + 1))
+  fi
+
+  TF_FILES=$(find "$SCRIPT_DIR/environments" "$SCRIPT_DIR/modules" -type f -name '*.tf' | wc -l | tr -d '[:space:]')
+  K8S_FILES=$(find "$SCRIPT_DIR/backend_v2/k8s" -type f -name '*.yaml' | wc -l | tr -d '[:space:]')
+  LEGACY_ENTRYPOINTS=$(find "$SCRIPT_DIR/legacy_lambdas" -maxdepth 2 -type f \( -name '*.mjs' -o -name '*.js' -o -name '*.py' \) | wc -l | tr -d '[:space:]')
+  echo "  Retained Terraform files: ${TF_FILES}"
+  echo "  Retained Kubernetes files: ${K8S_FILES}"
+  echo "  Retained legacy entry points: ${LEGACY_ENTRYPOINTS}"
+
+  if bash -n "$SCRIPT_DIR/verify_app_vs_iac.sh" "$SCRIPT_DIR/verify_migration.sh"; then
+    echo -e "  Verifier syntax:       [${GREEN}PASS${NC}]"
+  else
+    echo -e "  Verifier syntax:       [${RED}FAIL${NC}]"
+    FAILURES=$((FAILURES + 1))
+  fi
+
+  if command -v terraform >/dev/null 2>&1; then
+    if terraform -chdir="$SCRIPT_DIR/environments/prod" validate >/dev/null; then
+      echo -e "  Terraform validate:    [${GREEN}PASS${NC}]"
+    else
+      echo -e "  Terraform validate:    [${RED}FAIL${NC}]"
+      FAILURES=$((FAILURES + 1))
+    fi
+  else
+    echo -e "  Terraform validate:    [${YELLOW}UNAVAILABLE${NC}] terraform not on this shell PATH"
+  fi
+
+  echo ""
+  if [ "$FAILURES" -eq 0 ]; then
+    echo -e "${GREEN}${BOLD}SHOWCASE VERIFICATION: PASS — source retained and cloud deployment inert${NC}"
+    exit 0
+  fi
+  echo -e "${RED}${BOLD}SHOWCASE VERIFICATION: FAIL — ${FAILURES} safeguard(s) missing${NC}"
+  exit 1
+fi
+
+# Terraform state and AWS live checks are mandatory inputs. Treating missing
+# executables as empty state produced a false all-cloud failure, so stop before
+# emitting resource counts when the environment cannot perform the audit.
+MISSING_REQUIRED_TOOLS=()
+for required_tool in terraform aws; do
+  if ! command -v "$required_tool" >/dev/null 2>&1; then
+    MISSING_REQUIRED_TOOLS+=("$required_tool")
+  fi
+done
+
+if [ ${#MISSING_REQUIRED_TOOLS[@]} -gt 0 ]; then
+  echo ""
+  echo -e "${RED}${BOLD}BLOCKED: required verification tools are unavailable: ${MISSING_REQUIRED_TOOLS[*]}${NC}"
+  echo "Install or expose these commands in the current shell, then rerun bash verify_migration.sh."
+  echo "No resource-count or cloud-health result was produced."
+  exit 2
+fi
 
 PASS="${GREEN}PASS${NC}"
 FAIL="${RED}FAIL${NC}"
@@ -26,7 +133,6 @@ WARN="${YELLOW}WARN${NC}"
 SKIP="${YELLOW}SKIP${NC}"
 
 TF_DIR="environments/prod"
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Track overall result
 OVERALL_RESULT=0

@@ -1,3 +1,4 @@
+import { getApiBrowserPolicy } from '../../shared/api-browser-policy';
 /**
  * MediConnect Staff Service
  * ==========================
@@ -24,10 +25,11 @@ import staffRoutes from './routes/staff.routes';
 import { getRegionalSSMClient } from '../../shared/aws-config';
 import { createRateLimitStore } from '../../shared/rate-limit-store';
 import { safeLog, safeError } from '../../shared/logger';
+import { setting } from '../../shared/settings';
 
 dotenv.config();
 
-const app = express();
+export const app = express();
 app.set('trust proxy', 1);
 
 // ─── Health Checks (unauthenticated for K8s probes) ─────────────────────
@@ -53,46 +55,11 @@ const PORT = process.env.PORT || 8086;
 let isAppReady = false;
 
 // ─── CORS Configuration ─────────────────────────────────────────────────
-const allowedOrigins: string[] = process.env.ALLOWED_ORIGINS
-    ? process.env.ALLOWED_ORIGINS.split(',').map(url => url.trim())
-    : [];
-
-const mobileOrigins = [
-    'capacitor://localhost',
-    'http://localhost',
-    'https://localhost'
-];
-
-if (process.env.NODE_ENV !== 'production') {
-    allowedOrigins.push('http://localhost:5173', 'http://localhost:8080');
-}
-
-const corsOptions = {
-    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-        if (!origin) return callback(null, true);
-        if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
-        if (mobileOrigins.indexOf(origin) !== -1) return callback(null, true);
-
-        safeError(`CORS Blocked: ${origin}`);
-        callback(new Error('Strict CORS Policy: Origin not allowed'));
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Internal-Secret', 'X-User-ID', 'Prefer', 'If-Match', 'x-user-region']
-};
+const browserPolicy = getApiBrowserPolicy();
+const corsOptions = browserPolicy.cors;
 
 // ─── Security Middleware ─────────────────────────────────────────────────
-app.use(helmet({
-    hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
-    contentSecurityPolicy: {
-        directives: {
-            defaultSrc: ["'self'"],
-            connectSrc: ["'self'", "https://*.amazonaws.com", "https://*.googleapis.com", "https://*.azure.com"],
-            scriptSrc: ["'self'"],
-            imgSrc: ["'self'", "data:", "https://*"],
-        }
-    }
-}));
+app.use(helmet(browserPolicy.helmet));
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
@@ -124,7 +91,7 @@ app.use('*', (req, res) => {
 
 // ─── Vault Sync ─────────────────────────────────────────────────────────
 async function loadSecrets() {
-    const region = process.env.AWS_REGION || 'us-east-1';
+    const region = setting("AWS_REGION");
     const ssm = getRegionalSSMClient(region);
     try {
         safeLog(`Synchronizing Staff secrets with AWS Vault [${region}]...`);
@@ -176,4 +143,6 @@ const startServer = async () => {
     }
 };
 
-startServer();
+if (require.main === module) {
+    void startServer();
+}

@@ -10,13 +10,20 @@ import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { KMSClient, SignCommand } from "@aws-sdk/client-kms"; 
 import { v4 as uuidv4 } from "uuid";
 
+const requireEnv = (name) => {
+    const value = process.env[name]?.trim();
+    if (!value) throw new Error(`Missing required configuration: ${name}`);
+    return value;
+};
+
 // --- CONFIGURATION ---
-const REGION = process.env.AWS_REGION || "us-east-1";
-const TABLE_RX = process.env.TABLE_RX || "mediconnect-prescriptions";
-const TABLE_DOCTORS = process.env.TABLE_DOCTORS || "mediconnect-doctors"; 
-const TABLE_DRUGS = process.env.TABLE_DRUGS || "mediconnect-drug-interactions"; 
-const BUCKET_NAME = process.env.BUCKET_NAME || "mediconnect-prescriptions"; 
-const KMS_KEY_ID = process.env.KMS_KEY_ID; 
+const REGION = requireEnv("AWS_REGION");
+const TABLE_RX = requireEnv("TABLE_PRESCRIPTIONS");
+const TABLE_DOCTORS = requireEnv("DYNAMO_TABLE_DOCTORS");
+const TABLE_DRUGS = requireEnv("TABLE_DRUG_INTERACTIONS");
+const BUCKET_NAME = requireEnv("PRESCRIPTIONS_BUCKET");
+const KMS_KEY_ID = requireEnv("PRESCRIPTION_KMS_KEY_ID");
+const ALLOWED_ORIGIN = requireEnv("ALLOWED_ORIGIN");
 
 // --- INITIALIZE CLIENTS ---
 const dbClient = new DynamoDBClient({ region: REGION });
@@ -27,7 +34,7 @@ const kmsClient = new KMSClient({ region: REGION });
 export const handler = async (event) => {
     // 🔒 HEADERS
     const headers = {
-        "Access-Control-Allow-Origin": "*", // In production, replace '*' with your frontend domain
+        "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
         "Access-Control-Allow-Headers": "Content-Type,Authorization",
         "Access-Control-Allow-Methods": "OPTIONS,GET,POST,PUT"
     };

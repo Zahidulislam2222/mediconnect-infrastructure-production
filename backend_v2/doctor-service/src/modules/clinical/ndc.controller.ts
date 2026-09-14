@@ -1,13 +1,11 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 import { Request, Response } from "express";
 import { safeError } from '../../../../shared/logger';
 
 const OPENFDA_BASE = "https://api.fda.gov/drug";
 const RXNORM_BASE = "https://rxnav.nlm.nih.gov/REST";
 
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 async function apiFetch(url: string): Promise<any> {
     const controller = new AbortController();

@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../shared/region-context';
 import { Request, Response } from "express";
 import { AICircuitBreaker } from "../utils/ai-circuit-breaker";
 import { getRegionalDB } from "../utils/db-adapter";
@@ -9,10 +10,7 @@ import axios from 'axios';
 
 const aiService = new AICircuitBreaker();
 
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 export const predictRisk = async (req: Request, res: Response) => {
     const doctor = (req as any).user;

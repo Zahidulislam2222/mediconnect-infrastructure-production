@@ -1,3 +1,5 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
+import { requirePatientClinicalAccess } from '../../../../shared/patient-access-http';
 // ─── FEATURE #25: CarePlan FHIR Resource ──────────────────────────────────
 // Chronic care management and care coordination plans.
 // FHIR CarePlan with activities, goals, conditions, and care team.
@@ -11,13 +13,11 @@ import { PutCommand, QueryCommand, GetCommand, UpdateCommand, DeleteCommand } fr
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
 import { validateUSCore } from '../../../../shared/us-core-profiles';
+import { setting } from '../../../../shared/settings';
 
-const TABLE_CAREPLANS = process.env.TABLE_CAREPLANS || 'mediconnect-care-plans';
+const TABLE_CAREPLANS = setting("TABLE_CAREPLANS");
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── CarePlan Categories ────────────────────────────────────────────────────
 
@@ -104,6 +104,7 @@ function toFHIRCarePlan(plan: any): any {
 // ─── POST /care-plans — Create a care plan ──────────────────────────────────
 
 export const createCarePlan = async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
     try {
         const user = (req as any).user;
         const region = extractRegion(req);
@@ -118,6 +119,7 @@ export const createCarePlan = async (req: Request, res: Response) => {
         if (!patientId || !title) {
             return res.status(400).json({ error: 'patientId and title are required' });
         }
+        if (!await requirePatientClinicalAccess(req, res, patientId)) return;
 
         const category = CAREPLAN_CATEGORIES.find(c => c.code === categoryCode) || CAREPLAN_CATEGORIES[0];
 
@@ -165,22 +167,25 @@ export const createCarePlan = async (req: Request, res: Response) => {
             });
         }
 
-        await db.send(new PutCommand({ TableName: TABLE_CAREPLANS, Item: plan }));
+        await db.send(new PutCommand({ TableName: TABLE_CAREPLANS, Item: plan,
+            ConditionExpression: 'attribute_not_exists(carePlanId)' }));
 
-        await writeAuditLog(user.id, patientId, 'CAREPLAN_CREATED', `Created care plan: ${title}`, { region, carePlanId, category: category.code });
+        await writeAuditLog(user.id, patientId, 'CAREPLAN_CREATED', 'Care plan created', { region, carePlanId, category: category.code });
 
         res.status(201).json(fhirResource);
 
     } catch (error: any) {
-        res.status(500).json({ error: 'Failed to create care plan', details: error.message });
+        res.status(503).json({ error: 'Care-plan creation could not be confirmed' });
     }
 };
 
 // ─── GET /care-plans/:patientId — Get patient's care plans ──────────────────
 
 export const getPatientCarePlans = async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
     try {
         const { patientId } = req.params;
+        if (!await requirePatientClinicalAccess(req, res, patientId)) return;
         const { status, category } = req.query;
         const region = extractRegion(req);
         const db = getRegionalClient(region);
@@ -193,6 +198,9 @@ export const getPatientCarePlans = async (req: Request, res: Response) => {
         }));
 
         let plans = (Items || []);
+        if (plans.some(plan => plan.patientId !== patientId)) {
+            return res.status(503).json({ error: 'Care-plan subject verification failed' });
+        }
 
         if (status) plans = plans.filter((p: any) => p.status === status);
         if (category) plans = plans.filter((p: any) => p.category?.code === category);
@@ -207,13 +215,15 @@ export const getPatientCarePlans = async (req: Request, res: Response) => {
         });
 
     } catch (error: any) {
-        res.status(500).json({ error: 'Failed to get care plans', details: error.message });
+        res.status(503).json({ error: 'Care plans are temporarily unavailable' });
     }
 };
 
 // ─── GET /care-plans/detail/:carePlanId — Get a specific care plan ──────────
 
 export const getCarePlan = async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
+    if (!(req as any).user?.id) return res.status(401).json({ error: 'Authentication required' });
     try {
         const { carePlanId } = req.params;
         const region = extractRegion(req);
@@ -222,20 +232,24 @@ export const getCarePlan = async (req: Request, res: Response) => {
         const { Item } = await db.send(new GetCommand({
             TableName: TABLE_CAREPLANS,
             Key: { carePlanId },
+            ConsistentRead: true,
         }));
 
         if (!Item) return res.status(404).json({ error: 'Care plan not found' });
+        if (!await requirePatientClinicalAccess(req, res, Item.patientId)) return;
 
         res.json(toFHIRCarePlan(Item));
 
     } catch (error: any) {
-        res.status(500).json({ error: 'Failed to get care plan', details: error.message });
+        res.status(503).json({ error: 'Care plan is temporarily unavailable' });
     }
 };
 
 // ─── PUT /care-plans/:carePlanId — Update a care plan ───────────────────────
 
 export const updateCarePlan = async (req: Request, res: Response) => {
+    res.set('Cache-Control', 'no-store');
+    if (!(req as any).user?.id) return res.status(401).json({ error: 'Authentication required' });
     try {
         const { carePlanId } = req.params;
         const user = (req as any).user;
@@ -245,9 +259,11 @@ export const updateCarePlan = async (req: Request, res: Response) => {
         const { Item: existing } = await db.send(new GetCommand({
             TableName: TABLE_CAREPLANS,
             Key: { carePlanId },
+            ConsistentRead: true,
         }));
 
         if (!existing) return res.status(404).json({ error: 'Care plan not found' });
+        if (!await requirePatientClinicalAccess(req, res, existing.patientId)) return;
 
         const { status, title, description, endDate, conditions, goals, activities, careTeam, notes } = req.body;
         const now = new Date().toISOString();
@@ -287,17 +303,21 @@ export const updateCarePlan = async (req: Request, res: Response) => {
             TableName: TABLE_CAREPLANS,
             Key: { carePlanId },
             UpdateExpression: `SET ${updates.join(', ')}`,
-            ExpressionAttributeValues: values,
+            ConditionExpression: 'patientId = :authorizedPatient',
+            ExpressionAttributeValues: { ...values, ':authorizedPatient': existing.patientId },
             ...(Object.keys(names).length > 0 ? { ExpressionAttributeNames: names } : {}),
         }));
 
-        await writeAuditLog(user.id, existing.patientId, 'CAREPLAN_UPDATED', `Updated care plan: ${existing.title}`, { region, carePlanId });
+        await writeAuditLog(user.id, existing.patientId, 'CAREPLAN_UPDATED', 'Care plan updated', { region, carePlanId });
 
-        const { Item: updated } = await db.send(new GetCommand({ TableName: TABLE_CAREPLANS, Key: { carePlanId } }));
+        const { Item: updated } = await db.send(new GetCommand({ TableName: TABLE_CAREPLANS, Key: { carePlanId }, ConsistentRead: true }));
+        if (!updated || updated.patientId !== existing.patientId) {
+            return res.status(503).json({ error: 'Care-plan update could not be confirmed' });
+        }
         res.json(toFHIRCarePlan(updated));
 
     } catch (error: any) {
-        res.status(500).json({ error: 'Failed to update care plan', details: error.message });
+        res.status(503).json({ error: 'Care-plan update could not be confirmed' });
     }
 };
 

@@ -1,3 +1,9 @@
+import { requestJurisdiction } from '../../../shared/region-context';
+import { createPortabilityBundle } from '../../../shared/fhir-portability';
+import { obtainErasureRefund } from '../../../shared/privacy-refund';
+import { completeErasureQuery, completeAnalyticsExport } from '../../../shared/privacy-analytics';
+import { z } from 'zod';
+import { completePrivacyClient, eraseS3Versions, eraseSubjectDlqVersions, ErasureWorkflow, ErasureProgress } from '../../../shared/privacy-operations';
 import { Request, Response, NextFunction } from 'express';
 
 // AWS SDK v3
@@ -19,6 +25,7 @@ import { writeAuditLog } from '../../../shared/audit';
 import { encryptPHI, decryptPHI, decryptToken } from '../../../shared/kms-crypto';
 import axios from 'axios';
 import { publishEvent, EventType } from '../../../shared/event-bus';
+import { TABLE_NAMES, requiredEnv, setting, getPrivacySettings, getPrivacyAnalyticsSettings } from '../../../shared/settings';
 
 // Shared Clients
 import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient, getRegionalSNSClient } from '../../../shared/aws-config';
@@ -27,9 +34,9 @@ import { getRegionalClient, getRegionalS3Client, getRegionalRekognitionClient, g
 // ⚙️ CONFIGURATION & ENV HANDLING
 // =============================================================================
 const CONFIG = {
-    get DYNAMO_TABLE() { return process.env.DYNAMO_TABLE || 'mediconnect-patients'; },
-    get DOCTOR_TABLE() { return process.env.DYNAMO_TABLE_DOCTORS || 'mediconnect-doctors'; },
-    get BUCKET_NAME() { return process.env.BUCKET_NAME || 'mediconnect-patient-data'; },
+    get DYNAMO_TABLE() { return setting("DYNAMO_TABLE"); },
+    get DOCTOR_TABLE() { return setting("DYNAMO_TABLE_DOCTORS"); },
+    get BUCKET_NAME() { return setting("BUCKET_NAME"); },
 };
 
 // =============================================================================
@@ -42,10 +49,7 @@ const catchAsync = (fn: any) => (req: Request, res: Response, next: NextFunction
 };
 
 // 🟢 COMPILER & GDPR FIX: Safely parse headers to determine Legal Jurisdiction
-export const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
+export const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 /**
  * Generates a temporary signed URL for viewing private S3 avatars.
@@ -83,59 +87,8 @@ async function signAvatarUrl(avatarKey: string | null, region: string): Promise<
  * Handles pagination for buckets with many versions.
  * Non-blocking: logs errors but never throws.
  */
-async function deleteS3ObjectVersions(
-    s3Client: any,
-    bucket: string,
-    key: string
-): Promise<void> {
-    try {
-        let keyMarker: string | undefined;
-        let versionIdMarker: string | undefined;
-        let hasMore = true;
-
-        while (hasMore) {
-            const listParams: any = {
-                Bucket: bucket,
-                Prefix: key,
-                MaxKeys: 1000,
-                ...(keyMarker ? { KeyMarker: keyMarker } : {}),
-                ...(versionIdMarker ? { VersionIdMarker: versionIdMarker } : {})
-            };
-
-            const listResult = await s3Client.send(new ListObjectVersionsCommand(listParams));
-
-            const objectsToDelete: { Key: string; VersionId: string }[] = [];
-
-            // Collect all versions
-            for (const version of (listResult.Versions || [])) {
-                if (version.Key === key && version.VersionId) {
-                    objectsToDelete.push({ Key: version.Key, VersionId: version.VersionId });
-                }
-            }
-
-            // Collect all delete markers
-            for (const marker of (listResult.DeleteMarkers || [])) {
-                if (marker.Key === key && marker.VersionId) {
-                    objectsToDelete.push({ Key: marker.Key, VersionId: marker.VersionId });
-                }
-            }
-
-            // Bulk delete in batches of 1000 (S3 limit)
-            for (let i = 0; i < objectsToDelete.length; i += 1000) {
-                const batch = objectsToDelete.slice(i, i + 1000);
-                await s3Client.send(new DeleteObjectsCommand({
-                    Bucket: bucket,
-                    Delete: { Objects: batch, Quiet: true }
-                }));
-            }
-
-            hasMore = listResult.IsTruncated === true;
-            keyMarker = listResult.NextKeyMarker;
-            versionIdMarker = listResult.NextVersionIdMarker;
-        }
-    } catch (err) {
-        safeError(`[GDPR] Failed to delete S3 object versions for ${key} in ${bucket}`, err);
-    }
+async function deleteS3ObjectVersions(s3Client: any, bucket: string, key: string): Promise<void> {
+    await eraseS3Versions(s3Client, bucket, key, getPrivacySettings(), true);
 }
 
 /**
@@ -143,84 +96,23 @@ async function deleteS3ObjectVersions(
  * Uses parameterized queries to prevent SQL injection.
  * Non-blocking: logs errors but never throws.
  */
-async function deleteBigQueryPatientData(patientId: string, region: string): Promise<void> {
-    try {
-        const hashedId = createHash('sha256')
-            .update(patientId + (process.env.HIPAA_SALT || 'mediconnect_salt'))
-            .digest('hex');
-
-        const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
-        const client = await auth.getClient();
-        const accessToken = (await client.getAccessToken()).token;
-        const projectId = await auth.getProjectId();
-
-        const isEU = region.toUpperCase() === 'EU';
-        const analyticsDataset = isEU ? 'mediconnect_analytics_eu' : 'mediconnect_analytics';
-        const aiDataset = isEU ? 'mediconnect_ai_eu' : 'mediconnect_ai';
-        const iotDataset = isEU ? 'iot_eu' : 'iot';
-
-        const deleteQueries = [
-            {
-                label: 'appointments_stream',
-                query: `DELETE FROM \`${analyticsDataset}.appointments_stream\` WHERE patient_id = @hashedId`,
-                paramName: 'hashedId'
-            },
-            {
-                label: 'analytics_revenue',
-                query: `DELETE FROM \`${analyticsDataset}.analytics_revenue\` WHERE patient_id = @hashedId`,
-                paramName: 'hashedId'
-            },
-            {
-                label: 'symptom_logs',
-                query: `DELETE FROM \`${aiDataset}.symptom_logs\` WHERE user_id = @hashedId`,
-                paramName: 'hashedId'
-            },
-            {
-                label: 'vitals_raw',
-                query: `DELETE FROM \`${iotDataset}.vitals_raw\` WHERE JSON_EXTRACT_SCALAR(data, '$.patientId') = @hashedId`,
-                paramName: 'hashedId'
-            }
-        ];
-
-        for (const dq of deleteQueries) {
-            try {
-                const response = await fetch(
-                    `https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/jobs`,
-                    {
-                        method: 'POST',
-                        headers: {
-                            'Authorization': `Bearer ${accessToken}`,
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({
-                            configuration: {
-                                query: {
-                                    query: dq.query,
-                                    useLegacySql: false,
-                                    parameterMode: 'NAMED',
-                                    queryParameters: [{
-                                        name: dq.paramName,
-                                        parameterType: { type: 'STRING' },
-                                        parameterValue: { value: hashedId }
-                                    }]
-                                }
-                            }
-                        })
-                    }
-                );
-
-                if (!response.ok) {
-                    const errBody = await response.text();
-                    safeError(`[GDPR] BigQuery DML DELETE failed for ${dq.label}: ${response.status}`, errBody);
-                } else {
-                    safeLog(`[GDPR] BigQuery DML DELETE submitted for ${dq.label} (patient ${patientId})`);
-                }
-            } catch (queryErr) {
-                safeError(`[GDPR] BigQuery DML DELETE error for ${dq.label}`, queryErr);
-            }
-        }
-    } catch (err) {
-        safeError('[GDPR] BigQuery patient data deletion failed', err);
+async function deleteBigQueryPatientData(patientId: string, region: 'US' | 'EU', requestId: string): Promise<void> {
+    const config = getPrivacyAnalyticsSettings(region);
+    const hashedId = createHash('sha256').update(patientId + requiredEnv('HIPAA_SALT')).digest('hex');
+    const auth = new GoogleAuth({ scopes: ['https://www.googleapis.com/auth/cloud-platform'] });
+    const client = await auth.getClient();
+    const token = (await client.getAccessToken()).token;
+    const projectId = await auth.getProjectId();
+    if (!token || !projectId) throw new Error('PRIVACY_ANALYTICS_AUTH_REQUIRED');
+    const queries = [
+        { label: 'appointments_stream', query: `DELETE FROM \`${config.analyticsDataset}.appointments_stream\` WHERE patient_id = @hashedId` },
+        { label: 'analytics_revenue', query: `DELETE FROM \`${config.analyticsDataset}.analytics_revenue\` WHERE patient_id = @hashedId` },
+        { label: 'symptom_logs', query: `DELETE FROM \`${config.aiDataset}.symptom_logs\` WHERE user_id = @hashedId` },
+        { label: 'vitals_raw', query: `DELETE FROM \`${config.iotDataset}.${config.iotTable}\` WHERE JSON_EXTRACT_SCALAR(data, '$.patientId') = @hashedId` },
+    ];
+    for (const item of queries) {
+        const jobId = `erasure_${createHash('sha256').update(requestId + item.label).digest('hex')}`;
+        await completeErasureQuery({ ...config, projectId, token, hashedId, jobId, query: item.query });
     }
 }
 
@@ -280,16 +172,14 @@ export const createPatient = catchAsync(async (req: Request, res: Response) => {
     };
 
     // 🟢 HIPAA: Encrypt PHI fields at rest using KMS envelope encryption
-    let encryptedPHI: Record<string, string> = {};
+    let encryptedPHI: Record<string, string>;
     try {
         encryptedPHI = await encryptPHI(
             { name, ...(dob ? { dob } : {}), ...(phone ? { phone } : {}), email },
             region
         );
-    } catch (kmsErr: any) {
-        // KMS unavailable (dev/test) — store plaintext with warning
-        safeError('[PHI] KMS encryption unavailable, storing plaintext', kmsErr.message);
-        encryptedPHI = { name, ...(dob ? { dob } : {}), ...(phone ? { phone } : {}), email };
+    } catch {
+        return res.status(503).json({ code: 'PHI_ENCRYPTION_UNAVAILABLE', error: 'Protected data could not be saved. Please retry later.' });
     }
 
     // After encryption, update FHIR resource to use encrypted values (prevent PHI leak in stored resource)
@@ -382,7 +272,7 @@ export const getProfile = catchAsync(async (req: Request, res: Response) => {
         if (decrypted.dob) response.Item.dob = decrypted.dob;
         if (decrypted.phone) response.Item.phone = decrypted.phone;
         if (decrypted.email) response.Item.email = decrypted.email;
-    } catch { /* KMS unavailable — fields are already plaintext */ }
+    } catch { return res.status(503).json({ code: 'PHI_DECRYPTION_UNAVAILABLE', error: 'Protected data is temporarily unavailable.' }); }
 
     response.Item.avatar = await signAvatarUrl(response.Item.avatar, region);
 
@@ -468,8 +358,8 @@ export const updateProfile = catchAsync(async (req: Request, res: Response) => {
             if (encrypted.dob) values[':dob'] = encrypted.dob;
             if (encrypted.phone) values[':phone'] = encrypted.phone;
         }
-    } catch (kmsErr: any) {
-        safeError('[PHI] KMS encryption unavailable during profile update, storing plaintext', kmsErr.message);
+    } catch {
+        return res.status(503).json({ code: 'PHI_ENCRYPTION_UNAVAILABLE', error: 'Protected data could not be saved. Please retry later.' });
     }
 
     // Sync FHIR resource name with encrypted value
@@ -592,841 +482,740 @@ export const verifyIdentity = catchAsync(async (req: Request, res: Response) => 
  * 5. DELETE PROFILE (GDPR Right to be Forgotten)
  */
 export const deleteProfile = catchAsync(async (req: Request, res: Response) => {
-    const region = extractRegion(req);
-    const dynamicDb = getRegionalClient(region);
-    const userId = (req as any).user?.id;
-
-    if (!userId) return res.status(401).json({ error: "Unauthorized" });
-
-    const userCheck = await dynamicDb.send(new GetCommand({
-        TableName: CONFIG.DYNAMO_TABLE,
-        Key: { patientId: userId }
-    }));
-
-    if (!userCheck.Item) return res.status(404).json({ error: "Patient not found" });
-
-    // 🟢 GDPR: Mark patient as DELETED immediately before cascade begins
-    // If function crashes mid-erasure, the patient is already marked DELETED
-    // Re-running deleteProfile can detect DELETED status and skip already-processed tables
-    const ttl = Math.floor(Date.now() / 1000) + (30 * 24 * 60 * 60);
-
-    await dynamicDb.send(new UpdateCommand({
-        TableName: CONFIG.DYNAMO_TABLE,
-        Key: { patientId: userId },
-        UpdateExpression: "SET #s = :s, #ttl = :ttl, #n = :n, email = :e, avatar = :a, deletedAt = :now, #res = :empty, address = :null, phone = :null, dob = :null, preferences = :empty, fcmToken = :null",
-        ExpressionAttributeNames: {
-            "#s": "status",
-            "#ttl": "ttl",
-            "#n": "name",
-            "#res": "resource"
-        },
-        ExpressionAttributeValues: {
-            ":s": "DELETED",
-            ":ttl": ttl,
-            ":n": "ANONYMIZED_USER",
-            ":e": `gdpr_deleted_${userId}@mediconnect.local`,
-            ":a": null,
-            ":now": new Date().toISOString(),
-            ":empty": {},
-            ":null": null
+    const identity = (req as any).user;
+    if (!identity?.id || !identity.region) return res.status(401).json({ error: 'Unauthorized' });
+    const config = getPrivacySettings();
+    const normalized = String(identity.region).toUpperCase();
+    const region = normalized === 'EU' || identity.region === config.euRegion ? 'EU'
+        : normalized === 'US' || identity.region === config.usRegion ? 'US' : null;
+    if (!region) return res.status(400).json({ error: 'Unsupported authenticated region' });
+    const userId = req.params.patientId || identity.id;
+    if (userId !== identity.id && identity.isAdmin !== true) return res.status(403).json({ error: 'Forbidden' });
+    const rawDb = getRegionalClient(region);
+    const dynamicDb = completePrivacyClient(rawDb, config);
+    const userCheck = await rawDb.send(new GetCommand({ TableName: CONFIG.DYNAMO_TABLE, Key: { patientId: userId }, ConsistentRead: true }));
+    if (!userCheck.Item) return res.status(404).json({ error: 'Patient not found' });
+    const previous = userCheck.Item.erasure;
+    if (previous?.state === 'COMPLETED') return res.json({ status: 'ERASED_WITH_RETENTION', requestId: previous.requestId });
+    const requestId = previous?.requestId || randomUUID();
+    const approved = previous && userCheck.Item.erasureApproval?.requestId === previous.requestId
+        && config.executionEnabled && userCheck.Item.erasureApproval?.decision === 'APPROVED'
+        && userCheck.Item.erasureApproval?.policyVersion === config.policyVersion && !userCheck.Item.legalHold;
+    const progress: ErasureProgress = previous || { requestId, requestedAt: new Date().toISOString(), completed: [], state: 'REVIEW_REQUIRED' };
+    if (!approved) {
+        if (previous) return res.status(previous.state === 'IN_PROGRESS' ? 409 : 202).json({ status: previous.state === 'IN_PROGRESS' ? 'IN_PROGRESS' : 'REVIEW_REQUIRED', requestId });
+        try {
+        await rawDb.send(new UpdateCommand({ TableName: CONFIG.DYNAMO_TABLE, Key: { patientId: userId },
+            UpdateExpression: 'SET erasure = :progress REMOVE #ttl', ExpressionAttributeNames: { '#ttl': 'ttl' },
+            ConditionExpression: 'attribute_exists(patientId) AND attribute_not_exists(erasure) AND attribute_not_exists(erasureOwner)',
+            ExpressionAttributeValues: { ':progress': { ...progress, state: 'REVIEW_REQUIRED' } } }));
+        } catch (error: any) {
+            if (error.name === 'ConditionalCheckFailedException') return res.status(409).json({ status: 'REQUEST_CHANGED' });
+            throw error;
         }
-    }));
-
-    // 🟢 HIPAA Data Retention vs GDPR Erasure:
+        return res.status(202).json({ status: 'REVIEW_REQUIRED', requestId });
+    }
+    const owner = randomUUID();
+    const now = Date.now();
     try {
-        const stripeKey = await getSSMParameter("/mediconnect/stripe/keys", region, true);
-        const stripe = stripeKey ? new Stripe(stripeKey) : null;
-        
-        const apptQuery = await dynamicDb.send(new QueryCommand({
-            TableName: process.env.TABLE_APPOINTMENTS || "mediconnect-appointments",
-            IndexName: "PatientIndex",
-            KeyConditionExpression: "patientId = :pid",
-            ExpressionAttributeValues: { ":pid": userId }
-        }));
-        
-        const appointments = apptQuery.Items ||[];
-        const nowMs = Date.now();
+        await rawDb.send(new UpdateCommand({ TableName: CONFIG.DYNAMO_TABLE, Key: { patientId: userId },
+            UpdateExpression: 'SET erasure = :progress, erasureOwner = :owner, erasureLeaseUntil = :lease REMOVE #ttl',
+            ConditionExpression: '(attribute_not_exists(erasureLeaseUntil) OR erasureLeaseUntil < :now) AND erasure.requestId = :request AND erasureApproval.requestId = :request AND erasureApproval.decision = :approved AND erasureApproval.policyVersion = :policy AND (attribute_not_exists(legalHold) OR legalHold = :false)',
+            ExpressionAttributeNames: { '#ttl': 'ttl' },
+            ExpressionAttributeValues: { ':progress': { ...progress, state: 'IN_PROGRESS' }, ':owner': owner, ':lease': now + config.leaseSeconds * 1000, ':now': now, ':approved': 'APPROVED', ':policy': config.policyVersion, ':false': false, ':request': requestId } }));
+    } catch (error: any) {
+        if (error.name === 'ConditionalCheckFailedException') return res.status(409).json({ status: 'IN_PROGRESS', requestId });
+        throw error;
+    }
+    const persist = async (value: ErasureProgress) => {
+        await rawDb.send(new UpdateCommand({ TableName: CONFIG.DYNAMO_TABLE, Key: { patientId: userId },
+            UpdateExpression: 'SET erasure = :progress, erasureLeaseUntil = :lease', ConditionExpression: 'erasureOwner = :owner',
+            ExpressionAttributeValues: { ':progress': JSON.parse(JSON.stringify(value)), ':owner': owner, ':lease': Date.now() + config.leaseSeconds * 1000 } }));
+    };
+    const workflow = new ErasureWorkflow(progress, persist);
+    try {
+await workflow.stage('appointments', async () => {
 
-        for (const apt of appointments) {
-            const aptTimeMs = new Date(apt.timeSlot).getTime();
-            const isFuture = aptTimeMs > nowMs;
-            const isNotCancelled = apt.status !== "CANCELLED" && apt.status !== "CANCELLED_NO_SHOW";
-
-            // GDPR Anonymization for FHIR Resource
-            let fhirResource = apt.resource || {};
-            fhirResource.name =[{ use: "official", text: "ANONYMIZED_GDPR" }];
-            if (Array.isArray(fhirResource.participant)) {
-                fhirResource.participant.forEach((p: any) => {
-                    if (p.actor?.reference === `Patient/${userId}`) {
-                        p.actor.display = "ANONYMIZED_GDPR";
+    const stripeKey = await getSSMParameter("/mediconnect/stripe/keys", region, true);
+    const stripe = stripeKey ? new Stripe(stripeKey) : null;
+    const apptQuery = await dynamicDb.send(new QueryCommand({
+        TableName: setting("TABLE_APPOINTMENTS"),
+        IndexName: "PatientIndex",
+        KeyConditionExpression: "patientId = :pid",
+        ExpressionAttributeValues: { ":pid": userId }
+    }));
+    const appointments = apptQuery.Items || [];
+    const nowMs = Date.parse(progress.requestedAt);
+    if (!Number.isFinite(nowMs)) throw new Error('PRIVACY_INVALID_REQUEST_TIME');
+    for (const apt of appointments) {
+        const aptTimeMs = new Date(apt.timeSlot).getTime();
+        const isFuture = aptTimeMs > nowMs;
+        const isNotCancelled = apt.status !== "CANCELLED" && apt.status !== "CANCELLED_NO_SHOW";
+        // GDPR Anonymization for FHIR Resource
+        const fhirResource = apt.resource || {};
+        fhirResource.name = [{ use: "official", text: "ANONYMIZED_GDPR" }];
+        if (Array.isArray(fhirResource.participant)) {
+            (fhirResource.participant || []).forEach((p: any) => {
+                if (p.actor?.reference === `Patient/${userId}`) {
+                    p.actor.display = "ANONYMIZED_GDPR";
+                }
+            });
+        }
+            // 4. GDPR: Delete Google Calendar event (patient name visible on doctor's calendar)
+            if (apt.googleEventId && apt.doctorId) {
+                try {
+                    const doctorRecord = await dynamicDb.send(new GetCommand({
+                        TableName: CONFIG.DOCTOR_TABLE,
+                        Key: { doctorId: apt.doctorId },
+                        ProjectionExpression: 'googleRefreshToken'
+                    }));
+                    const storedToken = doctorRecord.Item?.googleRefreshToken;
+                    if (!storedToken) throw new Error('PRIVACY_CALENDAR_ACCESS_REQUIRED');
+                    if (storedToken) {
+                        const refreshToken = await decryptToken(storedToken, region);
+                        const tokenRes = await axios.post<{
+                            access_token: string;
+                        }>('https://oauth2.googleapis.com/token', {
+                            client_id: process.env.GOOGLE_CLIENT_ID,
+                            client_secret: process.env.GOOGLE_CLIENT_SECRET,
+                            refresh_token: refreshToken,
+                            grant_type: 'refresh_token'
+                        });
+                        await axios.delete(`https://www.googleapis.com/calendar/v3/calendars/primary/events/${apt.googleEventId}`, { headers: { Authorization: `Bearer ${tokenRes.data.access_token}` } });
+                        safeLog(`[GDPR] Deleted Google Calendar event ${apt.googleEventId} for appointment ${apt.appointmentId}`);
                     }
-                });
+                }
+                catch (calErr: any) {
+                    if (![404, 410].includes(calErr.response?.status)) throw calErr;
+                }
             }
-
-            if (isFuture && isNotCancelled) {
-                // 1. Refund the future appointment
-                let refundId = "NOT_APPLICABLE";
-                if (stripe && apt.paymentId && apt.paymentId !== "TEST_MODE" && apt.paymentStatus === 'paid') {
-                    try {
-                        const refund = await stripe.refunds.create({ payment_intent: apt.paymentId });
-                        refundId = refund.id;
-                        
-                        // Ledger Entry for Refund
-                        await dynamicDb.send(new PutCommand({
-                            TableName: process.env.TABLE_TRANSACTIONS || "mediconnect-transactions",
-                            Item: {
-                                billId: randomUUID(), referenceId: apt.appointmentId,
-                                patientId: userId, doctorId: apt.doctorId || "UNKNOWN",
-                                type: "REFUND", amount: -(apt.amountPaid || 0),
-                                currency: "USD", status: "PROCESSED",
-                                createdAt: new Date().toISOString(), description: "GDPR Account Deletion Auto-Refund"
-                            }
-                        }));
-                    } catch (stripeErr: any) {
-                        safeError("GDPR Stripe Refund Failed:", stripeErr.message);
-                        refundId = "REFUND_FAILED_MANUAL_REQUIRED";
-                    }
-                }
-
-                // 2. Cancel the appointment & anonymize
-                fhirResource.status = "cancelled";
-                fhirResource.participant.forEach((p: any) => p.status = "declined");
-
-                await dynamicDb.send(new UpdateCommand({
-                    TableName: process.env.TABLE_APPOINTMENTS || "mediconnect-appointments",
-                    Key: { appointmentId: apt.appointmentId },
-                    UpdateExpression: "SET #s = :s, refundId = :r, patientName = :anon, patientAvatar = :null, #res = :resource, lastUpdated = :now",
-                    ExpressionAttributeNames: { "#s": "status", "#res": "resource" },
-                    ExpressionAttributeValues: { 
-                        ":s": "CANCELLED", ":r": refundId, ":anon": "ANONYMIZED_GDPR", ":null": null, ":resource": fhirResource, ":now": new Date().toISOString()
-                    }
-                }));
-
-                // 3. Remove Doctor Lock so another patient can book this slot
-                if (apt.doctorId && apt.timeSlot) {
-                    try {
-                        const lockKey = `${apt.doctorId}#${apt.timeSlot}`;
-                        await dynamicDb.send(new DeleteCommand({
-                            TableName: process.env.TABLE_LOCKS || "mediconnect-booking-locks",
-                            Key: { lockId: lockKey }
-                        }));
-                    } catch (e) {}
-                }
-
-                // 4. GDPR: Delete Google Calendar event (patient name visible on doctor's calendar)
-                if (apt.googleEventId && apt.doctorId) {
-                    try {
-                        const doctorRecord = await dynamicDb.send(new GetCommand({
-                            TableName: CONFIG.DOCTOR_TABLE,
-                            Key: { doctorId: apt.doctorId },
-                            ProjectionExpression: 'googleRefreshToken'
-                        }));
-                        const storedToken = doctorRecord.Item?.googleRefreshToken;
-                        if (storedToken) {
-                            const refreshToken = await decryptToken(storedToken, region);
-                            const tokenRes = await axios.post<{ access_token: string }>('https://oauth2.googleapis.com/token', {
-                                client_id: process.env.GOOGLE_CLIENT_ID,
-                                client_secret: process.env.GOOGLE_CLIENT_SECRET,
-                                refresh_token: refreshToken,
-                                grant_type: 'refresh_token'
-                            });
-                            await axios.delete(
-                                `https://www.googleapis.com/calendar/v3/calendars/primary/events/${apt.googleEventId}`,
-                                { headers: { Authorization: `Bearer ${tokenRes.data.access_token}` } }
-                            );
-                            safeLog(`[GDPR] Deleted Google Calendar event ${apt.googleEventId} for appointment ${apt.appointmentId}`);
+        if (isFuture && isNotCancelled) {
+            // 1. Refund the future appointment
+            let refundId = "NOT_APPLICABLE";
+            if (apt.paymentId && apt.paymentId !== "TEST_MODE" && apt.paymentStatus === 'paid') {
+                if (!stripe) throw new Error('PRIVACY_REFUND_PROVIDER_REQUIRED');
+                {
+                    const refund = await obtainErasureRefund(stripe, apt.paymentId, apt.appointmentId, requestId, config.maxPages);
+                    refundId = refund.id;
+                    // Ledger Entry for Refund
+                    await dynamicDb.send(new PutCommand({
+                        TableName: setting("TABLE_TRANSACTIONS"),
+                        Item: {
+                            billId: `erasure-refund-${apt.appointmentId}`, referenceId: apt.appointmentId,
+                            patientId: userId, doctorId: apt.doctorId || "UNKNOWN",
+                            type: "REFUND", amount: -(apt.amountPaid || 0),
+                            currency: "USD", status: "PROCESSED",
+                            createdAt: new Date().toISOString(), description: "GDPR Account Deletion Auto-Refund"
                         }
-                    } catch (calErr) {
-                        safeError('[GDPR] Google Calendar event deletion failed (non-blocking)', calErr);
-                    }
+                    }));
                 }
-            } else {
-                // Just Anonymize past/completed appointments (Don't refund, just strip PII for GDPR)
-                await dynamicDb.send(new UpdateCommand({
-                    TableName: process.env.TABLE_APPOINTMENTS || "mediconnect-appointments",
-                    Key: { appointmentId: apt.appointmentId },
-                    UpdateExpression: "SET patientName = :anon, patientAvatar = :null, #res = :resource, lastUpdated = :now",
-                    ExpressionAttributeNames: { "#res": "resource" },
-                    ExpressionAttributeValues: { 
-                        ":anon": "ANONYMIZED_GDPR", ":null": null, ":resource": fhirResource, ":now": new Date().toISOString()
-                    }
-                }));
             }
-            
-            // 🟢 BIGQUERY PUSH (Runs for every appointment after DB is updated)
-            try {
-                const auth = new GoogleAuth({ scopes:['https://www.googleapis.com/auth/cloud-platform'] });
-                const client = await auth.getClient();
-                const accessToken = (await client.getAccessToken()).token;
-                const projectId = await auth.getProjectId();
-                const dataset = region.toUpperCase() === 'EU' ? "mediconnect_analytics_eu" : "mediconnect_analytics";
-                
-                await fetch(`https://bigquery.googleapis.com/bigquery/v2/projects/${projectId}/datasets/${dataset}/tables/appointments_stream/insertAll`, {
-                    method: "POST",
-                    headers: { "Authorization": `Bearer ${accessToken}`, "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                        kind: "bigquery#tableDataInsertAllRequest",
-                        rows:[{ json: {
-                            appointment_id: apt.appointmentId,
-                            doctor_id: apt.doctorId,
-                            patient_id: "ANONYMIZED_GDPR",
-                            status: "ANONYMIZED",
-                            specialization: apt.specialization || 'General',
-                            notes: 'ANONYMIZED_GDPR',
-                            cost: 0,
-                            timestamp: new Date().toISOString()
-                        }}]
-                    })
-                });
-            } catch (bqErr) { safeError("BQ Anonymization Failed", bqErr); }
-                
+            // 3. Remove Doctor Lock so another patient can book this slot
+            if (apt.doctorId && apt.timeSlot) {
+                {
+                    const lockKey = `${apt.doctorId}#${apt.timeSlot}`;
+                    await dynamicDb.send(new DeleteCommand({
+                        TableName: setting("TABLE_LOCKS"),
+                        Key: { lockId: lockKey }
+                    }));
+                }
+            }
+            // 2. Cancel the appointment & anonymize
+            fhirResource.status = "cancelled";
+            (fhirResource.participant || []).forEach((p: any) => p.status = "declined");
+            await dynamicDb.send(new UpdateCommand({
+                TableName: setting("TABLE_APPOINTMENTS"),
+                Key: { appointmentId: apt.appointmentId },
+                UpdateExpression: "SET #s = :s, refundId = :r, patientName = :anon, patientAvatar = :null, #res = :resource, lastUpdated = :now",
+                ExpressionAttributeNames: { "#s": "status", "#res": "resource" },
+                ExpressionAttributeValues: {
+                    ":s": "CANCELLED", ":r": refundId, ":anon": "ANONYMIZED_GDPR", ":null": null, ":resource": fhirResource, ":now": new Date().toISOString()
+                }
+            }));
+
         }
-    } catch (orphanErr) {
-        safeError("Failed to sweep orphaned appointments during deletion:", orphanErr);
+        else {
+            // Just Anonymize past/completed appointments (Don't refund, just strip PII for GDPR)
+            await dynamicDb.send(new UpdateCommand({
+                TableName: setting("TABLE_APPOINTMENTS"),
+                Key: { appointmentId: apt.appointmentId },
+                UpdateExpression: "SET patientName = :anon, patientAvatar = :null, #res = :resource, lastUpdated = :now",
+                ExpressionAttributeNames: { "#res": "resource" },
+                ExpressionAttributeValues: {
+                    ":anon": "ANONYMIZED_GDPR", ":null": null, ":resource": fhirResource, ":now": new Date().toISOString()
+                }
+            }));
+        }
+        // 🟢 BIGQUERY PUSH (Runs for every appointment after DB is updated)
+
     }
 
-    // BigQuery DML DELETE: Remove patient data from all BigQuery tables
-    // Runs AFTER BigQuery anonymization inserts above to ensure old rows are purged
-    await deleteBigQueryPatientData(userId, region);
+});
+await workflow.stage('analytics', async () => {
+await deleteBigQueryPatientData(userId, region, requestId);
+});
+await workflow.stage('chat', async () => {
 
-    // ─── GDPR Erasure Cascade: Clean up additional tables ───────────────
-    // 1. Chat history (PK=conversationId, SK=timestamp; patient referenced via senderId/recipientId)
-    try {
-        let chatLastKey: any = undefined;
-        do {
-            const chatScan = await dynamicDb.send(new ScanCommand({
-                TableName: 'mediconnect-chat-history',
-                FilterExpression: 'senderId = :uid OR recipientId = :uid',
-                ExpressionAttributeValues: { ':uid': userId },
-                ...(chatLastKey ? { ExclusiveStartKey: chatLastKey } : {})
-            }));
-            const chatItems = chatScan.Items || [];
-            for (let i = 0; i < chatItems.length; i += 25) {
-                const batch = chatItems.slice(i, i + 25).map((item: any) => ({
-                    DeleteRequest: { Key: { conversationId: item.conversationId, timestamp: item.timestamp } }
-                }));
-                await dynamicDb.send(new BatchWriteCommand({ RequestItems: { 'mediconnect-chat-history': batch } }));
-            }
-            chatLastKey = chatScan.LastEvaluatedKey;
-        } while (chatLastKey);
-        // Granular GDPR audit for chat history erasure
-        try {
-            await writeAuditLog(userId, userId, "GDPR_CHAT_ERASURE", "Chat history deleted under GDPR Art. 17 right to erasure", { region });
-        } catch { /* Non-blocking */ }
-    } catch (e) { safeError('[GDPR] Failed to delete chat history', e); }
-
-    // 2. Graph data
-    try {
-        const graphQuery = await dynamicDb.send(new QueryCommand({
-            TableName: 'mediconnect-graph-data',
-            KeyConditionExpression: 'PK = :pk',
-            ExpressionAttributeValues: { ':pk': `PATIENT#${userId}` }
+    let chatLastKey: any = undefined;
+    do {
+        const chatScan = await dynamicDb.send(new ScanCommand({
+            TableName: TABLE_NAMES.chatHistory,
+            FilterExpression: 'senderId = :uid OR recipientId = :uid',
+            ExpressionAttributeValues: { ':uid': userId },
+            ...(chatLastKey ? { ExclusiveStartKey: chatLastKey } : {})
         }));
-        const graphItems = graphQuery.Items || [];
-        for (let i = 0; i < graphItems.length; i += 25) {
-            const batch = graphItems.slice(i, i + 25).map((item: any) => ({
-                DeleteRequest: { Key: { PK: item.PK, SK: item.SK } }
+        const chatItems = chatScan.Items || [];
+        for (let i = 0; i < chatItems.length; i += 25) {
+            const batch = chatItems.slice(i, i + 25).map((item: any) => ({
+                DeleteRequest: { Key: { conversationId: item.conversationId, timestamp: item.timestamp } }
             }));
-            await dynamicDb.send(new BatchWriteCommand({ RequestItems: { 'mediconnect-graph-data': batch } }));
+            await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [TABLE_NAMES.chatHistory]: batch } }));
         }
-    } catch (e) { safeError('[GDPR] Failed to delete graph data', e); }
+        chatLastKey = chatScan.LastEvaluatedKey;
+    } while (chatLastKey);
+    const tickets = await dynamicDb.send(new ScanCommand({ TableName: TABLE_NAMES.chatConnections,
+        FilterExpression: 'subjectId = :uid AND #kind = :kind', ExpressionAttributeNames: { '#kind': 'kind' },
+        ExpressionAttributeValues: { ':uid': userId, ':kind': 'CONNECTION_TICKET' } }));
+    for (let start = 0; start < (tickets.Items || []).length; start += 25) {
+        await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [TABLE_NAMES.chatConnections]: tickets.Items.slice(start, start + 25)
+            .map((item: any) => ({ DeleteRequest: { Key: { connectionId: item.connectionId } } })) } }));
+    }
+    // Granular GDPR audit for chat history erasure
+    {
+        await writeAuditLog(userId, userId, "GDPR_CHAT_ERASURE", "Chat history deleted under GDPR Art. 17 right to erasure", { region });
+    }
 
-    // 2b. Reverse graph-data entries (DOCTOR#x → PATIENT#userId)
-    try {
-        const reverseGraphScan = await dynamicDb.send(new ScanCommand({
-            TableName: 'mediconnect-graph-data',
-            FilterExpression: 'SK = :patientSk',
-            ExpressionAttributeValues: { ':patientSk': `PATIENT#${userId}` }
-        }));
-        const reverseItems = reverseGraphScan.Items || [];
-        for (let i = 0; i < reverseItems.length; i += 25) {
-            const batch = reverseItems.slice(i, i + 25).map((item: any) => ({
-                DeleteRequest: { Key: { PK: item.PK, SK: item.SK } }
-            }));
-            await dynamicDb.send(new BatchWriteCommand({ RequestItems: { 'mediconnect-graph-data': batch } }));
-        }
-    } catch (e) { safeError('[GDPR] Failed to delete reverse graph data', e); }
+});
+await workflow.stage('graph', async () => {
 
-    // 3. Prescriptions (anonymize patientName + delete S3 PDFs)
-    try {
-        const rxQuery = await dynamicDb.send(new QueryCommand({
-            TableName: 'mediconnect-prescriptions',
-            IndexName: 'PatientIndex',
-            KeyConditionExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
+    const graphQuery = await dynamicDb.send(new QueryCommand({
+        TableName: 'mediconnect-graph-data',
+        KeyConditionExpression: 'PK = :pk',
+        ExpressionAttributeValues: { ':pk': `PATIENT#${userId}` }
+    }));
+    const graphItems = graphQuery.Items || [];
+    for (let i = 0; i < graphItems.length; i += 25) {
+        const batch = graphItems.slice(i, i + 25).map((item: any) => ({
+            DeleteRequest: { Key: { PK: item.PK, SK: item.SK } }
         }));
-        // Delete prescription PDFs from S3 before anonymizing
-        try {
-            const regionalS3 = getRegionalS3Client(region);
-            const isEU = region.toUpperCase() === 'EU';
-            const rxBucket = isEU
-                ? (process.env.S3_BUCKET_PRESCRIPTIONS_EU || 'mediconnect-prescriptions-eu')
-                : (process.env.S3_BUCKET_PRESCRIPTIONS_US || 'mediconnect-prescriptions');
-            for (const rx of (rxQuery.Items || [])) {
-                await deleteS3ObjectVersions(regionalS3, rxBucket, `prescriptions/${rx.prescriptionId}.pdf`);
-            }
-            safeLog(`[GDPR] Deleted ${(rxQuery.Items || []).length} prescription PDFs (all versions) for patient ${userId}`);
-        } catch (s3Err) { safeError('[GDPR] Failed to delete prescription PDFs', s3Err); }
+        await dynamicDb.send(new BatchWriteCommand({ RequestItems: { 'mediconnect-graph-data': batch } }));
+    }
+
+});
+await workflow.stage('reverse-graph', async () => {
+
+    const reverseGraphScan = await dynamicDb.send(new ScanCommand({
+        TableName: 'mediconnect-graph-data',
+        FilterExpression: 'SK = :patientSk',
+        ExpressionAttributeValues: { ':patientSk': `PATIENT#${userId}` }
+    }));
+    const reverseItems = reverseGraphScan.Items || [];
+    for (let i = 0; i < reverseItems.length; i += 25) {
+        const batch = reverseItems.slice(i, i + 25).map((item: any) => ({
+            DeleteRequest: { Key: { PK: item.PK, SK: item.SK } }
+        }));
+        await dynamicDb.send(new BatchWriteCommand({ RequestItems: { 'mediconnect-graph-data': batch } }));
+    }
+
+});
+await workflow.stage('prescriptions', async () => {
+
+    const rxQuery = await dynamicDb.send(new QueryCommand({
+        TableName: 'mediconnect-prescriptions',
+        IndexName: 'PatientIndex',
+        KeyConditionExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    // Delete prescription PDFs from S3 before anonymizing
+    {
+        const regionalS3 = getRegionalS3Client(region);
+        const isEU = region.toUpperCase() === 'EU';
+        const rxBucket = isEU
+            ? (setting("S3_BUCKET_PRESCRIPTIONS_EU"))
+            : (setting("S3_BUCKET_PRESCRIPTIONS_US"));
         for (const rx of (rxQuery.Items || [])) {
-            await dynamicDb.send(new UpdateCommand({
-                TableName: 'mediconnect-prescriptions',
-                Key: { prescriptionId: rx.prescriptionId },
-                UpdateExpression: 'SET patientName = :anon, lastUpdated = :now',
-                ExpressionAttributeValues: { ':anon': 'ANONYMIZED_GDPR', ':now': new Date().toISOString() }
-            }));
+            await deleteS3ObjectVersions(regionalS3, rxBucket, `prescriptions/${rx.prescriptionId}.pdf`);
         }
-    } catch (e) { safeError('[GDPR] Failed to anonymize prescriptions', e); }
-
-    // 4. MPI links
-    try {
-        const mpiQuery = await dynamicDb.send(new ScanCommand({
-            TableName: process.env.TABLE_MPI || 'mediconnect-mpi-links',
-            FilterExpression: 'sourcePatientId = :pid OR targetPatientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
+        safeLog(`[GDPR] Deleted ${(rxQuery.Items || []).length} prescription PDFs (all versions) for patient ${userId}`);
+    }
+    for (const rx of (rxQuery.Items || [])) {
+        await dynamicDb.send(new UpdateCommand({
+            TableName: 'mediconnect-prescriptions',
+            Key: { prescriptionId: rx.prescriptionId },
+            UpdateExpression: 'SET patientName = :anon, lastUpdated = :now',
+            ExpressionAttributeValues: { ':anon': 'ANONYMIZED_GDPR', ':now': new Date().toISOString() }
         }));
-        const mpiItems = mpiQuery.Items || [];
-        for (let i = 0; i < mpiItems.length; i += 25) {
-            const batch = mpiItems.slice(i, i + 25).map((item: any) => ({
-                DeleteRequest: { Key: { linkId: item.linkId } }
-            }));
-            await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [process.env.TABLE_MPI || 'mediconnect-mpi-links']: batch } }));
-        }
-    } catch (e) { safeError('[GDPR] Failed to delete MPI links', e); }
+    }
 
-    // 5. Allergies
-    try {
-        const allergyQuery = await dynamicDb.send(new QueryCommand({
-            TableName: process.env.TABLE_ALLERGIES || 'mediconnect-allergies',
-            KeyConditionExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
+});
+await workflow.stage('mpi', async () => {
+
+    const mpiQuery = await dynamicDb.send(new ScanCommand({
+        TableName: setting("TABLE_MPI"),
+        FilterExpression: 'sourcePatientId = :pid OR targetPatientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    const mpiItems = mpiQuery.Items || [];
+    for (let i = 0; i < mpiItems.length; i += 25) {
+        const batch = mpiItems.slice(i, i + 25).map((item: any) => ({
+            DeleteRequest: { Key: { linkId: item.linkId } }
         }));
-        const allergyItems = allergyQuery.Items || [];
-        for (let i = 0; i < allergyItems.length; i += 25) {
-            const batch = allergyItems.slice(i, i + 25).map((item: any) => ({
-                DeleteRequest: { Key: { patientId: item.patientId, allergyId: item.allergyId } }
-            }));
-            await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [process.env.TABLE_ALLERGIES || 'mediconnect-allergies']: batch } }));
-        }
-    } catch (e) { safeError('[GDPR] Failed to delete allergies', e); }
+        await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [setting("TABLE_MPI")]: batch } }));
+    }
 
-    // 6. Immunizations
-    try {
-        const immunQuery = await dynamicDb.send(new QueryCommand({
-            TableName: process.env.TABLE_IMMUNIZATIONS || 'mediconnect-immunizations',
-            KeyConditionExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
+});
+await workflow.stage('allergies', async () => {
+
+    const allergyQuery = await dynamicDb.send(new QueryCommand({
+        TableName: setting("TABLE_ALLERGIES"),
+        KeyConditionExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    const allergyItems = allergyQuery.Items || [];
+    for (let i = 0; i < allergyItems.length; i += 25) {
+        const batch = allergyItems.slice(i, i + 25).map((item: any) => ({
+            DeleteRequest: { Key: { patientId: item.patientId, allergyId: item.allergyId } }
         }));
-        const immunItems = immunQuery.Items || [];
-        for (let i = 0; i < immunItems.length; i += 25) {
-            const batch = immunItems.slice(i, i + 25).map((item: any) => ({
-                DeleteRequest: { Key: { patientId: item.patientId, immunizationId: item.immunizationId } }
-            }));
-            await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [process.env.TABLE_IMMUNIZATIONS || 'mediconnect-immunizations']: batch } }));
-        }
-    } catch (e) { safeError('[GDPR] Failed to delete immunizations', e); }
+        await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [setting("TABLE_ALLERGIES")]: batch } }));
+    }
 
-    // 7. Care plans
-    try {
-        const cpQuery = await dynamicDb.send(new QueryCommand({
-            TableName: process.env.TABLE_CARE_PLANS || 'mediconnect-care-plans',
-            KeyConditionExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
+});
+await workflow.stage('immunizations', async () => {
+
+    const immunQuery = await dynamicDb.send(new QueryCommand({
+        TableName: setting("TABLE_IMMUNIZATIONS"),
+        KeyConditionExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    const immunItems = immunQuery.Items || [];
+    for (let i = 0; i < immunItems.length; i += 25) {
+        const batch = immunItems.slice(i, i + 25).map((item: any) => ({
+            DeleteRequest: { Key: { patientId: item.patientId, immunizationId: item.immunizationId } }
         }));
-        const cpItems = cpQuery.Items || [];
-        for (let i = 0; i < cpItems.length; i += 25) {
-            const batch = cpItems.slice(i, i + 25).map((item: any) => ({
-                DeleteRequest: { Key: { patientId: item.patientId, planId: item.planId || item.carePlanId } }
-            }));
-            await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [process.env.TABLE_CARE_PLANS || 'mediconnect-care-plans']: batch } }));
-        }
-    } catch (e) { safeError('[GDPR] Failed to delete care plans', e); }
+        await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [setting("TABLE_IMMUNIZATIONS")]: batch } }));
+    }
 
-    // 8. Lab orders (anonymize patientName)
-    try {
-        const labQuery = await dynamicDb.send(new QueryCommand({
-            TableName: process.env.TABLE_LAB_ORDERS || 'mediconnect-lab-orders',
-            IndexName: 'PatientIndex',
-            KeyConditionExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
+});
+await workflow.stage('care-plans', async () => {
+
+    const cpQuery = await dynamicDb.send(new QueryCommand({
+        TableName: setting("TABLE_CARE_PLANS"),
+        KeyConditionExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    const cpItems = cpQuery.Items || [];
+    for (let i = 0; i < cpItems.length; i += 25) {
+        const batch = cpItems.slice(i, i + 25).map((item: any) => ({
+            DeleteRequest: { Key: { patientId: item.patientId, planId: item.planId || item.carePlanId } }
         }));
-        for (const lab of (labQuery.Items || [])) {
-            await dynamicDb.send(new UpdateCommand({
-                TableName: process.env.TABLE_LAB_ORDERS || 'mediconnect-lab-orders',
-                Key: { labOrderId: lab.labOrderId },
-                UpdateExpression: 'SET patientName = :anon, patientDob = :null, patientGender = :null, lastUpdated = :now',
-                ExpressionAttributeValues: { ':anon': 'ANONYMIZED_GDPR', ':null': null, ':now': new Date().toISOString() }
-            }));
-        }
-    } catch (e) { safeError('[GDPR] Failed to anonymize lab orders', e); }
+        await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [setting("TABLE_CARE_PLANS")]: batch } }));
+    }
 
-    // 9. Referrals (anonymize patientId reference)
-    try {
-        const refQuery = await dynamicDb.send(new QueryCommand({
-            TableName: process.env.TABLE_REFERRALS || 'mediconnect-referrals',
-            IndexName: 'PatientIndex',
-            KeyConditionExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
+});
+await workflow.stage('labs', async () => {
+
+    const labQuery = await dynamicDb.send(new QueryCommand({
+        TableName: setting("TABLE_LAB_ORDERS"),
+        IndexName: 'PatientIndex',
+        KeyConditionExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    for (const lab of (labQuery.Items || [])) {
+        await dynamicDb.send(new UpdateCommand({
+            TableName: setting("TABLE_LAB_ORDERS"),
+            Key: { labOrderId: lab.labOrderId },
+            UpdateExpression: 'SET patientName = :anon, patientDob = :null, patientGender = :null, lastUpdated = :now',
+            ExpressionAttributeValues: { ':anon': 'ANONYMIZED_GDPR', ':null': null, ':now': new Date().toISOString() }
         }));
-        for (const ref of (refQuery.Items || [])) {
-            await dynamicDb.send(new UpdateCommand({
-                TableName: process.env.TABLE_REFERRALS || 'mediconnect-referrals',
-                Key: { referralId: ref.referralId },
-                UpdateExpression: 'SET patientName = :anon, lastUpdated = :now',
-                ExpressionAttributeValues: { ':anon': 'ANONYMIZED_GDPR', ':now': new Date().toISOString() }
-            }));
-        }
-    } catch (e) { safeError('[GDPR] Failed to anonymize referrals', e); }
+    }
 
-    // 10. Reconciliations (anonymize)
-    try {
-        const reconQuery = await dynamicDb.send(new QueryCommand({
-            TableName: process.env.TABLE_MED_RECON || 'mediconnect-med-reconciliations',
-            IndexName: 'PatientIndex',
-            KeyConditionExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
+});
+await workflow.stage('referrals', async () => {
+
+    const refQuery = await dynamicDb.send(new QueryCommand({
+        TableName: setting("TABLE_REFERRALS"),
+        IndexName: 'PatientIndex',
+        KeyConditionExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    for (const ref of (refQuery.Items || [])) {
+        await dynamicDb.send(new UpdateCommand({
+            TableName: setting("TABLE_REFERRALS"),
+            Key: { referralId: ref.referralId },
+            UpdateExpression: 'SET patientName = :anon, lastUpdated = :now',
+            ExpressionAttributeValues: { ':anon': 'ANONYMIZED_GDPR', ':now': new Date().toISOString() }
         }));
-        for (const recon of (reconQuery.Items || [])) {
-            await dynamicDb.send(new UpdateCommand({
-                TableName: process.env.TABLE_MED_RECON || 'mediconnect-med-reconciliations',
-                Key: { reconciliationId: recon.reconciliationId },
-                UpdateExpression: 'SET patientName = :anon, lastUpdated = :now',
-                ExpressionAttributeValues: { ':anon': 'ANONYMIZED_GDPR', ':now': new Date().toISOString() }
-            }));
-        }
-    } catch (e) { safeError('[GDPR] Failed to anonymize reconciliations', e); }
+    }
 
-    // 11. Vitals
-    try {
-        const vitalsQuery = await dynamicDb.send(new QueryCommand({
-            TableName: process.env.DYNAMO_TABLE_VITALS || 'mediconnect-iot-vitals',
-            KeyConditionExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
+});
+await workflow.stage('medications', async () => {
+
+    const reconQuery = await dynamicDb.send(new QueryCommand({
+        TableName: setting("TABLE_MED_RECON"),
+        IndexName: 'PatientIndex',
+        KeyConditionExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    for (const recon of (reconQuery.Items || [])) {
+        await dynamicDb.send(new UpdateCommand({
+            TableName: setting("TABLE_MED_RECON"),
+            Key: { reconciliationId: recon.reconciliationId },
+            UpdateExpression: 'SET patientName = :anon, lastUpdated = :now',
+            ExpressionAttributeValues: { ':anon': 'ANONYMIZED_GDPR', ':now': new Date().toISOString() }
         }));
-        const vitalsItems = vitalsQuery.Items || [];
-        for (let i = 0; i < vitalsItems.length; i += 25) {
-            const batch = vitalsItems.slice(i, i + 25).map((item: any) => ({
-                DeleteRequest: { Key: { patientId: item.patientId, timestamp: item.timestamp } }
-            }));
-            await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [process.env.DYNAMO_TABLE_VITALS || 'mediconnect-iot-vitals']: batch } }));
-        }
-        safeLog(`[GDPR] Deleted ${vitalsItems.length} vitals records for patient ${userId}`);
-    } catch (e) { safeError('[GDPR] Failed to delete vitals', e); }
+    }
 
-    // 12. Health records
-    try {
-        const ehrQuery = await dynamicDb.send(new QueryCommand({
-            TableName: process.env.TABLE_EHR || 'mediconnect-health-records',
-            KeyConditionExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
+});
+await workflow.stage('vitals', async () => {
+
+    const vitalsQuery = await dynamicDb.send(new QueryCommand({
+        TableName: setting("DYNAMO_TABLE_VITALS"),
+        KeyConditionExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    const vitalsItems = vitalsQuery.Items || [];
+    for (let i = 0; i < vitalsItems.length; i += 25) {
+        const batch = vitalsItems.slice(i, i + 25).map((item: any) => ({
+            DeleteRequest: { Key: { patientId: item.patientId, timestamp: item.timestamp } }
         }));
-        const ehrItems = ehrQuery.Items || [];
-        for (let i = 0; i < ehrItems.length; i += 25) {
-            const batch = ehrItems.slice(i, i + 25).map((item: any) => ({
-                DeleteRequest: { Key: { patientId: item.patientId, recordId: item.recordId } }
-            }));
-            await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [process.env.TABLE_EHR || 'mediconnect-health-records']: batch } }));
-        }
-        safeLog(`[GDPR] Deleted ${ehrItems.length} health records for patient ${userId}`);
-    } catch (e) { safeError('[GDPR] Failed to delete health records', e); }
+        await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [setting("DYNAMO_TABLE_VITALS")]: batch } }));
+    }
+    safeLog(`[GDPR] Deleted ${vitalsItems.length} vitals records for patient ${userId}`);
 
-    // 13. SDOH assessments
-    try {
-        const sdohQuery = await dynamicDb.send(new QueryCommand({
-            TableName: process.env.TABLE_SDOH || 'mediconnect-sdoh-assessments',
-            IndexName: 'patientId-index',
-            KeyConditionExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
+});
+await workflow.stage('ehr', async () => {
+
+    const ehrQuery = await dynamicDb.send(new QueryCommand({
+        TableName: TABLE_NAMES.ehr,
+        KeyConditionExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    const ehrItems = ehrQuery.Items || [];
+    for (let i = 0; i < ehrItems.length; i += 25) {
+        const batch = ehrItems.slice(i, i + 25).map((item: any) => ({
+            DeleteRequest: { Key: { patientId: item.patientId, recordId: item.recordId } }
         }));
-        const sdohItems = sdohQuery.Items || [];
-        for (let i = 0; i < sdohItems.length; i += 25) {
-            const batch = sdohItems.slice(i, i + 25).map((item: any) => ({
-                DeleteRequest: { Key: { assessmentId: item.assessmentId } }
-            }));
-            await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [process.env.TABLE_SDOH || 'mediconnect-sdoh-assessments']: batch } }));
-        }
-        safeLog(`[GDPR] Deleted ${sdohItems.length} SDOH assessments for patient ${userId}`);
-    } catch (e) { safeError('[GDPR] Failed to delete SDOH assessments', e); }
+        await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [TABLE_NAMES.ehr]: batch } }));
+    }
+    safeLog(`[GDPR] Deleted ${ehrItems.length} health records for patient ${userId}`);
 
-    // 14. Eligibility checks
-    try {
-        const eligQuery = await dynamicDb.send(new QueryCommand({
-            TableName: process.env.TABLE_ELIGIBILITY || 'mediconnect-eligibility-checks',
-            IndexName: 'patientId-index',
-            KeyConditionExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
+});
+await workflow.stage('sdoh', async () => {
+
+    const sdohQuery = await dynamicDb.send(new QueryCommand({
+        TableName: setting("TABLE_SDOH"),
+        IndexName: 'patientId-index',
+        KeyConditionExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    const sdohItems = sdohQuery.Items || [];
+    for (let i = 0; i < sdohItems.length; i += 25) {
+        const batch = sdohItems.slice(i, i + 25).map((item: any) => ({
+            DeleteRequest: { Key: { assessmentId: item.assessmentId } }
         }));
-        const eligItems = eligQuery.Items || [];
-        for (let i = 0; i < eligItems.length; i += 25) {
-            const batch = eligItems.slice(i, i + 25).map((item: any) => ({
-                DeleteRequest: { Key: { checkId: item.checkId } }
-            }));
-            await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [process.env.TABLE_ELIGIBILITY || 'mediconnect-eligibility-checks']: batch } }));
-        }
-        safeLog(`[GDPR] Deleted ${eligItems.length} eligibility checks for patient ${userId}`);
-    } catch (e) { safeError('[GDPR] Failed to delete eligibility checks', e); }
+        await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [setting("TABLE_SDOH")]: batch } }));
+    }
+    safeLog(`[GDPR] Deleted ${sdohItems.length} SDOH assessments for patient ${userId}`);
 
-    // 15. Prior authorizations
-    try {
-        const priorAuthQuery = await dynamicDb.send(new QueryCommand({
-            TableName: process.env.TABLE_PRIOR_AUTH || 'mediconnect-prior-auth',
-            IndexName: 'patientId-index',
-            KeyConditionExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
+});
+await workflow.stage('eligibility', async () => {
+
+    const eligQuery = await dynamicDb.send(new QueryCommand({
+        TableName: setting("TABLE_ELIGIBILITY"),
+        IndexName: 'patientId-index',
+        KeyConditionExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    const eligItems = eligQuery.Items || [];
+    for (let i = 0; i < eligItems.length; i += 25) {
+        const batch = eligItems.slice(i, i + 25).map((item: any) => ({
+            DeleteRequest: { Key: { checkId: item.checkId } }
         }));
-        const priorAuthItems = priorAuthQuery.Items || [];
-        for (let i = 0; i < priorAuthItems.length; i += 25) {
-            const batch = priorAuthItems.slice(i, i + 25).map((item: any) => ({
-                DeleteRequest: { Key: { authId: item.authId } }
-            }));
-            await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [process.env.TABLE_PRIOR_AUTH || 'mediconnect-prior-auth']: batch } }));
-        }
-        safeLog(`[GDPR] Deleted ${priorAuthItems.length} prior auth records for patient ${userId}`);
-    } catch (e) { safeError('[GDPR] Failed to delete prior authorizations', e); }
+        await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [setting("TABLE_ELIGIBILITY")]: batch } }));
+    }
+    safeLog(`[GDPR] Deleted ${eligItems.length} eligibility checks for patient ${userId}`);
 
-    // 16. Video sessions
-    try {
-        const videoQuery = await dynamicDb.send(new ScanCommand({
-            TableName: process.env.TABLE_SESSIONS || 'mediconnect-video-sessions',
-            FilterExpression: 'contains(participantIds, :uid) OR patientId = :uid',
-            ExpressionAttributeValues: { ':uid': userId }
+});
+await workflow.stage('prior-authorization', async () => {
+
+    const priorAuthQuery = await dynamicDb.send(new QueryCommand({
+        TableName: setting("TABLE_PRIOR_AUTH"),
+        IndexName: 'patientId-index',
+        KeyConditionExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    const priorAuthItems = priorAuthQuery.Items || [];
+    for (let i = 0; i < priorAuthItems.length; i += 25) {
+        const batch = priorAuthItems.slice(i, i + 25).map((item: any) => ({
+            DeleteRequest: { Key: { authId: item.authId } }
         }));
-        for (const session of (videoQuery.Items || [])) {
-            await dynamicDb.send(new DeleteCommand({
-                TableName: process.env.TABLE_SESSIONS || 'mediconnect-video-sessions',
-                Key: { sessionId: session.sessionId }
-            }));
-        }
-        safeLog(`[GDPR] Deleted ${(videoQuery.Items || []).length} video sessions for patient ${userId}`);
-    } catch (e) { safeError('[GDPR] Failed to delete video sessions', e); }
+        await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [setting("TABLE_PRIOR_AUTH")]: batch } }));
+    }
+    safeLog(`[GDPR] Deleted ${priorAuthItems.length} prior auth records for patient ${userId}`);
 
-    // 17. Blue Button connections
-    try {
-        const bbQuery = await dynamicDb.send(new QueryCommand({
-            TableName: process.env.TABLE_BB_CONNECTIONS || 'mediconnect-bluebutton-connections',
-            KeyConditionExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
+});
+await workflow.stage('video-sessions', async () => {
+
+    const videoQuery = await dynamicDb.send(new ScanCommand({
+        TableName: setting("TABLE_SESSIONS"),
+        FilterExpression: 'contains(participantIds, :uid) OR patientId = :uid',
+        ExpressionAttributeValues: { ':uid': userId }
+    }));
+    for (const session of (videoQuery.Items || [])) {
+        await dynamicDb.send(new DeleteCommand({
+            TableName: setting("TABLE_SESSIONS"),
+            Key: { sessionId: session.sessionId }
         }));
-        for (const conn of (bbQuery.Items || [])) {
-            await dynamicDb.send(new DeleteCommand({
-                TableName: process.env.TABLE_BB_CONNECTIONS || 'mediconnect-bluebutton-connections',
-                Key: { patientId: conn.patientId }
-            }));
-        }
-        safeLog(`[GDPR] Deleted ${(bbQuery.Items || []).length} Blue Button connections for patient ${userId}`);
-    } catch (e) { safeError('[GDPR] Failed to delete Blue Button connections', e); }
+    }
+    safeLog(`[GDPR] Deleted ${(videoQuery.Items || []).length} video sessions for patient ${userId}`);
 
-    // 18. Bulk export jobs
-    try {
-        const exportQuery = await dynamicDb.send(new ScanCommand({
-            TableName: process.env.TABLE_EXPORTS || 'mediconnect-bulk-exports',
-            FilterExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
+});
+await workflow.stage('blue-button', async () => {
+
+    const bbQuery = await dynamicDb.send(new QueryCommand({
+        TableName: setting("TABLE_BB_CONNECTIONS"),
+        KeyConditionExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    for (const conn of (bbQuery.Items || [])) {
+        await dynamicDb.send(new DeleteCommand({
+            TableName: setting("TABLE_BB_CONNECTIONS"),
+            Key: { patientId: conn.patientId }
         }));
-        for (const exp of (exportQuery.Items || [])) {
-            await dynamicDb.send(new DeleteCommand({
-                TableName: process.env.TABLE_EXPORTS || 'mediconnect-bulk-exports',
-                Key: { exportId: exp.exportId }
-            }));
-        }
-        safeLog(`[GDPR] Deleted ${(exportQuery.Items || []).length} export jobs for patient ${userId}`);
-    } catch (e) { safeError('[GDPR] Failed to delete export jobs', e); }
+    }
+    safeLog(`[GDPR] Deleted ${(bbQuery.Items || []).length} Blue Button connections for patient ${userId}`);
 
-    // 19. Appointment reminders
-    try {
-        const reminderQuery = await dynamicDb.send(new ScanCommand({
-            TableName: process.env.TABLE_REMINDERS || 'mediconnect-reminders',
-            FilterExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
+});
+await workflow.stage('exports', async () => {
+
+    const exportQuery = await dynamicDb.send(new ScanCommand({
+        TableName: setting("TABLE_EXPORTS"),
+        FilterExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    for (const exp of (exportQuery.Items || [])) {
+        await dynamicDb.send(new DeleteCommand({
+            TableName: setting("TABLE_EXPORTS"),
+            Key: { exportId: exp.exportId }
         }));
-        for (const rem of (reminderQuery.Items || [])) {
-            await dynamicDb.send(new DeleteCommand({
-                TableName: process.env.TABLE_REMINDERS || 'mediconnect-reminders',
-                Key: { reminderId: rem.reminderId }
-            }));
-        }
-        safeLog(`[GDPR] Deleted ${(reminderQuery.Items || []).length} reminders for patient ${userId}`);
-    } catch (e) { safeError('[GDPR] Failed to delete reminders', e); }
+    }
+    safeLog(`[GDPR] Deleted ${(exportQuery.Items || []).length} export jobs for patient ${userId}`);
 
-    // 20. HL7 messages (contain raw HL7 with patient identifiers)
-    try {
-        const hl7Scan = await dynamicDb.send(new ScanCommand({
-            TableName: 'mediconnect-hl7-messages',
-            FilterExpression: 'contains(#raw, :uid)',
-            ExpressionAttributeNames: { '#raw': 'raw' },
-            ExpressionAttributeValues: { ':uid': userId }
+});
+await workflow.stage('reminders', async () => {
+
+    const reminderQuery = await dynamicDb.send(new ScanCommand({
+        TableName: setting("TABLE_REMINDERS"),
+        FilterExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    for (const rem of (reminderQuery.Items || [])) {
+        await dynamicDb.send(new DeleteCommand({
+            TableName: setting("TABLE_REMINDERS"),
+            Key: { reminderId: rem.reminderId }
         }));
-        for (const msg of (hl7Scan.Items || [])) {
-            await dynamicDb.send(new DeleteCommand({
-                TableName: 'mediconnect-hl7-messages',
-                Key: { messageId: msg.messageId }
-            }));
-        }
-        safeLog(`[GDPR] Deleted ${(hl7Scan.Items || []).length} HL7 messages for patient ${userId}`);
-    } catch (e) { safeError('[GDPR] Failed to delete HL7 messages', e); }
+    }
+    safeLog(`[GDPR] Deleted ${(reminderQuery.Items || []).length} reminders for patient ${userId}`);
 
-    // 21. S3: Delete consultation recordings
-    try {
+});
+await workflow.stage('hl7', async () => {
+
+    const hl7Scan = await dynamicDb.send(new ScanCommand({
+        TableName: TABLE_NAMES.hl7Messages,
+        FilterExpression: 'contains(#raw, :uid)',
+        ExpressionAttributeNames: { '#raw': 'raw' },
+        ExpressionAttributeValues: { ':uid': userId }
+    }));
+    for (const msg of (hl7Scan.Items || [])) {
+        await dynamicDb.send(new DeleteCommand({
+            TableName: TABLE_NAMES.hl7Messages,
+            Key: { messageId: msg.messageId }
+        }));
+    }
+    safeLog(`[GDPR] Deleted ${(hl7Scan.Items || []).length} HL7 messages for patient ${userId}`);
+
+});
+await workflow.stage('recordings', async () => {
+    const storage = getRegionalS3Client(region);
+    const base = setting('RECORDING_BUCKET');
+    const bucket = region === 'EU' && !base.endsWith('-eu') ? `${base}-eu` : base;
+    const appointments = await dynamicDb.send(new QueryCommand({ TableName: setting('TABLE_APPOINTMENTS'), IndexName: 'PatientIndex', KeyConditionExpression: 'patientId = :id', ExpressionAttributeValues: { ':id': userId } }));
+    for (const appointment of appointments.Items || []) await eraseS3Versions(storage, bucket, `recordings/${appointment.appointmentId}/`, config);
+});
+await workflow.stage('dicom-images', async () => {
+    const storage = getRegionalS3Client(region);
+    const base = setting('BUCKET_NAME_DICOM');
+    const bucket = region === 'EU' && !base.endsWith('-eu') ? `${base}-eu` : base;
+    await eraseS3Versions(storage, bucket, `dicom/${userId}/`, config);
+    await eraseS3Versions(storage, bucket, `dicom-de-identified/${userId}/`, config);
+});
+await workflow.stage('dicom-metadata', async () => {
+
+    const dicomMetaQuery = await dynamicDb.send(new QueryCommand({
+        TableName: TABLE_NAMES.dicomStudies,
+        KeyConditionExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    const dicomMetaItems = dicomMetaQuery.Items || [];
+    for (let i = 0; i < dicomMetaItems.length; i += 25) {
+        const batch = dicomMetaItems.slice(i, i + 25).map((item: any) => ({
+            DeleteRequest: { Key: { patientId: item.patientId, studyInstanceUID: item.studyInstanceUID } }
+        }));
+        await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [TABLE_NAMES.dicomStudies]: batch } }));
+    }
+    safeLog(`[GDPR] Deleted ${dicomMetaItems.length} DICOM metadata entries for patient ${userId}`);
+
+});
+await workflow.stage('ecr', async () => {
+
+    const ecrScan = await dynamicDb.send(new ScanCommand({
+        TableName: setting("TABLE_ECR"),
+        FilterExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    for (const ecr of (ecrScan.Items || [])) {
+        await dynamicDb.send(new UpdateCommand({
+            TableName: setting("TABLE_ECR"),
+            Key: { reportId: ecr.reportId },
+            UpdateExpression: 'SET patientId = :anon, lastUpdated = :now',
+            ExpressionAttributeValues: { ':anon': 'ANONYMIZED_GDPR', ':now': new Date().toISOString() }
+        }));
+    }
+    safeLog(`[GDPR] Anonymized ${(ecrScan.Items || []).length} eCR reports for patient ${userId}`);
+
+});
+await workflow.stage('elr', async () => {
+
+    const elrScan = await dynamicDb.send(new ScanCommand({
+        TableName: setting("TABLE_ELR"),
+        FilterExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    for (const elr of (elrScan.Items || [])) {
+        await dynamicDb.send(new UpdateCommand({
+            TableName: setting("TABLE_ELR"),
+            Key: { reportId: elr.reportId },
+            UpdateExpression: 'SET patientId = :anon, patientName = :anon, patientDob = :null, patientGender = :null, lastUpdated = :now',
+            ExpressionAttributeValues: { ':anon': 'ANONYMIZED_GDPR', ':null': null, ':now': new Date().toISOString() }
+        }));
+    }
+    safeLog(`[GDPR] Anonymized ${(elrScan.Items || []).length} ELR reports for patient ${userId}`);
+
+});
+await workflow.stage('transactions', async () => {
+
+    const txScan = await dynamicDb.send(new ScanCommand({
+        TableName: setting("TABLE_TRANSACTIONS"),
+        FilterExpression: 'patientId = :pid',
+        ExpressionAttributeValues: { ':pid': userId }
+    }));
+    // Delete receipt PDFs from S3 before anonymizing (keyed by billId)
+    {
         const regionalS3 = getRegionalS3Client(region);
         const isEU = region.toUpperCase() === 'EU';
-        const recordingBucket = process.env.RECORDING_BUCKET || 'mediconnect-consultation-recordings';
-        const recordingBucketName = (isEU && !recordingBucket.endsWith('-eu')) ? `${recordingBucket}-eu` : recordingBucket;
-
-        // Find appointments for this patient to get recording keys
-        const aptScan = await dynamicDb.send(new QueryCommand({
-            TableName: process.env.TABLE_APPOINTMENTS || 'mediconnect-appointments',
-            IndexName: 'PatientIndex',
-            KeyConditionExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
-        }));
-        for (const apt of (aptScan.Items || [])) {
-            const listResult = await regionalS3.send(new ListObjectsV2Command({
-                Bucket: recordingBucketName,
-                Prefix: `recordings/${apt.appointmentId}/`
-            }));
-            for (const obj of (listResult.Contents || [])) {
-                if (obj.Key) {
-                    await deleteS3ObjectVersions(regionalS3, recordingBucketName, obj.Key);
-                }
-            }
-        }
-        safeLog(`[GDPR] Deleted consultation recordings (all versions) for patient ${userId}`);
-    } catch (e) { safeError('[GDPR] Failed to delete consultation recordings', e); }
-
-    // 22. S3: Delete DICOM medical images
-    try {
-        const regionalS3 = getRegionalS3Client(region);
-        const isEU = region.toUpperCase() === 'EU';
-        const imageBucket = process.env.BUCKET_NAME_DICOM || 'mediconnect-medical-images';
-        const imageBucketName = (isEU && !imageBucket.endsWith('-eu')) ? `${imageBucket}-eu` : imageBucket;
-
-        const listResult = await regionalS3.send(new ListObjectsV2Command({
-            Bucket: imageBucketName,
-            Prefix: `dicom/${userId}/`
-        }));
-        for (const obj of (listResult.Contents || [])) {
-            if (obj.Key) {
-                await deleteS3ObjectVersions(regionalS3, imageBucketName, obj.Key);
-            }
-        }
-        // Also check de-identified folder
-        const deIdResult = await regionalS3.send(new ListObjectsV2Command({
-            Bucket: imageBucketName,
-            Prefix: `dicom-de-identified/${userId}/`
-        }));
-        for (const obj of (deIdResult.Contents || [])) {
-            if (obj.Key) {
-                await deleteS3ObjectVersions(regionalS3, imageBucketName, obj.Key);
-            }
-        }
-        safeLog(`[GDPR] Deleted ${(listResult.Contents || []).length + (deIdResult.Contents || []).length} DICOM images (all versions) for patient ${userId}`);
-    } catch (e) { safeError('[GDPR] Failed to delete DICOM images', e); }
-
-    // 22b. DynamoDB: Delete DICOM study metadata (mediconnect-dicom-studies, PK=patientId)
-    try {
-        const dicomMetaQuery = await dynamicDb.send(new QueryCommand({
-            TableName: process.env.TABLE_DICOM_STUDIES || 'mediconnect-dicom-studies',
-            KeyConditionExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
-        }));
-        const dicomMetaItems = dicomMetaQuery.Items || [];
-        for (let i = 0; i < dicomMetaItems.length; i += 25) {
-            const batch = dicomMetaItems.slice(i, i + 25).map((item: any) => ({
-                DeleteRequest: { Key: { patientId: item.patientId, studyInstanceUID: item.studyInstanceUID } }
-            }));
-            await dynamicDb.send(new BatchWriteCommand({ RequestItems: { [process.env.TABLE_DICOM_STUDIES || 'mediconnect-dicom-studies']: batch } }));
-        }
-        safeLog(`[GDPR] Deleted ${dicomMetaItems.length} DICOM metadata entries for patient ${userId}`);
-    } catch (e) { safeError('[GDPR] Failed to delete DICOM metadata', e); }
-
-    // 23. eCR reports (electronic Case Reporting — contains patientId)
-    try {
-        const ecrScan = await dynamicDb.send(new ScanCommand({
-            TableName: process.env.TABLE_ECR || 'mediconnect-ecr-reports',
-            FilterExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
-        }));
-        for (const ecr of (ecrScan.Items || [])) {
-            await dynamicDb.send(new UpdateCommand({
-                TableName: process.env.TABLE_ECR || 'mediconnect-ecr-reports',
-                Key: { reportId: ecr.reportId },
-                UpdateExpression: 'SET patientId = :anon, lastUpdated = :now',
-                ExpressionAttributeValues: { ':anon': 'ANONYMIZED_GDPR', ':now': new Date().toISOString() }
-            }));
-        }
-        safeLog(`[GDPR] Anonymized ${(ecrScan.Items || []).length} eCR reports for patient ${userId}`);
-    } catch (e) { safeError('[GDPR] Failed to anonymize eCR reports', e); }
-
-    // 24. ELR reports (Electronic Lab Reporting — contains patientId, patientName, patientDob)
-    try {
-        const elrScan = await dynamicDb.send(new ScanCommand({
-            TableName: process.env.TABLE_ELR || 'mediconnect-elr-reports',
-            FilterExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
-        }));
-        for (const elr of (elrScan.Items || [])) {
-            await dynamicDb.send(new UpdateCommand({
-                TableName: process.env.TABLE_ELR || 'mediconnect-elr-reports',
-                Key: { reportId: elr.reportId },
-                UpdateExpression: 'SET patientId = :anon, patientName = :anon, patientDob = :null, patientGender = :null, lastUpdated = :now',
-                ExpressionAttributeValues: { ':anon': 'ANONYMIZED_GDPR', ':null': null, ':now': new Date().toISOString() }
-            }));
-        }
-        safeLog(`[GDPR] Anonymized ${(elrScan.Items || []).length} ELR reports for patient ${userId}`);
-    } catch (e) { safeError('[GDPR] Failed to anonymize ELR reports', e); }
-
-    // 25. Transactions (financial records — delete receipt PDFs, then anonymize patientId)
-    try {
-        const txScan = await dynamicDb.send(new ScanCommand({
-            TableName: process.env.TABLE_TRANSACTIONS || 'mediconnect-transactions',
-            FilterExpression: 'patientId = :pid',
-            ExpressionAttributeValues: { ':pid': userId }
-        }));
-        // Delete receipt PDFs from S3 before anonymizing (keyed by billId)
-        try {
-            const regionalS3 = getRegionalS3Client(region);
-            const isEU = region.toUpperCase() === 'EU';
-            const receiptBucket = isEU
-                ? (process.env.S3_BUCKET_UPLOADS_EU || 'mediconnect-patient-data-eu')
-                : (process.env.S3_BUCKET_UPLOADS || 'mediconnect-patient-data');
-            for (const tx of (txScan.Items || [])) {
-                await deleteS3ObjectVersions(regionalS3, receiptBucket, `receipts/${tx.billId}.pdf`);
-            }
-            safeLog(`[GDPR] Deleted ${(txScan.Items || []).length} receipt PDFs (all versions) for patient ${userId}`);
-        } catch (s3Err) { safeError('[GDPR] Failed to delete receipt PDFs', s3Err); }
+        const receiptBucket = isEU
+            ? (setting("S3_BUCKET_UPLOADS_EU"))
+            : (setting("S3_BUCKET_UPLOADS"));
         for (const tx of (txScan.Items || [])) {
-            await dynamicDb.send(new UpdateCommand({
-                TableName: process.env.TABLE_TRANSACTIONS || 'mediconnect-transactions',
-                Key: { billId: tx.billId },
-                UpdateExpression: 'SET patientId = :anon, lastUpdated = :now',
-                ExpressionAttributeValues: { ':anon': 'ANONYMIZED_GDPR', ':now': new Date().toISOString() }
-            }));
+            await deleteS3ObjectVersions(regionalS3, receiptBucket, `receipts/${tx.billId}.pdf`);
         }
-        safeLog(`[GDPR] Anonymized ${(txScan.Items || []).length} transactions for patient ${userId}`);
-    } catch (e) { safeError('[GDPR] Failed to anonymize transactions', e); }
-
-    // 26. S3: Delete failed BigQuery DLQ entries containing this patient's data
-    try {
-        const regionalS3 = getRegionalS3Client(region);
-        const isEU = region.toUpperCase() === 'EU';
-        const dlqBucket = process.env.DLQ_BUCKET || 'mediconnect-data-lake-dlq';
-        const dlqBucketName = isEU ? `${dlqBucket}-eu` : dlqBucket;
-        const hashedPatientId = createHash('sha256')
-            .update(userId + (process.env.HIPAA_SALT || 'mediconnect_salt')).digest('hex');
-        const listResult = await regionalS3.send(new ListObjectsV2Command({
-            Bucket: dlqBucketName, Prefix: 'failed/'
+        safeLog(`[GDPR] Deleted ${(txScan.Items || []).length} receipt PDFs (all versions) for patient ${userId}`);
+    }
+    for (const tx of (txScan.Items || [])) {
+        await dynamicDb.send(new UpdateCommand({
+            TableName: setting("TABLE_TRANSACTIONS"),
+            Key: { billId: tx.billId },
+            UpdateExpression: 'SET patientId = :anon, lastUpdated = :now',
+            ExpressionAttributeValues: { ':anon': 'ANONYMIZED_GDPR', ':now': new Date().toISOString() }
         }));
-        for (const obj of (listResult.Contents || [])) {
-            if (!obj.Key) continue;
+    }
+    safeLog(`[GDPR] Anonymized ${(txScan.Items || []).length} transactions for patient ${userId}`);
+
+});
+await workflow.stage('analytics-dlq', async () => {
+
+    const regionalS3 = getRegionalS3Client(region);
+    const isEU = region.toUpperCase() === 'EU';
+    const dlqBucket = setting("DLQ_BUCKET");
+    const dlqBucketName = isEU ? `${dlqBucket}-eu` : dlqBucket;
+    const hashedPatientId = createHash('sha256')
+        .update(userId + requiredEnv('HIPAA_SALT')).digest('hex');
+    await eraseSubjectDlqVersions(regionalS3, dlqBucketName, 'failed/', [userId, hashedPatientId], config);
+    await eraseSubjectDlqVersions(regionalS3, dlqBucketName, 'failed-inserts/', [userId, hashedPatientId], config);
+
+});
+await workflow.stage('biometrics', async () => {
+
+    const regionalS3 = getRegionalS3Client(region);
+    const baseBucket = CONFIG.BUCKET_NAME;
+    const isEU = region.toUpperCase() === 'EU';
+    const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
+    await eraseS3Versions(regionalS3, bucketName, `patient/${userId}/`, config);
+
+});
+await workflow.stage('ehr-objects', async () => {
+    const storage = getRegionalS3Client(region);
+    const bucket = setting(region === 'EU' ? 'S3_BUCKET_UPLOADS_EU' : 'S3_BUCKET_UPLOADS');
+    await eraseS3Versions(storage, bucket, `ehr/${userId}/`, config);
+});
+        await workflow.stage('completion-audit', async () => {
+            await writeAuditLog(userId, userId, 'ERASURE_DATA_STAGES_COMPLETE', 'Approved erasure stages complete; retained records remain subject to the reviewed retention policy', { region, requirePersistence: true });
+        });
+        await workflow.stage('identity', async () => {
+            const pool = setting(region === 'EU' ? 'COGNITO_USER_POOL_ID_EU' : 'COGNITO_USER_POOL_ID_US');
             try {
-                const getResult = await regionalS3.send(new GetObjectCommand({ Bucket: dlqBucketName, Key: obj.Key }));
-                const body = await getResult.Body?.transformToString();
-                if (body && body.includes(hashedPatientId)) {
-                    await deleteS3ObjectVersions(regionalS3, dlqBucketName, obj.Key);
-                }
-            } catch { /* Individual file read/delete failure — continue */ }
-        }
-        safeLog(`[GDPR] Cleaned DLQ bucket for patient ${userId}`);
-    } catch (e) { safeError('[GDPR] Failed to clean DLQ bucket', e); }
-
-    try {
-        const regionalS3 = getRegionalS3Client(region);
-        const baseBucket = CONFIG.BUCKET_NAME;
-        const isEU = region.toUpperCase() === 'EU';
-        const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
-
-        const filesToDelete =[
-            `patient/${userId}/selfie_verified.jpg`,
-            `patient/${userId}/selfie_verified.png`,
-            `patient/${userId}/profile_picture.jpg`,
-            `patient/${userId}/profile_picture.png`
-        ];
-
-        for (const key of filesToDelete) {
-            await deleteS3ObjectVersions(regionalS3, bucketName, key);
-        }
-    } catch (s3Error) {
-        safeError(`[GDPR Warning] Failed to delete Selfie for ${userId}`, s3Error);
-    }
-
-    // S3: Delete EHR records
-    try {
-        const regionalS3 = getRegionalS3Client(region);
-        const isEU = region.toUpperCase() === 'EU';
-        const ehrBucket = process.env.S3_EHR_RECORDS_BUCKET || 'mediconnect-ehr-records';
-        const ehrBucketName = (isEU && !ehrBucket.endsWith('-eu')) ? `${ehrBucket}-eu` : ehrBucket;
-
-        // List and delete all objects (including all versions) under ehr/{userId}/
-        const listResult = await regionalS3.send(new ListObjectsV2Command({
-            Bucket: ehrBucketName,
-            Prefix: `ehr/${userId}/`
-        }));
-        for (const obj of (listResult.Contents || [])) {
-            if (obj.Key) {
-                await deleteS3ObjectVersions(regionalS3, ehrBucketName, obj.Key);
+                await getRegionalCognitoClient(region).send(new AdminDeleteUserCommand({ UserPoolId: pool, Username: userId }));
+            } catch (error: any) {
+                if (error.name !== 'UserNotFoundException') throw error;
             }
-        }
-        safeLog(`[GDPR] Deleted ${(listResult.Contents || []).length} EHR S3 objects (all versions) for patient ${userId}`);
-    } catch (s3EhrErr) {
-        safeError(`[GDPR Warning] Failed to delete EHR S3 records for ${userId}`, s3EhrErr);
+        });
+        await workflow.stage('profile', async () => {
+            await rawDb.send(new UpdateCommand({ TableName: CONFIG.DYNAMO_TABLE, Key: { patientId: userId },
+                UpdateExpression: 'SET #s = :status, #n = :name, email = :null, avatar = :null, phone = :null, address = :null, dob = :null, #resource = :empty, preferences = :empty, fcmToken = :null, isIdentityVerified = :false',
+                ConditionExpression: 'erasureOwner = :owner', ExpressionAttributeNames: { '#s': 'status', '#n': 'name', '#resource': 'resource' },
+                ExpressionAttributeValues: { ':status': 'ERASED_WITH_RETENTION', ':name': 'REMOVED', ':null': null, ':empty': {}, ':false': false, ':owner': owner } }));
+        });
+        await persist({ ...workflow.progress, state: 'COMPLETED' });
+        return res.json({ status: 'ERASED_WITH_RETENTION', requestId });
+    } catch {
+        return res.status(503).json({ status: 'RETRY_REQUIRED', requestId, code: 'ERASURE_INCOMPLETE' });
+    } finally {
+        await rawDb.send(new UpdateCommand({ TableName: CONFIG.DYNAMO_TABLE, Key: { patientId: userId },
+            UpdateExpression: 'REMOVE erasureOwner, erasureLeaseUntil', ConditionExpression: 'erasureOwner = :owner',
+            ExpressionAttributeValues: { ':owner': owner } })).catch(() => {});
     }
+});
 
-    await writeAuditLog(userId, userId, "DELETE_PROFILE", "User invoked GDPR Right to be Forgotten", {
-        region, 
-        ipAddress: req.ip,
-        lastKnownContact: { 
-            email: userCheck.Item.email, 
-            phone: userCheck.Item.phone || "N/A" 
-        }
-    });
+const erasureReviewSchema = z.object({
+    requestId: z.string().uuid(),
+    decision: z.enum(['APPROVED', 'REFUSED']), policyVersion: z.string().min(1),
+    reasonCode: z.string().regex(/^[A-Z_]+$/),
+    retainedCategories: z.array(z.enum(['medical', 'financial', 'audit', 'consent'])),
+}).strict();
 
+export const reviewErasure = catchAsync(async (req: Request, res: Response) => {
+    const identity = (req as any).user;
+    if (identity?.isAdmin !== true) return res.status(403).json({ error: 'Administrative review required' });
+    const body = erasureReviewSchema.safeParse(req.body);
+    if (!body.success || !req.params.patientId) return res.status(400).json({ error: 'Invalid erasure review' });
+    const config = getPrivacySettings();
+    if (body.data.policyVersion !== config.policyVersion) return res.status(409).json({ error: 'Retention policy version mismatch' });
+    if (body.data.decision === 'APPROVED' && ['medical', 'financial', 'audit', 'consent'].some(category => !body.data.retainedCategories.includes(category as any))) {
+        return res.status(400).json({ error: 'This workflow retains medical, financial, audit and consent records; review must account for every category' });
+    }
+    const approval = { ...body.data, reviewedBy: identity.id, reviewedAt: new Date().toISOString() };
+    const db = getRegionalClient(identity.region);
     try {
-        const regionalSns = getRegionalSNSClient(region);
-        const regionalSes = getRegionalSESClient(region);
-        const topicArn = region.toUpperCase() === 'EU' ? process.env.SNS_TOPIC_ARN_EU : process.env.SNS_TOPIC_ARN_US;
-
-        await regionalSns.send(new PublishCommand({
-            TopicArn: topicArn,
-            Subject: "⚠️ SECURITY ALERT: Patient Identity Purged",
-            Message: `CRITICAL: Patient account ${userId} has been anonymized. Biometric photos deleted. \nRegion: ${region}\nIP: ${req.ip}`
-        }));
-
-        if (userCheck.Item?.email) {
-            await regionalSes.send(new SendEmailCommand({
-                Source: process.env.SYSTEM_EMAIL || "noreply@yourdomain.com", 
-                Destination: { ToAddresses: [userCheck.Item.email] },
-                Message: {
-                    Subject: { Data: "MediConnect - Account Deleted Successfully" },
-                    Body: { 
-                        Text: { 
-                            Data: `Hello, \n\nThis is a formal confirmation that your MediConnect account and all biometric data have been erased as per your request under GDPR/HIPAA regulations. \n\nIn accordance with medical record laws, your clinical data has been anonymized and will be retained for the legal minimum period for audit purposes only. \n\nThank you.` 
-                        } 
-                    }
-                }
-            }));
-        }
-    } catch (err) {
-        safeError("Failed to send deletion alerts/emails", err);
+    await db.send(new UpdateCommand({ TableName: CONFIG.DYNAMO_TABLE, Key: { patientId: req.params.patientId },
+        UpdateExpression: 'SET erasureApproval = :approval, erasureReviews = list_append(if_not_exists(erasureReviews, :empty), :review)',
+        ConditionExpression: 'erasure.requestId = :request AND attribute_not_exists(erasureOwner) AND (attribute_not_exists(legalHold) OR legalHold = :false)',
+        ExpressionAttributeValues: { ':approval': approval, ':empty': [], ':review': [approval], ':request': body.data.requestId, ':false': false },
+    }));
+    } catch (error: any) {
+        if (error.name === 'ConditionalCheckFailedException') return res.status(409).json({ error: 'Erasure request changed, is active, or is subject to a legal hold' });
+        throw error;
     }
-    
-    try {
-        const cognitoClient = getRegionalCognitoClient(region);
-        const userPoolId = region.toUpperCase() === 'EU' ? process.env.COGNITO_USER_POOL_ID_EU : process.env.COGNITO_USER_POOL_ID_US;
-
-        if (userPoolId) {
-            await cognitoClient.send(new AdminDeleteUserCommand({
-                UserPoolId: userPoolId,
-                Username: userId
-            }));
-            safeLog(`[COMPLIANCE] Patient Identity ${userId} permanently erased from Cognito.`);
-        }
-    } catch (cognitoErr) {
-        safeError("Failed to remove patient from Cognito Pool", cognitoErr);
-    }
-
-    // Event bus: patient deleted (GDPR erasure)
-    publishEvent(EventType.PATIENT_DELETED, { patientId: userId, region }, region).catch(() => {});
-
-    res.json({ message: "Account fully anonymized and scheduled for hard deletion.", status: "DELETED" });
+    return res.json({ status: 'REVIEW_RECORDED', decision: body.data.decision });
 });
 
 /**
@@ -1443,7 +1232,7 @@ export const searchPatients = catchAsync(async (req: Request, res: Response) => 
 
     // 🟢 SECURITY FIX: Manual Verification Gate (Replaces Middleware)
     const docCheck = await dynamicDb.send(new GetCommand({
-        TableName: process.env.DYNAMO_TABLE_DOCTORS || 'mediconnect-doctors',
+        TableName: setting("DYNAMO_TABLE_DOCTORS"),
         Key: { doctorId: user.id }
     }));
 
@@ -1482,7 +1271,7 @@ export const getDemographics = catchAsync(async (req: Request, res: Response) =>
     // 🟢 SECURITY FIX: Strict Role & Verification Checking
     if (user?.isDoctor) {
         const docCheck = await dynamicDb.send(new GetCommand({
-            TableName: process.env.DYNAMO_TABLE_DOCTORS || 'mediconnect-doctors',
+            TableName: setting("DYNAMO_TABLE_DOCTORS"),
             Key: { doctorId: user.id }
         }));
         if (!docCheck.Item || docCheck.Item.verificationStatus !== 'APPROVED') {
@@ -1544,7 +1333,7 @@ export const getPatientById = catchAsync(async (req: Request, res: Response) => 
     // 🟢 SECURITY FIX: Manual Verification Gate
     if (isDoctor) {
         const docCheck = await dynamicDb.send(new GetCommand({
-            TableName: process.env.DYNAMO_TABLE_DOCTORS || 'mediconnect-doctors',
+            TableName: setting("DYNAMO_TABLE_DOCTORS"),
             Key: { doctorId: requesterId }
         }));
         if (!docCheck.Item || docCheck.Item.verificationStatus !== 'APPROVED') {
@@ -1568,7 +1357,7 @@ export const getPatientById = catchAsync(async (req: Request, res: Response) => 
 
         // 🟢 HIPAA "Minimum Necessary" Rule: Check Clinical Relationship
         const relationshipCheck = await dynamicDb.send(new QueryCommand({
-            TableName: process.env.TABLE_APPOINTMENTS || "mediconnect-appointments",
+            TableName: setting("TABLE_APPOINTMENTS"),
             IndexName: "PatientIndex", 
             KeyConditionExpression: "patientId = :pid",
             FilterExpression: "doctorId = :did AND #st <> :cancelled",
@@ -1603,7 +1392,7 @@ export const getPatientById = catchAsync(async (req: Request, res: Response) => 
         if (decrypted.dob) response.Item.dob = decrypted.dob;
         if (decrypted.phone) response.Item.phone = decrypted.phone;
         if (decrypted.email) response.Item.email = decrypted.email;
-    } catch { /* KMS unavailable — fields are already plaintext */ }
+    } catch { return res.status(503).json({ code: 'PHI_DECRYPTION_UNAVAILABLE', error: 'Protected data is temporarily unavailable.' }); }
 
     response.Item.avatar = await signAvatarUrl(response.Item.avatar, region);
 
@@ -1614,256 +1403,314 @@ export const getPatientById = catchAsync(async (req: Request, res: Response) => 
 /**
  * 9. EXPORT PATIENT DATA (GDPR Right to Data Portability)
  */
-export const exportPatientData = catchAsync(async (req: Request, res: Response) => {
-    const region = extractRegion(req);
-    const dynamicDb = getRegionalClient(region);
+export const exportPatientData = catchAsync(async (req: Request, res: Response) => { try {
+    const identity = (req as any).user;
+    if (!identity?.id || !identity.region) return res.status(401).json({ error: 'Unauthorized' });
+    const config = getPrivacySettings();
+    const region = identity.region === 'EU' || identity.region === config.euRegion ? 'EU' : identity.region === 'US' || identity.region === config.usRegion ? 'US' : null;
+    if (!region) return res.status(400).json({ error: 'Unsupported authenticated region' });
+    const dynamicDb = completePrivacyClient(getRegionalClient(region), config);
     const userId = (req as any).user?.id;
-
-    if (!userId) return res.status(401).json({ error: "Unauthorized" });
-
+    if (!userId)
+        return res.status(401).json({ error: "Unauthorized" });
     // Fetch patient's complete profile
     const patientResponse = await dynamicDb.send(new GetCommand({
         TableName: CONFIG.DYNAMO_TABLE,
         Key: { patientId: userId }
     }));
-
-    if (!patientResponse.Item) return res.status(404).json({ error: "Patient not found" });
-
+    if (!patientResponse.Item)
+        return res.status(404).json({ error: "Patient not found" });
     const patientData = patientResponse.Item;
-
     // 🟢 HIPAA: Decrypt PHI fields before export
     try {
-        const decrypted = await decryptPHI(
-            { name: patientData.name, dob: patientData.dob, phone: patientData.phone, email: patientData.email },
-            region
-        );
-        if (decrypted.name) patientData.name = decrypted.name;
-        if (decrypted.dob) patientData.dob = decrypted.dob;
-        if (decrypted.phone) patientData.phone = decrypted.phone;
-        if (decrypted.email) patientData.email = decrypted.email;
-    } catch { /* KMS unavailable — fields are already plaintext */ }
-
+        const decrypted = await decryptPHI({ name: patientData.name, dob: patientData.dob, phone: patientData.phone, email: patientData.email }, region);
+        if (decrypted.name)
+            patientData.name = decrypted.name;
+        if (decrypted.dob)
+            patientData.dob = decrypted.dob;
+        if (decrypted.phone)
+            patientData.phone = decrypted.phone;
+        if (decrypted.email)
+            patientData.email = decrypted.email;
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     // Fetch patient's appointments
     const appointmentsResponse = await dynamicDb.send(new ScanCommand({
-        TableName: process.env.TABLE_APPOINTMENTS || "mediconnect-appointments",
+        TableName: setting("TABLE_APPOINTMENTS"),
         FilterExpression: "patientId = :pid",
         ExpressionAttributeValues: { ":pid": userId }
     }));
-
     const appointments = appointmentsResponse.Items || [];
-
     // Fetch patient's vitals
     const vitalsResponse = await dynamicDb.send(new ScanCommand({
-        TableName: process.env.DYNAMO_TABLE_VITALS || "mediconnect-iot-vitals",
+        TableName: setting("DYNAMO_TABLE_VITALS"),
         FilterExpression: "patientId = :pid",
         ExpressionAttributeValues: { ":pid": userId }
     }));
-
     const vitals = vitalsResponse.Items || [];
-
     // GDPR Art. 20: Export ALL personal data across all tables
     let allergies: any[] = [];
     try {
-        const r = await dynamicDb.send(new QueryCommand({ TableName: process.env.TABLE_ALLERGIES || 'mediconnect-allergies', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new QueryCommand({ TableName: setting("TABLE_ALLERGIES"), KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         allergies = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let immunizations: any[] = [];
     try {
-        const r = await dynamicDb.send(new QueryCommand({ TableName: process.env.TABLE_IMMUNIZATIONS || 'mediconnect-immunizations', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new QueryCommand({ TableName: setting("TABLE_IMMUNIZATIONS"), KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         immunizations = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let carePlans: any[] = [];
     try {
-        const r = await dynamicDb.send(new QueryCommand({ TableName: process.env.TABLE_CARE_PLANS || 'mediconnect-care-plans', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new QueryCommand({ TableName: setting("TABLE_CARE_PLANS"), KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         carePlans = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let prescriptions: any[] = [];
     try {
         const r = await dynamicDb.send(new QueryCommand({ TableName: 'mediconnect-prescriptions', IndexName: 'PatientIndex', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         prescriptions = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let labOrders: any[] = [];
     try {
-        const r = await dynamicDb.send(new QueryCommand({ TableName: process.env.TABLE_LAB_ORDERS || 'mediconnect-lab-orders', IndexName: 'PatientIndex', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new QueryCommand({ TableName: setting("TABLE_LAB_ORDERS"), IndexName: 'PatientIndex', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         labOrders = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let referrals: any[] = [];
     try {
-        const r = await dynamicDb.send(new QueryCommand({ TableName: process.env.TABLE_REFERRALS || 'mediconnect-referrals', IndexName: 'PatientIndex', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new QueryCommand({ TableName: setting("TABLE_REFERRALS"), IndexName: 'PatientIndex', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         referrals = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let consentLedger: any[] = [];
     try {
-        const r = await dynamicDb.send(new QueryCommand({ TableName: 'mediconnect-consent-ledger', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new QueryCommand({ TableName: TABLE_NAMES.consentLedger, KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         consentLedger = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let transactions: any[] = [];
     try {
-        const r = await dynamicDb.send(new ScanCommand({ TableName: process.env.TABLE_TRANSACTIONS || 'mediconnect-transactions', FilterExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new ScanCommand({ TableName: setting("TABLE_TRANSACTIONS"), FilterExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         transactions = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let reconciliations: any[] = [];
     try {
-        const r = await dynamicDb.send(new QueryCommand({ TableName: process.env.TABLE_MED_RECON || 'mediconnect-med-reconciliations', IndexName: 'PatientIndex', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new QueryCommand({ TableName: setting("TABLE_MED_RECON"), IndexName: 'PatientIndex', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         reconciliations = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let chatHistory: any[] = [];
     try {
-        const r = await dynamicDb.send(new ScanCommand({ TableName: 'mediconnect-chat-history', FilterExpression: 'senderId = :uid OR recipientId = :uid', ExpressionAttributeValues: { ':uid': userId } }));
+        const r = await dynamicDb.send(new ScanCommand({ TableName: TABLE_NAMES.chatHistory, FilterExpression: 'senderId = :uid OR recipientId = :uid', ExpressionAttributeValues: { ':uid': userId } }));
         chatHistory = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let sdohAssessments: any[] = [];
     try {
-        const r = await dynamicDb.send(new QueryCommand({ TableName: process.env.TABLE_SDOH || 'mediconnect-sdoh-assessments', IndexName: 'patientId-index', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new QueryCommand({ TableName: setting("TABLE_SDOH"), IndexName: 'patientId-index', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         sdohAssessments = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let healthRecords: any[] = [];
     try {
-        const r = await dynamicDb.send(new QueryCommand({ TableName: process.env.TABLE_EHR || 'mediconnect-health-records', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new QueryCommand({ TableName: TABLE_NAMES.ehr, KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         healthRecords = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let eligibilityChecks: any[] = [];
     try {
-        const r = await dynamicDb.send(new QueryCommand({ TableName: process.env.TABLE_ELIGIBILITY || 'mediconnect-eligibility-checks', IndexName: 'patientId-index', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new QueryCommand({ TableName: setting("TABLE_ELIGIBILITY"), IndexName: 'patientId-index', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         eligibilityChecks = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let priorAuths: any[] = [];
     try {
-        const r = await dynamicDb.send(new QueryCommand({ TableName: process.env.TABLE_PRIOR_AUTH || 'mediconnect-prior-auth', IndexName: 'patientId-index', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new QueryCommand({ TableName: setting("TABLE_PRIOR_AUTH"), IndexName: 'patientId-index', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         priorAuths = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let emergencyAccessLogs: any[] = [];
     try {
-        const r = await dynamicDb.send(new ScanCommand({ TableName: process.env.TABLE_EMERGENCY_ACCESS || 'mediconnect-emergency-access', FilterExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new ScanCommand({ TableName: setting("TABLE_EMERGENCY_ACCESS"), FilterExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         emergencyAccessLogs = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let graphData: any[] = [];
     try {
-        const r = await dynamicDb.send(new QueryCommand({ TableName: process.env.TABLE_GRAPH || 'mediconnect-graph-data', KeyConditionExpression: 'PK = :pk', ExpressionAttributeValues: { ':pk': `PATIENT#${userId}` } }));
+        const r = await dynamicDb.send(new QueryCommand({ TableName: setting("TABLE_GRAPH"), KeyConditionExpression: 'PK = :pk', ExpressionAttributeValues: { ':pk': `PATIENT#${userId}` } }));
         graphData = r.Items || [];
         // Decrypt PHI fields in graph-data (doctorName, patientName) for GDPR Art. 20 portability
         for (const g of graphData) {
             try {
                 if (g.doctorName) {
                     const decrypted = await decryptPHI({ name: g.doctorName }, region);
-                    if (decrypted.name) g.doctorName = decrypted.name;
+                    if (decrypted.name)
+                        g.doctorName = decrypted.name;
                 }
                 if (g.patientName) {
                     const decrypted = await decryptPHI({ name: g.patientName }, region);
-                    if (decrypted.name) g.patientName = decrypted.name;
+                    if (decrypted.name)
+                        g.patientName = decrypted.name;
                 }
-            } catch { /* KMS unavailable — field may already be plaintext */ }
+            }
+            catch {
+                throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+            }
         }
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let videoSessions: any[] = [];
     try {
-        const r = await dynamicDb.send(new ScanCommand({ TableName: process.env.TABLE_SESSIONS || 'mediconnect-video-sessions', FilterExpression: 'contains(participantIds, :uid) OR patientId = :uid', ExpressionAttributeValues: { ':uid': userId } }));
+        const r = await dynamicDb.send(new ScanCommand({ TableName: setting("TABLE_SESSIONS"), FilterExpression: 'contains(participantIds, :uid) OR patientId = :uid', ExpressionAttributeValues: { ':uid': userId } }));
         videoSessions = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let bluebuttonConnections: any[] = [];
     try {
-        const r = await dynamicDb.send(new QueryCommand({ TableName: process.env.TABLE_BB_CONNECTIONS || 'mediconnect-bluebutton-connections', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new QueryCommand({ TableName: setting("TABLE_BB_CONNECTIONS"), KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         bluebuttonConnections = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let reminders: any[] = [];
     try {
-        const r = await dynamicDb.send(new ScanCommand({ TableName: process.env.TABLE_REMINDERS || 'mediconnect-reminders', FilterExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new ScanCommand({ TableName: setting("TABLE_REMINDERS"), FilterExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         reminders = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let hl7Messages: any[] = [];
     try {
-        const r = await dynamicDb.send(new ScanCommand({ TableName: 'mediconnect-hl7-messages', FilterExpression: 'contains(#raw, :uid)', ExpressionAttributeNames: { '#raw': 'raw' }, ExpressionAttributeValues: { ':uid': userId } }));
+        const r = await dynamicDb.send(new ScanCommand({ TableName: TABLE_NAMES.hl7Messages, FilterExpression: 'contains(#raw, :uid)', ExpressionAttributeNames: { '#raw': 'raw' }, ExpressionAttributeValues: { ':uid': userId } }));
         hl7Messages = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let mpiLinks: any[] = [];
     try {
-        const r = await dynamicDb.send(new ScanCommand({ TableName: process.env.TABLE_MPI || 'mediconnect-mpi-links', FilterExpression: 'sourcePatientId = :pid OR targetPatientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new ScanCommand({ TableName: setting("TABLE_MPI"), FilterExpression: 'sourcePatientId = :pid OR targetPatientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         mpiLinks = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let ecrReports: any[] = [];
     try {
-        const r = await dynamicDb.send(new ScanCommand({ TableName: process.env.TABLE_ECR || 'mediconnect-ecr-reports', FilterExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new ScanCommand({ TableName: setting("TABLE_ECR"), FilterExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         ecrReports = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let elrReports: any[] = [];
     try {
-        const r = await dynamicDb.send(new ScanCommand({ TableName: process.env.TABLE_ELR || 'mediconnect-elr-reports', FilterExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new ScanCommand({ TableName: setting("TABLE_ELR"), FilterExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         elrReports = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     let dicomStudies: any[] = [];
     try {
-        const r = await dynamicDb.send(new QueryCommand({ TableName: process.env.TABLE_DICOM_STUDIES || 'mediconnect-dicom-studies', KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
+        const r = await dynamicDb.send(new QueryCommand({ TableName: TABLE_NAMES.dicomStudies, KeyConditionExpression: 'patientId = :pid', ExpressionAttributeValues: { ':pid': userId } }));
         dicomStudies = r.Items || [];
-    } catch { /* Table may not exist */ }
-
+    }
+    catch {
+        throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+    }
     // Generate presigned S3 URLs for downloadable files (GDPR Art. 20 — actual data, not just metadata)
     const regionalS3Export = getRegionalS3Client(region);
     const isEUExport = region.toUpperCase() === 'EU';
-
     // EHR document download URLs
     for (const hr of healthRecords) {
         try {
             if (hr.s3Key || hr.recordId) {
                 const ehrBucket = isEUExport
-                    ? (process.env.EHR_BUCKET_EU || 'mediconnect-ehr-records-eu')
-                    : (process.env.EHR_BUCKET_US || 'mediconnect-ehr-records');
+                    ? (setting("EHR_BUCKET_EU"))
+                    : (setting("EHR_BUCKET_US"));
                 const key = hr.s3Key || `ehr/${userId}/${hr.recordId}`;
                 const url = await getSignedUrl(regionalS3Export, new GetObjectCommand({ Bucket: ehrBucket, Key: key }), { expiresIn: 3600 });
                 hr.downloadUrl = url;
             }
-        } catch { /* S3 object may not exist */ }
+        }
+        catch {
+            throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+        }
     }
-
     // DICOM study download URLs
     for (const ds of dicomStudies) {
         try {
             if (ds.s3Key || ds.studyInstanceUID) {
                 const dicomBucket = isEUExport
-                    ? (process.env.BUCKET_NAME_DICOM_EU || 'mediconnect-medical-images-eu')
-                    : (process.env.BUCKET_NAME_DICOM || 'mediconnect-medical-images');
+                    ? (setting("BUCKET_NAME_DICOM_EU"))
+                    : (setting("BUCKET_NAME_DICOM"));
                 const key = ds.s3Key || `dicom/${userId}/${ds.studyInstanceUID}`;
                 const url = await getSignedUrl(regionalS3Export, new GetObjectCommand({ Bucket: dicomBucket, Key: key }), { expiresIn: 3600 });
                 ds.downloadUrl = url;
             }
-        } catch { /* S3 object may not exist */ }
+        }
+        catch {
+            throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+        }
     }
-
     // Prescription PDF download URLs
     for (const rx of prescriptions) {
         try {
             if (rx.prescriptionId) {
                 const rxBucket = isEUExport
-                    ? (process.env.S3_BUCKET_PRESCRIPTIONS_EU || 'mediconnect-prescriptions-eu')
-                    : (process.env.S3_BUCKET_PRESCRIPTIONS_US || 'mediconnect-prescriptions');
+                    ? (setting("S3_BUCKET_PRESCRIPTIONS_EU"))
+                    : (setting("S3_BUCKET_PRESCRIPTIONS_US"));
                 const url = await getSignedUrl(regionalS3Export, new GetObjectCommand({ Bucket: rxBucket, Key: `prescriptions/${rx.prescriptionId}.pdf` }), { expiresIn: 3600 });
                 rx.downloadUrl = url;
             }
-        } catch { /* S3 object may not exist */ }
+        }
+        catch {
+            throw new Error("PRIVACY_EXPORT_INCOMPLETE");
+        }
     }
-
     // Query BigQuery for symptom analysis and vitals data (GDPR Art. 20 — patient-generated content)
     let symptomLogs: any[] = [];
     let bigqueryVitals: any[] = [];
@@ -1872,108 +1719,25 @@ export const exportPatientData = catchAsync(async (req: Request, res: Response) 
         const bqClient = await bqAuth.getClient();
         const bqToken = (await bqClient.getAccessToken()).token;
         const bqProject = await bqAuth.getProjectId();
-
-        if (bqToken && bqProject) {
-            const hashedUserId = createHash('sha256').update(userId + (process.env.HIPAA_SALT || 'mediconnect_salt')).digest('hex');
-            const aiDataset = isEUExport ? 'mediconnect_ai_eu' : 'mediconnect_ai';
-            const iotDataset = isEUExport ? 'iot_eu' : 'iot';
-            const bqHeaders = { "Authorization": `Bearer ${bqToken}`, "Content-Type": "application/json" };
-
-            // Fetch symptom analysis sessions
-            try {
-                const symptomResponse = await fetch(`https://bigquery.googleapis.com/bigquery/v2/projects/${bqProject}/queries`, {
-                    method: "POST",
-                    headers: bqHeaders,
-                    body: JSON.stringify({
-                        query: `SELECT * FROM \`${bqProject}.${aiDataset}.symptom_logs\` WHERE user_id = @hashedId`,
-                        useLegacySql: false,
-                        parameterMode: "NAMED",
-                        queryParameters: [{ name: "hashedId", parameterType: { type: "STRING" }, parameterValue: { value: hashedUserId } }]
-                    })
-                });
-                if (symptomResponse.ok) {
-                    const symptomData = await symptomResponse.json() as any;
-                    symptomLogs = (symptomData.rows || []).map((row: any) => {
-                        const fields = symptomData.schema?.fields || [];
-                        const entry: any = {};
-                        fields.forEach((f: any, i: number) => { entry[f.name] = row.f?.[i]?.v; });
-                        return entry;
-                    });
-                }
-            } catch { /* BigQuery symptom query failed */ }
-
-            // Fetch IoT vitals from BigQuery
-            try {
-                const vitalsResponse = await fetch(`https://bigquery.googleapis.com/bigquery/v2/projects/${bqProject}/queries`, {
-                    method: "POST",
-                    headers: bqHeaders,
-                    body: JSON.stringify({
-                        query: `SELECT * FROM \`${bqProject}.${iotDataset}.vitals_raw\` WHERE JSON_EXTRACT_SCALAR(data, '$.patientId') = @hashedId`,
-                        useLegacySql: false,
-                        parameterMode: "NAMED",
-                        queryParameters: [{ name: "hashedId", parameterType: { type: "STRING" }, parameterValue: { value: hashedUserId } }]
-                    })
-                });
-                if (vitalsResponse.ok) {
-                    const vitalsData = await vitalsResponse.json() as any;
-                    bigqueryVitals = (vitalsData.rows || []).map((row: any) => {
-                        const fields = vitalsData.schema?.fields || [];
-                        const entry: any = {};
-                        fields.forEach((f: any, i: number) => { entry[f.name] = row.f?.[i]?.v; });
-                        return entry;
-                    });
-                }
-            } catch { /* BigQuery vitals query failed */ }
-        }
-    } catch { /* BigQuery unavailable — export continues without analytics data */ }
+        if (!bqToken || !bqProject) throw new Error('PRIVACY_ANALYTICS_CREDENTIALS_UNAVAILABLE');
+        const config = getPrivacyAnalyticsSettings(region);
+        const hashedId = createHash('sha256').update(userId + requiredEnv('HIPAA_SALT')).digest('hex');
+        const base = { ...config, projectId: bqProject, token: bqToken, hashedId, maxPages: getPrivacySettings().maxPages };
+        symptomLogs = await completeAnalyticsExport({ ...base, jobId: `export_symptoms_${randomUUID()}`,
+            query: `SELECT * FROM \`${bqProject}.${config.aiDataset}.symptom_logs\` WHERE user_id = @hashedId` });
+        bigqueryVitals = await completeAnalyticsExport({ ...base, jobId: `export_vitals_${randomUUID()}`,
+            query: `SELECT * FROM \`${bqProject}.${config.iotDataset}.${config.iotTable}\` WHERE JSON_EXTRACT_SCALAR(data, '$.patientId') = @hashedId` });
+    } catch {
+        throw new Error('PRIVACY_EXPORT_INCOMPLETE');
+    }
 
     // Build FHIR Bundle for data portability
-    const allEntries = [
-        { resource: { resourceType: "Patient", ...patientData } },
-        ...appointments.map(a => ({ resource: a })),
-        ...vitals.map(v => ({ resource: v })),
-        ...allergies.map(a => ({ resource: { resourceType: "AllergyIntolerance", ...a } })),
-        ...immunizations.map(i => ({ resource: { resourceType: "Immunization", ...i } })),
-        ...carePlans.map(cp => ({ resource: { resourceType: "CarePlan", ...cp } })),
-        ...prescriptions.map(rx => ({ resource: { resourceType: "MedicationRequest", ...rx } })),
-        ...labOrders.map(lo => ({ resource: { resourceType: "ServiceRequest", ...lo } })),
-        ...referrals.map(r => ({ resource: { resourceType: "ServiceRequest", ...r } })),
-        ...consentLedger.map(c => ({ resource: { resourceType: "Consent", ...c } })),
-        ...transactions.map(t => ({ resource: { resourceType: "PaymentNotice", ...t } })),
-        ...reconciliations.map(r => ({ resource: { resourceType: "DetectedIssue", ...r } })),
-        ...chatHistory.map(c => ({ resource: { resourceType: "Communication", ...c } })),
-        ...sdohAssessments.map(s => ({ resource: { resourceType: "QuestionnaireResponse", id: s.assessmentId, questionnaire: 'Questionnaire/ahc-hrsn-screening', status: s.status || 'completed', subject: { reference: `Patient/${userId}` }, authored: s.createdAt, totalScore: s.totalScore, riskLevel: s.riskLevel, ...s } })),
-        ...healthRecords.map(hr => ({ resource: { resourceType: "DocumentReference", id: hr.recordId, status: 'current', subject: { reference: `Patient/${userId}` }, date: hr.createdAt, ...hr } })),
-        ...eligibilityChecks.map(ec => ({ resource: { resourceType: "CoverageEligibilityResponse", id: ec.checkId, status: 'active', patient: { reference: `Patient/${userId}` }, created: ec.createdAt, insurer: { display: ec.payerName || ec.payerId }, ...ec } })),
-        ...priorAuths.map(pa => ({ resource: { resourceType: "ClaimResponse", id: pa.authId, status: pa.status || 'active', patient: { reference: `Patient/${userId}` }, created: pa.createdAt, ...pa } })),
-        ...emergencyAccessLogs.map(ea => ({ resource: { resourceType: "AuditEvent", id: ea.overrideId, type: { system: 'http://dicom.nema.org/resources/ontology/DCM', code: '110113', display: 'Security Alert' }, action: 'E', recorded: ea.grantedAt, agent: [{ who: { reference: `Practitioner/${ea.actorId}` } }], entity: [{ what: { reference: `Patient/${userId}` } }], reasonCode: ea.reasonCode, durationMinutes: ea.durationMinutes, ...ea } })),
-        ...graphData.map(g => ({ resource: { resourceType: "Basic", id: `${g.PK}-${g.SK}`, code: { text: 'relationship' }, subject: { reference: `Patient/${userId}` }, relationship: g.relationship, lastInteraction: g.lastInteraction } })),
-        ...videoSessions.map(vs => ({ resource: { resourceType: "Encounter", id: vs.sessionId, status: 'finished', class: { code: 'VR', display: 'virtual' }, subject: { reference: `Patient/${userId}` }, period: { start: vs.createdAt } } })),
-        ...bluebuttonConnections.map(bb => ({ resource: { resourceType: "Basic", id: `bb-${bb.patientId}`, code: { text: 'blue-button-connection' }, subject: { reference: `Patient/${userId}` }, created: bb.connectedAt } })),
-        ...reminders.map(rem => ({ resource: { resourceType: "Communication", id: rem.reminderId, status: rem.status || 'completed', subject: { reference: `Patient/${userId}` }, sent: rem.scheduledAt, payload: [{ contentString: rem.message || 'Appointment reminder' }] } })),
-        ...hl7Messages.map(msg => ({ resource: { resourceType: "Basic", id: msg.messageId, code: { text: 'hl7-message' }, subject: { reference: `Patient/${userId}` }, messageType: msg.messageType, status: msg.status, receivedAt: msg.receivedAt } })),
-        ...mpiLinks.map(link => ({ resource: { resourceType: "Basic", id: link.linkId, code: { text: 'mpi-link' }, subject: { reference: `Patient/${userId}` }, sourcePatientId: link.sourcePatientId, targetPatientId: link.targetPatientId, matchScore: link.matchScore, linkedAt: link.linkedAt } })),
-        ...ecrReports.map(ecr => ({ resource: { resourceType: "Composition", id: ecr.reportId, meta: { profile: ['http://hl7.org/fhir/us/ecr/StructureDefinition/eicr-composition'] }, status: ecr.status || 'final', subject: { reference: `Patient/${userId}` }, date: ecr.reportDate, title: 'Electronic Case Report', conditionCode: ecr.conditionCode, conditionDisplay: ecr.conditionDisplay, urgency: ecr.urgency } })),
-        ...elrReports.map(elr => ({ resource: { resourceType: "DiagnosticReport", id: elr.reportId, meta: { profile: ['http://hl7.org/fhir/us/core/StructureDefinition/us-core-diagnosticreport-lab'] }, status: elr.status || 'final', subject: { reference: `Patient/${userId}` }, effectiveDateTime: elr.collectionDate || elr.reportDate, issued: elr.reportDate, code: { coding: [{ system: 'http://loinc.org', code: elr.testLoinc, display: elr.testDisplay }] }, result: [{ display: `${elr.testDisplay}: ${elr.resultValue} ${elr.resultUnit || ''}` }] } })),
-        ...dicomStudies.map(ds => ({ resource: { resourceType: "ImagingStudy", id: ds.studyInstanceUID, status: 'available', subject: { reference: `Patient/${userId}` }, started: ds.studyDate || ds.createdAt, numberOfSeries: ds.numberOfSeries, numberOfInstances: ds.numberOfInstances, modality: ds.modality ? [{ system: 'http://dicom.nema.org/resources/ontology/DCM', code: ds.modality }] : undefined, description: ds.studyDescription, downloadUrl: ds.downloadUrl } })),
-        ...symptomLogs.map(sl => ({ resource: { resourceType: "Observation", id: `symptom-${sl.timestamp || sl.session_id}`, status: 'final', code: { text: 'AI Symptom Analysis' }, subject: { reference: `Patient/${userId}` }, effectiveDateTime: sl.timestamp, valueString: sl.symptoms, component: [{ code: { text: 'risk_level' }, valueString: sl.risk_level }, { code: { text: 'ai_provider' }, valueString: sl.provider }] } })),
-        ...bigqueryVitals.map(bv => ({ resource: { resourceType: "Observation", id: `bq-vital-${bv.timestamp}`, status: 'final', code: { text: 'IoT Vital Reading (Analytics)' }, subject: { reference: `Patient/${userId}` }, effectiveDateTime: bv.timestamp, category: [{ coding: [{ system: 'http://terminology.hl7.org/CodeSystem/observation-category', code: 'vital-signs' }] }] } })),
-    ];
-
-    const exportBundle = {
-        resourceType: "Bundle",
-        type: "document",
-        timestamp: new Date().toISOString(),
-        total: allEntries.length,
-        entry: allEntries
-    };
-
-    await writeAuditLog(userId, userId, "GDPR_DATA_EXPORT", "Patient exported personal data", { region, ipAddress: req.ip });
-
+    const exportBundle = createPortabilityBundle({ patient: patientData, appointments, vitals, allergies, immunizations, carePlans, prescriptions, labOrders, referrals, consentLedger, transactions, reconciliations, chatHistory, sdohAssessments, healthRecords, eligibilityChecks, priorAuths, emergencyAccessLogs, graphData, videoSessions, bluebuttonConnections, reminders, hl7Messages, mpiLinks, ecrReports, elrReports, dicomStudies, symptomLogs, bigqueryVitals });
+await writeAuditLog(userId, userId, "GDPR_DATA_EXPORT", "Patient exported personal data", { region, ipAddress: req.ip, requirePersistence: true });
     // SOC 2 P1: Mark exported data with integrity hash
     const exportHash = createHash('sha256').update(JSON.stringify(exportBundle)).digest('hex');
     res.setHeader('X-Export-Integrity', exportHash);
-    res.setHeader('X-Export-Encryption', 'AES-256-GCM-client-side');
-
+    res.setHeader('Cache-Control', 'no-store');
+res.setHeader('Content-Type', 'application/fhir+json');
     res.json(exportBundle);
-});
+} catch { return res.status(503).json({ code: 'DATA_EXPORT_INCOMPLETE', error: 'The complete data export is unavailable. Please retry later.' }); } });

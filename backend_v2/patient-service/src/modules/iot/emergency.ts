@@ -5,7 +5,8 @@ import { PublishCommand } from "@aws-sdk/client-sns";
 import { writeAuditLog } from "../../../../shared/audit";
 import { safeLog } from '../../../../shared/logger';
 import { v4 as uuidv4 } from "uuid";
-import { publishEvent, EventType } from '../../../../shared/event-bus';
+import { publishEvent, EventType } from '../../../../shared/event-bus';
+import { setting } from '../../../../shared/settings';
 
 /**
  * 🟢 SHARED LOGIC: handleEmergencyDetection
@@ -25,7 +26,7 @@ export const handleEmergencyDetection = async (patientId: string, heartRate: num
         const dynamicDb = getRegionalClient(region);
 
         // 🟢 ARCHITECTURE FIX: Read env vars inside the function so loadSecrets() has time to populate them
-        const TABLE_APPOINTMENTS = process.env.DYNAMO_TABLE_APPOINTMENTS || "mediconnect-appointments";
+        const TABLE_APPOINTMENTS = setting("DYNAMO_TABLE_APPOINTMENTS");
         const targetTopic = region.toUpperCase() === 'EU' ? process.env.SNS_TOPIC_ARN_EU : process.env.SNS_TOPIC_ARN_US;
 
         // 1. Create Emergency Record in DynamoDB

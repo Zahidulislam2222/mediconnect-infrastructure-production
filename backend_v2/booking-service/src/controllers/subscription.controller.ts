@@ -17,6 +17,8 @@ import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient, getSSMParameter } from '../../../shared/aws-config';
 import { writeAuditLog } from '../../../shared/audit';
 import { safeLog, safeError } from '../../../shared/logger';
+import { setting } from '../../../shared/settings';
+import { requestJurisdiction } from '../../../shared/region-context';
 import {
     PlanId,
     SubscriptionStatus,
@@ -45,7 +47,7 @@ async function getStripePriceId(planId: PlanId, region: string): Promise<string>
 }
 
 function getRegion(req: Request): string {
-    return (req.headers['x-user-region'] as string) || 'us-east-1';
+    return requestJurisdiction(req);
 }
 
 async function getSubscription(patientId: string, region: string): Promise<SubscriptionRecord | null> {
@@ -432,7 +434,7 @@ export async function getCustomerPortal(req: Request, res: Response) {
         const stripe = await getStripe(region);
         const session = await stripe.billingPortal.sessions.create({
             customer: sub.stripeCustomerId,
-            return_url: `${process.env.FRONTEND_URL || 'https://mediconnect.health'}/account/subscription`,
+            return_url: `${setting("FRONTEND_URL")}/account/subscription`,
         });
 
         res.json({ url: session.url });

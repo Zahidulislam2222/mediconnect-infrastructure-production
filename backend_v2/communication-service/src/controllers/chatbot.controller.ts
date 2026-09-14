@@ -1,3 +1,4 @@
+import { createHash } from 'crypto';
 /**
  * AI Chatbot Controller — LightRAG + Circuit Breaker
  *
@@ -23,12 +24,13 @@ import { scoreConfidence, rerankByRelevance, validateResponse, ConfidenceScore, 
 import { planQuery, executeQueryPlan } from '../utils/query-planner';
 import { publishMetric, MetricName } from '../../../shared/metrics';
 import { randomUUID } from 'crypto';
+import { setting } from '../../../shared/settings';
 
 // ─── Config ─────────────────────────────────────────────────────────────
 
-const LIGHTRAG_URL = process.env.LIGHTRAG_URL || 'http://localhost:9621';
-const TABLE_CHAT_SESSIONS = process.env.TABLE_CHAT_SESSIONS || 'mediconnect-chat-sessions';
-const TABLE_CHATBOT_USAGE = process.env.TABLE_CHATBOT_USAGE || 'mediconnect-chatbot-usage';
+const LIGHTRAG_URL = setting("LIGHTRAG_URL");
+const TABLE_CHAT_SESSIONS = setting("TABLE_CHAT_SESSIONS");
+const TABLE_CHATBOT_USAGE = setting("TABLE_CHATBOT_USAGE");
 
 const RATE_LIMITS: Record<string, { messages: number; tokens: number }> = {
     public: { messages: 5, tokens: 5000 },
@@ -108,7 +110,7 @@ async function getRedis() {
     try {
         const redis = await import(/* webpackIgnore: true */ 'redis' as any);
         const { createClient } = redis;
-        redisClient = createClient({ url: process.env.REDIS_URL || 'redis://localhost:6379' });
+        redisClient = createClient({ url: setting("REDIS_URL") });
         await redisClient.connect();
         return redisClient;
     } catch {
@@ -133,7 +135,6 @@ async function setCache(key: string, value: string): Promise<void> {
 }
 
 function hashQuestion(text: string): string {
-    const { createHash } = require('crypto');
     return createHash('sha256').update(text.toLowerCase().trim()).digest('hex').substring(0, 16);
 }
 

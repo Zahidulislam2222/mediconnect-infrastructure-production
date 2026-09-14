@@ -10,8 +10,9 @@
   ],
   "main": "verify_consolidation.js",
   "scripts": {
-    "test": "npm test --workspaces --if-present",
-    "lint": "echo 'Linting passed'"
+    "test": "npm run test:config && npm test --workspaces --if-present && node scripts/auth_region_http_test.mjs && node scripts/phi_failure_http_test.mjs && node scripts/fhir_http_test.mjs && node scripts/socket_ticket_test.mjs && node scripts/socket_ticket_http_test.mjs && node scripts/chat_identity_http_test.mjs && node scripts/patient_data_access_http_test.mjs && node scripts/browser_policy_test.mjs && node scripts/monitoring_socket_test.mjs && node scripts/sensitive_operation_mfa_http_test.mjs && node scripts/vitals_disclosure_http_test.mjs && node scripts/iot_analytics_transport_test.mjs && node scripts/care_plan_access_http_test.mjs && node scripts/clinical_route_access_http_test.mjs",
+    "test:config": "node scripts/verify_config_boundary.mjs",
+    "lint": "eslint \"*-service/src/**/*.ts\" \"shared/**/*.ts\" \"ws-authorizer/*.mjs\""
   },
   "keywords": [],
   "author": "",
@@ -51,6 +52,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/axios": "^0.9.36",
     "@types/cors": "^2.8.19",
     "@types/express": "^4.17.21",
@@ -63,7 +65,11 @@
     "@types/trusted-types": "^2.0.7",
     "@types/uuid": "^10.0.0",
     "@types/ws": "^8.18.1",
-    "typescript": "^5.9.3"
+    "eslint": "^10.10.0",
+    "globals": "^17.12.0",
+    "socket.io-client": "^4.8.3",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.0"
   },
   "description": "",
   "overrides": {

@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 // ─── FEATURE #12: ELR (Electronic Lab Reporting) ───────────────────────────
 // FHIR DiagnosticReport → HL7 v2.x ORU^R01 generation for public health.
 // Stores reports in mediconnect-elr-reports.
@@ -10,13 +11,11 @@ import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
 import { safeError } from '../../../../shared/logger';
 import { validateUSCore } from '../../../../shared/us-core-profiles';
+import { setting } from '../../../../shared/settings';
 
-const TABLE = process.env.TABLE_ELR || 'mediconnect-elr-reports';
+const TABLE = setting("TABLE_ELR");
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── LOINC Test Codes (Common Reportable Labs) ─────────────────────────────
 

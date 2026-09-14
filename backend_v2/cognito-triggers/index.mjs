@@ -4,8 +4,14 @@
 
 import { CognitoIdentityProviderClient, AdminAddUserToGroupCommand } from "@aws-sdk/client-cognito-identity-provider";
 
-// AWS_REGION is set automatically by Lambda runtime
-const REGION = process.env.AWS_REGION || "us-east-1";
+const requireEnv = (name) => {
+    const value = process.env[name]?.trim();
+    if (!value) throw new Error(`Missing required configuration: ${name}`);
+    return value;
+};
+
+// AWS_REGION is set automatically by Lambda runtime.
+const REGION = requireEnv("AWS_REGION");
 const IS_EU = REGION.includes("eu");
 
 // Regional Cognito client (matches shared/aws-config.ts factory pattern)

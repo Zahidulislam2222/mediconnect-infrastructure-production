@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../shared/region-context';
 // C:\Dev\mediconnect-project\mediconnect-infrastructure-develop\backend_v2\doctor-service\src\controllers\doctor.controller.ts
 
 import { NextFunction, Request, Response } from 'express';
@@ -18,10 +19,11 @@ import { AdminDeleteUserCommand } from "@aws-sdk/client-cognito-identity-provide
 import { createHash } from 'crypto';
 import { safeLog, safeError } from '../../../shared/logger';
 import { publishEvent, EventType } from '../../../shared/event-bus';
+import { TABLE_NAMES, requiredEnv, setting } from '../../../shared/settings';
 
 // 🟢 FIX 1: Use Getter to prevent loading race condition
 const CONFIG = {
-    get DYNAMO_TABLE() { return process.env.DYNAMO_TABLE || 'mediconnect-doctors'; },
+    get DYNAMO_TABLE() { return setting("DYNAMO_TABLE"); },
 };
 
 // Helper to handle async errors
@@ -29,10 +31,7 @@ const catchAsync = (fn: any) => (req: Request, res: Response, next: NextFunction
     Promise.resolve(fn(req, res, next)).catch(next);
 };
 
-export const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-};
+export const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 async function signAvatarUrl(avatarKey: string | null, region: string): Promise<string | null> {
     if (!avatarKey) return null;
@@ -48,7 +47,7 @@ async function signAvatarUrl(avatarKey: string | null, region: string): Promise<
 
     try {
         const regionalS3 = getRegionalS3Client(region);
-        const baseBucket = process.env.BUCKET_NAME || 'mediconnect-doctor-data';
+        const baseBucket = setting("BUCKET_NAME");
 const isEU = region.toUpperCase() === 'EU';
 const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
 
@@ -117,12 +116,12 @@ export const createDoctor = catchAsync(async (req: Request, res: Response) => {
     };
 
     // 🟢 FIX #8: Encrypt PHI (doctor name) at rest using KMS envelope encryption
-    let encryptedName = name;
+    let encryptedName: string;
     try {
         const encryptedPHI = await encryptPHI({ name }, region);
         encryptedName = encryptedPHI.name || name;
-    } catch (kmsErr: any) {
-        safeError('[PHI] KMS encryption unavailable for doctor name, storing plaintext', kmsErr.message);
+    } catch {
+        return res.status(503).json({ code: 'PHI_ENCRYPTION_UNAVAILABLE', error: 'Protected data could not be saved. Please retry later.' });
     }
 
     // After encryption, update FHIR resource to use encrypted values (prevent PHI leak in stored resource)
@@ -212,7 +211,7 @@ export const verifyDoctorIdentity = catchAsync(async (req: Request, res: Respons
     const regionalS3 = getRegionalS3Client(region);
     const regionalRek = getRegionalRekognitionClient(region);
 
-    const baseBucket = process.env.BUCKET_NAME || 'mediconnect-doctor-data';
+    const baseBucket = setting("BUCKET_NAME");
 const isEU = region.toUpperCase() === 'EU';
 const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
 
@@ -282,7 +281,7 @@ export const getDoctor = catchAsync(async (req: Request, res: Response) => {
     try {
         const decrypted = await decryptPHI({ name: doctor.name }, region);
         if (decrypted.name) doctor.name = decrypted.name;
-    } catch { /* KMS unavailable — field is already plaintext */ }
+    } catch { return res.status(503).json({ code: 'PHI_DECRYPTION_UNAVAILABLE', error: 'Protected data is temporarily unavailable.' }); }
 
     doctor.avatar = await signAvatarUrl(doctor.avatar, region);
 
@@ -335,9 +334,9 @@ export const updateDoctor = catchAsync(async (req: Request, res: Response) => {
         try {
             const encryptedPHI = await encryptPHI({ name: updates.name }, region);
             updates.name = encryptedPHI.name || updates.name;
-        } catch (kmsErr: any) {
-            safeError('[PHI] KMS encryption unavailable for doctor name update, storing plaintext', kmsErr.message);
-        }
+        } catch {
+        return res.status(503).json({ code: 'PHI_ENCRYPTION_UNAVAILABLE', error: 'Protected data could not be saved. Please retry later.' });
+    }
     }
 
     const parts: string[] =[];
@@ -444,7 +443,7 @@ export const getDoctors = catchAsync(async (req: Request, res: Response) => {
         try {
             const decrypted = await decryptPHI({ name: doc.name }, region);
             if (decrypted.name) decryptedName = decrypted.name;
-        } catch { /* KMS unavailable — field is already plaintext */ }
+        } catch { return res.status(503).json({ code: 'PHI_DECRYPTION_UNAVAILABLE', error: 'Protected data is temporarily unavailable.' }); }
 
         return {
             doctorId: doc.doctorId,
@@ -622,10 +621,10 @@ export const connectGoogleCalendar = catchAsync(async (req: Request, res: Respon
         return res.status(403).json({ error: "You can only connect Google Calendar for your own account." });
     }
 
-    const doctorBase = process.env.API_PUBLIC_URL || "http://localhost:8082";
+    const doctorBase = setting("API_PUBLIC_URL");
     const redirectUri = `${doctorBase.replace(/\/$/, '')}/doctors/auth/google/callback`;
 
-    const secret = process.env.GOOGLE_CLIENT_SECRET || 'fallback_secret';
+    const secret = requiredEnv('GOOGLE_CLIENT_SECRET');
     const secureState = jwt.sign({ doctorId: id }, secret, { expiresIn: '15m' });
 
     const oauth2Client = new google.auth.OAuth2(
@@ -650,12 +649,12 @@ export const googleCallback = catchAsync(async (req: Request, res: Response) => 
     if (!code || !state) return res.status(400).json({ error: "Invalid callback data" });
 
     // 🟢 1. Re-construct the EXACT same dynamic URI (Google requires a perfect match)
-    const doctorBase = process.env.API_PUBLIC_URL || "http://localhost:8082";
+    const doctorBase = setting("API_PUBLIC_URL");
     const redirectUri = `${doctorBase.replace(/\/$/, '')}/doctors/auth/google/callback`;
 
-    let targetDoctorId = "";
+    let targetDoctorId: string;
     try {
-        const secret = process.env.GOOGLE_CLIENT_SECRET || 'fallback_secret';
+        const secret = requiredEnv('GOOGLE_CLIENT_SECRET');
         const decoded = jwt.verify(state as string, secret) as any;
         targetDoctorId = decoded.doctorId;
     } catch (err) { return res.status(403).json({ error: "Security Violation: Invalid state." }); }
@@ -792,7 +791,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
         }));
 
         const apptQuery = await docClient.send(new QueryCommand({
-            TableName: process.env.TABLE_APPOINTMENTS || "mediconnect-appointments",
+            TableName: setting("TABLE_APPOINTMENTS"),
             IndexName: "DoctorIndex",
             KeyConditionExpression: "doctorId = :did",
             ExpressionAttributeValues: { ":did": id }
@@ -816,7 +815,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
 
         for (const apt of doctorAppointments) {
             // Anonymize the FHIR resource participant name
-            let fhirResource = apt.resource || {};
+            const fhirResource = apt.resource || {};
             if (Array.isArray(fhirResource.participant)) {
                 fhirResource.participant.forEach((p: any) => {
                     if (p.actor?.reference === `Practitioner/${id}`) {
@@ -826,7 +825,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
             }
 
             await docClient.send(new UpdateCommand({
-                TableName: process.env.TABLE_APPOINTMENTS || "mediconnect-appointments",
+                TableName: setting("TABLE_APPOINTMENTS"),
                 Key: { appointmentId: apt.appointmentId },
                 UpdateExpression: "SET doctorName = :anon, doctorAvatar = :null, #res = :resource, lastUpdated = :now",
                 ExpressionAttributeNames: { "#res": "resource" },
@@ -851,7 +850,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
                                 doctor_id: "ANONYMIZED_PRACTITIONER",
                                 patient_id: apt.patientId === "ANONYMIZED_GDPR"
                                     ? "ANONYMIZED_GDPR"
-                                    : createHash('sha256').update(apt.patientId + (process.env.HIPAA_SALT || 'mediconnect_salt')).digest('hex'),
+                                    : createHash('sha256').update(apt.patientId + requiredEnv('HIPAA_SALT')).digest('hex'),
                                 status: "DOCTOR_DELETED",
                                 timestamp: new Date().toISOString()
                             }}]
@@ -867,7 +866,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
 
     try {
         const txQuery = await docClient.send(new QueryCommand({
-            TableName: process.env.TABLE_TRANSACTIONS || "mediconnect-transactions",
+            TableName: setting("TABLE_TRANSACTIONS"),
             IndexName: "DoctorIndex",
             KeyConditionExpression: "doctorId = :did",
             ExpressionAttributeValues: { ":did": id }
@@ -882,7 +881,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
             }
 
             await docClient.send(new UpdateCommand({
-                TableName: process.env.TABLE_TRANSACTIONS || "mediconnect-transactions",
+                TableName: setting("TABLE_TRANSACTIONS"),
                 Key: { billId: tx.billId },
                 UpdateExpression: "SET description = :desc, lastUpdated = :now",
                 ExpressionAttributeValues: {
@@ -898,7 +897,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
 
     // ─── Graph-data cleanup: remove all DOCTOR# relationships ─────────────
     try {
-        const graphTable = process.env.TABLE_GRAPH || 'mediconnect-graph-data';
+        const graphTable = setting("TABLE_GRAPH");
         const graphResult = await docClient.send(new QueryCommand({
             TableName: graphTable,
             KeyConditionExpression: 'PK = :pk',
@@ -945,7 +944,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
 
     // ─── Prescriptions anonymization ──────────────────────────────────────
     try {
-        const rxTable = process.env.TABLE_PRESCRIPTIONS || 'mediconnect-prescriptions';
+        const rxTable = setting("TABLE_PRESCRIPTIONS");
         const rxResult = await docClient.send(new QueryCommand({
             TableName: rxTable,
             IndexName: 'DoctorIndex',
@@ -972,7 +971,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
 
     // ─── Lab orders anonymization ─────────────────────────────────────────
     try {
-        const labTable = process.env.TABLE_LAB_ORDERS || 'mediconnect-lab-orders';
+        const labTable = setting("TABLE_LAB_ORDERS");
         const labResult = await docClient.send(new ScanCommand({
             TableName: labTable,
             FilterExpression: 'orderingProviderId = :did',
@@ -998,7 +997,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
 
     // ─── Referrals anonymization ──────────────────────────────────────────
     try {
-        const referralTable = process.env.TABLE_REFERRALS || 'mediconnect-referrals';
+        const referralTable = setting("TABLE_REFERRALS");
         const referralResult = await docClient.send(new ScanCommand({
             TableName: referralTable,
             FilterExpression: 'requestingDoctorId = :did OR targetDoctorId = :did',
@@ -1034,7 +1033,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
 
     // ─── Med-reconciliation anonymization ─────────────────────────────────
     try {
-        const reconTable = process.env.TABLE_MED_RECON || 'mediconnect-med-reconciliations';
+        const reconTable = setting("TABLE_MED_RECON");
         const reconResult = await docClient.send(new ScanCommand({
             TableName: reconTable,
             FilterExpression: 'performedBy = :did',
@@ -1060,14 +1059,14 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
     // ─── Chat-history anonymization ───────────────────────────────────────
     try {
         const chatScan = await docClient.send(new ScanCommand({
-            TableName: 'mediconnect-chat-history',
+            TableName: TABLE_NAMES.chatHistory,
             FilterExpression: 'senderId = :did',
             ExpressionAttributeValues: { ':did': id }
         }));
         if (chatScan.Items?.length) {
             for (const msg of chatScan.Items) {
                 await docClient.send(new UpdateCommand({
-                    TableName: 'mediconnect-chat-history',
+                    TableName: TABLE_NAMES.chatHistory,
                     Key: { conversationId: msg.conversationId, timestamp: msg.timestamp },
                     UpdateExpression: 'SET senderId = :anon',
                     ExpressionAttributeValues: { ':anon': 'ANONYMIZED_DOCTOR' }
@@ -1081,7 +1080,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
 
     // ─── eCR reports anonymization ────────────────────────────────────────
     try {
-        const ecrTable = process.env.TABLE_ECR || 'mediconnect-ecr-reports';
+        const ecrTable = setting("TABLE_ECR");
         const ecrResult = await docClient.send(new ScanCommand({
             TableName: ecrTable,
             FilterExpression: 'submittingDoctorId = :did',
@@ -1107,7 +1106,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
 
     // ─── ELR reports anonymization ────────────────────────────────────────
     try {
-        const elrTable = process.env.TABLE_ELR || 'mediconnect-elr-reports';
+        const elrTable = setting("TABLE_ELR");
         const elrResult = await docClient.send(new ScanCommand({
             TableName: elrTable,
             FilterExpression: 'orderingProviderId = :did',
@@ -1185,7 +1184,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
     }
 
     const regionalS3 = getRegionalS3Client(region);
-    const baseBucket = process.env.BUCKET_NAME || 'mediconnect-doctor-data';
+    const baseBucket = setting("BUCKET_NAME");
     const isEU = region.toUpperCase() === 'EU';
     const bucketName = (isEU && !baseBucket.endsWith('-eu')) ? `${baseBucket}-eu` : baseBucket;
 
@@ -1262,7 +1261,7 @@ export const deleteDoctor = catchAsync(async (req: Request, res: Response) => {
         // 2. Alert Doctor via SES
         if (userCheck.Item?.email) {
             await regionalSes.send(new SendEmailCommand({
-                Source: process.env.SYSTEM_EMAIL || "noreply@yourdomain.com", // 🟢 Must be verified in AWS SES
+                Source: setting("SYSTEM_EMAIL"), // 🟢 Must be verified in AWS SES
                 Destination: { ToAddresses: [userCheck.Item.email] },
                 Message: {
                     Subject: { Data: "MediConnect - Account Closed Successfully" },

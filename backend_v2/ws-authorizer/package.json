@@ -2,8 +2,10 @@
   "name": "mediconnect-ws-authorizer",
   "version": "1.0.0",
   "type": "module",
-  "description": "WebSocket authorizer Lambda — Cognito JWT verification for API Gateway",
+  "description": "Single-use WebSocket connection ticket authorizer",
   "dependencies": {
-    "aws-jwt-verify": "^5.1.1"
+    "aws-jwt-verify": "^5.1.1",
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0"
   }
 }

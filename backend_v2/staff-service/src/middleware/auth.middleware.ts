@@ -12,22 +12,14 @@ import { CognitoJwtVerifier } from "aws-jwt-verify";
 import { COGNITO_CONFIG } from '../../../shared/aws-config';
 import { writeAuditLog } from "../../../shared/audit";
 import { safeError } from '../../../shared/logger';
+import { resolveAuthRegion } from '../../../shared/region-context';
 
-const verifiers: Record<string, any> = {
-    'us-east-1': null,
-    'eu-central-1': null
-};
-
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    const r = Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || "us-east-1");
-    return r.toUpperCase().includes('EU') ? 'eu-central-1' : 'us-east-1';
-};
+const verifiers: Record<string, any> = {};
 
 const getVerifier = async (region: string) => {
     if (verifiers[region]) return verifiers[region];
 
-    const regionKey = region === 'eu-central-1' ? 'EU' : 'US';
+    const regionKey = resolveAuthRegion(region);
     const config = COGNITO_CONFIG[regionKey];
 
     if (!config.USER_POOL_ID || !config.CLIENT_PATIENT) {
@@ -52,10 +44,11 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
         }
 
         const token = authHeader.split(' ')[1];
-        const region = extractRegion(req);
+        const region = resolveAuthRegion(req.headers['x-user-region']);
         const v = await getVerifier(region);
 
         const payload = await v.verify(token);
+        req.headers['x-user-region'] = region;
 
         const groups = (payload['cognito:groups'] as string[]) || [];
         const isDoctor = groups.some((g: string) => g.toLowerCase() === 'doctor' || g.toLowerCase() === 'doctors');
@@ -69,7 +62,7 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
             fhirId: payload["custom:fhir_id"] || payload.sub,
             region: region,
             isDoctor,
-            isPatient: !isDoctor,
+            isPatient: !isDoctor && !isStaff && !isAdmin,
             isStaff,
             isAdmin,
             groups,
@@ -77,19 +70,8 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
 
         next();
     } catch (err: any) {
-        const ip = req.ip || req.headers['x-forwarded-for'] || 'UNKNOWN';
-        const region = extractRegion(req);
-
-        safeError(`Staff Auth Failed [${region}]: ${err.message}`);
-
-        if (!err.message.includes('expired')) {
-            await writeAuditLog(
-                "SYSTEM", "STAFF",
-                "AUTH_FAILURE",
-                `Token rejection: ${err.message}`,
-                { region, ipAddress: String(ip) }
-            );
-        }
+        // No region is trusted on rejection; do not guess a regional audit destination.
+        safeError('Staff authentication rejected');
 
         const status = err.message.includes('AUTH_CRASH') ? 503 : 401;
         res.status(status).json({ error: "Unauthorized" });

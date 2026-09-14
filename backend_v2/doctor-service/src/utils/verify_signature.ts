@@ -4,6 +4,7 @@ import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { getRegionalClient, getRegionalKMSClient } from '../../../shared/aws-config';
 import { writeAuditLog } from "../../../shared/audit";
 import { safeLog, safeError } from '../../../shared/logger';
+import { requiredEnv } from '../../../shared/settings';
 
 /**
  * runPerfectAudit - Clinical Integrity Verifier
@@ -90,5 +91,5 @@ async function runPerfectAudit(prescriptionId: string, region: string = "us-east
 // Example usage for an EU prescription
 // runPerfectAudit("d17c2fb3-022b...", "EU");
 // Default usage for US
-const targetId = process.env.AUDIT_TARGET_ID || "d17c2fb3-022b..."; 
+const targetId = requiredEnv('AUDIT_TARGET_ID');
 runPerfectAudit(targetId, "US");

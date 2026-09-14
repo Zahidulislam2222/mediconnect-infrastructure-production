@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { issueSocketTicket } from '../../../shared/socket-ticket';
 import { getChatHistory, handleWsEventHttp } from "../controllers/chat.controller";
 import { createOrJoinSession, endSession } from "../controllers/video.controller";
 import { authMiddleware } from "../middleware/auth.middleware";
@@ -15,6 +16,7 @@ router.use(authMiddleware, requireIdentityVerification);
 
 // --- 💬 CHAT ROUTES ---
 router.get("/chat/history", getChatHistory);
+router.post('/chat/socket-ticket', issueSocketTicket);
 router.post("/chat/ws-event", validate({ body: ChatWsEventBody }), handleWsEventHttp);
 
 // --- 📹 VIDEO ROUTES ---

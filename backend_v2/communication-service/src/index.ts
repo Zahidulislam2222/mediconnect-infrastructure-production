@@ -1,9 +1,10 @@
+import { getApiBrowserPolicy } from '../../shared/api-browser-policy';
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import morgan from "morgan";
 import dotenv from "dotenv";
-import rateLimit from "express-rate-limit";
+import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { GetParametersCommand } from "@aws-sdk/client-ssm";
 
 import { communicationRoutes } from "./routes/communication.routes";
@@ -14,9 +15,11 @@ import { getRegionalSSMClient } from '../../shared/aws-config';
 import { createRateLimitStore } from '../../shared/rate-limit-store'; // 🟢 FIX #9: Redis distributed rate limiting
 import { safeLog, safeError } from '../../shared/logger';
 
+import { setting } from '../../shared/settings';
+
 dotenv.config();
 
-const app = express();
+export const app = express();
 app.set('trust proxy', 1);
 
 app.get('/health', (req, res) => res.status(200).json({ status: 'UP', type: 'liveness' }));
@@ -41,46 +44,11 @@ const PORT = process.env.PORT || 8084;
 let isAppReady = false;
 
 // --- 1. ENTERPRISE CORS CONFIGURATION ---
-const allowedOrigins: string[] = process.env.ALLOWED_ORIGINS 
-    ? process.env.ALLOWED_ORIGINS.split(',').map(url => url.trim()) 
-    : [];
-
-const mobileOrigins = [
-    'capacitor://localhost',
-    'http://localhost',
-    'https://localhost'
-];
-
-if (process.env.NODE_ENV !== 'production') {
-    allowedOrigins.push('http://localhost:5173', 'http://localhost:8080');
-}
-
-const corsOptions = {
-    origin: (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
-        if (!origin) return callback(null, true);
-        if (allowedOrigins.indexOf(origin) !== -1) return callback(null, true);
-        if (mobileOrigins.indexOf(origin) !== -1) return callback(null, true);
-
-        safeError("[CORS] Blocked request from unauthorized origin");
-        callback(new Error('Strict CORS Policy: Origin not allowed'));
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Internal-Secret', 'X-User-ID', 'Prefer', 'If-Match', 'x-user-region']
-};
+const browserPolicy = getApiBrowserPolicy();
+const corsOptions = browserPolicy.cors;
 
 // --- 2. SECURITY MIDDLEWARE ---
-app.use(helmet({
-    hsts: { maxAge: 31536000, includeSubDomains: true, preload: true },
-    contentSecurityPolicy: {
-        directives: {
-            defaultSrc: ["'self'"],
-            connectSrc: ["'self'", "https://*.amazonaws.com", "https://*.googleapis.com", "https://*.azure.com"],
-            scriptSrc: ["'self'"],
-            imgSrc: ["'self'", "data:", "https://*"],
-        }
-    }
-}));
+app.use(helmet(browserPolicy.helmet));
 
 app.use(cors(corsOptions)); // 🟢 Apply strict options
 app.options('*', cors(corsOptions));
@@ -120,7 +88,7 @@ const aiLimiter = rateLimit({
         if (req.user?.id || req.user?.sub) {
             return `ai:${req.user.id || req.user.sub}`;
         }
-        return `ai:${req.ip}`;
+        return `ai:${ipKeyGenerator(req.ip)}`;
     },
     message: { error: "AI rate limit exceeded. Maximum 5 AI requests per minute." },
     standardHeaders: true,
@@ -139,7 +107,7 @@ app.use("/chatbot", chatbotRoutes);
 
 // --- 4. 100% COMPLIANT VAULT SYNC ---
 async function loadSecrets() {
-    const region = process.env.AWS_REGION || 'us-east-1';
+    const region = setting("AWS_REGION");
     const ssm = getRegionalSSMClient(region);
 
     try {
@@ -199,4 +167,6 @@ const startServer = async () => {
     }
 };
 
-startServer();
+if (require.main === module) {
+    void startServer();
+}

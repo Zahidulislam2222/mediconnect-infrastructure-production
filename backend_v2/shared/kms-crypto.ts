@@ -14,10 +14,11 @@
 import { EncryptCommand, DecryptCommand } from "@aws-sdk/client-kms";
 import { getRegionalKMSClient } from './aws-config';
 import { safeError } from './logger';
+import { setting } from './settings';
 
 // KMS key alias or ARN — set per region in environment
-const KMS_KEY_ID_US = () => process.env.KMS_KEY_ID_US || process.env.KMS_KEY_ID || "";
-const KMS_KEY_ID_EU = () => process.env.KMS_KEY_ID_EU || process.env.KMS_KEY_ID || "";
+const KMS_KEY_ID_US = () => process.env.KMS_KEY_ID_US || setting("KMS_KEY_ID");
+const KMS_KEY_ID_EU = () => process.env.KMS_KEY_ID_EU || setting("KMS_KEY_ID");
 
 // Prefix to distinguish encrypted values from plaintext (migration safety)
 const ENCRYPTED_PREFIX = "kms:";
@@ -59,7 +60,7 @@ export async function encryptToken(plaintext: string, region: string): Promise<s
 
     } catch (err: any) {
         safeError(`KMS Encrypt Failed [${region}]:`, err.message);
-        throw new Error("Failed to encrypt sensitive data");
+        throw new Error("Failed to encrypt sensitive data", { cause: err });
     }
 }
 
@@ -95,7 +96,7 @@ export async function decryptToken(ciphertext: string, region: string): Promise<
 
     } catch (err: any) {
         safeError(`KMS Decrypt Failed [${region}]:`, err.message);
-        throw new Error("Failed to decrypt sensitive data");
+        throw new Error("Failed to decrypt sensitive data", { cause: err });
     }
 }
 

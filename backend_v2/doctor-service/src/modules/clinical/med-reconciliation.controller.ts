@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 // ─── FEATURE #27: Medication Reconciliation ───────────────────────────────
 // Compare medication lists across sources (prescriptions, pharmacy, patient
 // self-reported). Detect duplicates, conflicts, and gaps.
@@ -11,13 +12,11 @@ import { PutCommand, QueryCommand, GetCommand, ScanCommand } from '@aws-sdk/lib-
 import { getRegionalClient } from '../../../../shared/aws-config';
 import { writeAuditLog } from '../../../../shared/audit';
 import { validateUSCore } from '../../../../shared/us-core-profiles';
+import { setting } from '../../../../shared/settings';
 
-const TABLE_MED_RECON = process.env.TABLE_MED_RECON || 'mediconnect-med-reconciliations';
+const TABLE_MED_RECON = setting("TABLE_MED_RECON");
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── Reconciliation Types (Transitions of Care) ────────────────────────────
 

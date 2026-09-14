@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../../shared/region-context';
 // ─── FEATURE #10: ICD-11 Support ───────────────────────────────────────────
 // WHO ICD-11 API integration for clinical coding.
 // ICD-10 ↔ ICD-11 cross-mapping. Dual coding support.
@@ -9,10 +10,7 @@ import { Request, Response } from 'express';
 import { writeAuditLog } from '../../../../shared/audit';
 import { safeError } from '../../../../shared/logger';
 
-const extractRegion = (req: Request): string => {
-    const raw = req.headers['x-user-region'];
-    return Array.isArray(raw) ? raw[0] : (raw || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // WHO ICD-11 API config
 const ICD11_API_BASE = 'https://id.who.int';

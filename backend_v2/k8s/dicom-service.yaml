@@ -49,6 +49,8 @@ spec:
               value: "__AWS_ROLE_ARN__"
             - name: AWS_WEB_IDENTITY_TOKEN_FILE
               value: "__TOKEN_FILE__"
+            - name: TABLE_DICOM_STUDIES
+              value: "__TABLE_DICOM_STUDIES__"
 
           resources:
             requests:

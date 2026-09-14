@@ -11,8 +11,9 @@
 
 import { Kafka } from 'kafkajs';
 import { KAFKA_TOPICS } from '../shared/kafka';
+import { setting } from '../shared/settings';
 
-const broker = process.env.KAFKA_BROKER || 'localhost:9092';
+const broker = setting("KAFKA_BROKER");
 
 const TOPIC_CONFIGS: Array<{
     topic: string;

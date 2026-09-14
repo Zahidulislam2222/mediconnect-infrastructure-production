@@ -1,6 +1,7 @@
 import PDFDocument from "pdfkit";
 import { PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { setting } from '../../../shared/settings';
 import { getRegionalS3Client } from "../../../shared/aws-config";// 🟢 ADDED REGIONAL FACTORY
 
 interface ReceiptData {
@@ -22,8 +23,8 @@ export class BookingPDFGenerator {
         // Ensure EU users use the EU bucket
         const isEU = region.toUpperCase() === 'EU' || region === 'eu-central-1';
         const bucketName = isEU 
-            ? (process.env.S3_BUCKET_UPLOADS_EU || "mediconnect-patient-data-eu")
-            : (process.env.S3_BUCKET_UPLOADS || "mediconnect-patient-data");
+            ? (setting("S3_BUCKET_UPLOADS_EU"))
+            : (setting("S3_BUCKET_UPLOADS"));
 
         const pdfBuffer = await this.createPDFBuffer(data);
         const s3Key = `receipts/${data.billId}.pdf`;

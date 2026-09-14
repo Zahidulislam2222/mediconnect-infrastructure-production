@@ -6,19 +6,27 @@ import { DynamoDBDocumentClient, PutCommand, QueryCommand, GetCommand } from "@a
 
  
 
-const s3Client = new S3Client({ region: "us-east-1" });
-const dbClient = new DynamoDBClient({ region: "us-east-1" });
+const requireEnv = (name) => {
+    const value = process.env[name]?.trim();
+    if (!value) throw new Error(`Missing required configuration: ${name}`);
+    return value;
+};
+
+const region = requireEnv("AWS_REGION");
+const s3Client = new S3Client({ region });
+const dbClient = new DynamoDBClient({ region });
 const docClient = DynamoDBDocumentClient.from(dbClient);
 
-const BUCKET_NAME = "mediconnect-ehr-records"; 
-const TABLE_NAME = "mediconnect-health-records";
-const TABLE_DOCTORS = "mediconnect-doctors";
-const TABLE_NOTES = "mediconnect-clinical-notes";
+const BUCKET_NAME = requireEnv("EHR_BUCKET_US");
+const TABLE_NAME = requireEnv("TABLE_EHR");
+const TABLE_DOCTORS = requireEnv("DYNAMO_TABLE_DOCTORS");
+const TABLE_NOTES = requireEnv("TABLE_CLINICAL_NOTES");
+const ALLOWED_ORIGIN = requireEnv("ALLOWED_ORIGIN");
 
 export const handler = async (event) => {
     // 🔒 HEADERS
     const headers = {
-        "Access-Control-Allow-Origin": "*", // Updated to allow all origins (safer for dev)
+        "Access-Control-Allow-Origin": ALLOWED_ORIGIN,
         "Access-Control-Allow-Headers": "Content-Type,Authorization",
         "Access-Control-Allow-Methods": "OPTIONS,GET,POST"
     };

@@ -1,3 +1,4 @@
+import { requestJurisdiction } from '../../../shared/region-context';
 /**
  * Doctor Tier & Rate Management
  *
@@ -11,6 +12,7 @@ import { getRegionalClient } from '../../../shared/aws-config';
 import { writeAuditLog } from '../../../shared/audit';
 import { safeLog, safeError } from '../../../shared/logger';
 import { publishEvent, EventType } from '../../../shared/event-bus';
+import { setting } from '../../../shared/settings';
 import {
     DoctorTier,
     DOCTOR_TIERS,
@@ -20,16 +22,13 @@ import {
     TABLE_DOCTOR_PAYOUTS,
 } from '../../../shared/subscription';
 
-const TABLE_DOCTORS = process.env.DYNAMO_TABLE || 'mediconnect-doctors';
+const TABLE_DOCTORS = setting("DYNAMO_TABLE");
 
 const catchAsync = (fn: any) => (req: Request, res: Response, next: NextFunction) => {
     Promise.resolve(fn(req, res, next)).catch(next);
 };
 
-const extractRegion = (req: Request): string => {
-    const rawRegion = req.headers['x-user-region'];
-    return Array.isArray(rawRegion) ? rawRegion[0] : (rawRegion || 'us-east-1');
-};
+const extractRegion = (req: Request): string => requestJurisdiction(req);
 
 // ─── UPDATE DOCTOR RATE (Loophole #4: 10% quarterly cap) ───────────────
 

@@ -1,3 +1,4 @@
+import { resolveAuthRegion } from './region-context';
 // C:\Dev\mediconnect-project\mediconnect-infrastructure-develop\backend_v2\shared\aws-config.ts
 
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
@@ -12,6 +13,8 @@ import { NodeHttpHandler } from "@smithy/node-http-handler";
 import { SESClient } from "@aws-sdk/client-ses";
 import { CognitoIdentityProviderClient } from "@aws-sdk/client-cognito-identity-provider";
 import { safeError } from './logger';
+
+import { setting } from './settings';
 
 // 🟢 HIPAA 2026 High Availability (HA) Configuration
 // PROPER AWS SDK v3 Implementation: Prevents Multi-Cloud Cold Starts and Socket Hangs
@@ -28,9 +31,8 @@ const awsConfigBase = {
 
 // 🟢 GDPR STRICT ROUTING
 // Maps frontend headers strictly to the two physical legal jurisdictions.
-const normalizeRegion = (region: string = "us-east-1"): string => {
-    const r = region?.toUpperCase();
-    return (r === 'EU' || r === 'EU-CENTRAL-1') ? 'eu-central-1' : 'us-east-1';
+const normalizeRegion = (region: string = setting("PRIVACY_US_REGION")): string => {
+    return setting(resolveAuthRegion(region) === 'EU' ? 'PRIVACY_EU_REGION' : 'PRIVACY_US_REGION');
 };
 
 // Memory Cache for Regional Instances
@@ -50,7 +52,7 @@ const clients: any = {
 // 🏭 REGIONAL FACTORIES (NO STATIC CLIENTS ALLOWED)
 // =========================================================================
 
-export const getRegionalClient = (region: string = "us-east-1"): DynamoDBDocumentClient => {
+export const getRegionalClient = (region: string = setting("PRIVACY_US_REGION")): DynamoDBDocumentClient => {
     const target = normalizeRegion(region);
     if (clients.ddb[target]) return clients.ddb[target];
 
@@ -61,35 +63,35 @@ export const getRegionalClient = (region: string = "us-east-1"): DynamoDBDocumen
     return clients.ddb[target];
 };
 
-export const getRegionalS3Client = (region: string = "us-east-1"): S3Client => {
+export const getRegionalS3Client = (region: string = setting("PRIVACY_US_REGION")): S3Client => {
     const target = normalizeRegion(region);
     if (clients.s3[target]) return clients.s3[target];
     clients.s3[target] = new S3Client({ ...awsConfigBase, region: target });
     return clients.s3[target];
 };
 
-export const getRegionalRekognitionClient = (region: string = "us-east-1"): RekognitionClient => {
+export const getRegionalRekognitionClient = (region: string = setting("PRIVACY_US_REGION")): RekognitionClient => {
     const target = normalizeRegion(region);
     if (clients.rek[target]) return clients.rek[target];
     clients.rek[target] = new RekognitionClient({ ...awsConfigBase, region: target });
     return clients.rek[target];
 };
 
-export const getRegionalSNSClient = (region: string = "us-east-1"): SNSClient => {
+export const getRegionalSNSClient = (region: string = setting("PRIVACY_US_REGION")): SNSClient => {
     const target = normalizeRegion(region);
     if (clients.sns[target]) return clients.sns[target];
     clients.sns[target] = new SNSClient({ ...awsConfigBase, region: target });
     return clients.sns[target];
 };
 
-export const getRegionalSSMClient = (region: string = "us-east-1"): SSMClient => {
+export const getRegionalSSMClient = (region: string = setting("PRIVACY_US_REGION")): SSMClient => {
     const target = normalizeRegion(region);
     if (clients.ssm[target]) return clients.ssm[target];
     clients.ssm[target] = new SSMClient({ ...awsConfigBase, region: target });
     return clients.ssm[target];
 };
 
-export const getRegionalKMSClient = (region: string = "us-east-1"): KMSClient => {
+export const getRegionalKMSClient = (region: string = setting("PRIVACY_US_REGION")): KMSClient => {
     const target = normalizeRegion(region);
     if (clients.kms[target]) return clients.kms[target];
     clients.kms[target] = new KMSClient({ ...awsConfigBase, region: target });
@@ -97,7 +99,7 @@ export const getRegionalKMSClient = (region: string = "us-east-1"): KMSClient =>
 };
 
 // 🟢 Specific for Booking Service Webhooks
-export const getRegionalSecretsClient = (region: string = "us-east-1"): SecretsManagerClient => {
+export const getRegionalSecretsClient = (region: string = setting("PRIVACY_US_REGION")): SecretsManagerClient => {
     const target = normalizeRegion(region);
     if (clients.secrets[target]) return clients.secrets[target];
     clients.secrets[target] = new SecretsManagerClient({ ...awsConfigBase, region: target });
@@ -110,27 +112,27 @@ export const getRegionalSecretsClient = (region: string = "us-east-1"): SecretsM
 
 export const COGNITO_CONFIG: Record<string, any> = {
     US: {
-        REGION: 'us-east-1',
-        get USER_POOL_ID() { return process.env.COGNITO_USER_POOL_ID_US || process.env.COGNITO_USER_POOL_ID || '' },
-        get CLIENT_PATIENT() { return process.env.COGNITO_CLIENT_ID_US_PATIENT || process.env.COGNITO_CLIENT_ID || '' },
-        get CLIENT_DOCTOR() { return process.env.COGNITO_CLIENT_ID_US_DOCTOR || process.env.COGNITO_CLIENT_ID || '' },
-        get CLIENT_ADMIN() { return process.env.COGNITO_CLIENT_ID_US_ADMIN || '' },
-        get CLIENT_STAFF() { return process.env.COGNITO_CLIENT_ID_US_STAFF || '' },
+        get REGION() { return setting('PRIVACY_US_REGION'); },
+        get USER_POOL_ID() { return process.env.COGNITO_USER_POOL_ID_US || setting("COGNITO_USER_POOL_ID") },
+        get CLIENT_PATIENT() { return process.env.COGNITO_CLIENT_ID_US_PATIENT || setting("COGNITO_CLIENT_ID") },
+        get CLIENT_DOCTOR() { return process.env.COGNITO_CLIENT_ID_US_DOCTOR || setting("COGNITO_CLIENT_ID") },
+        get CLIENT_ADMIN() { return setting("COGNITO_CLIENT_ID_US_ADMIN") },
+        get CLIENT_STAFF() { return setting("COGNITO_CLIENT_ID_US_STAFF") },
     },
     EU: {
-        REGION: 'eu-central-1',
-        get USER_POOL_ID() { return process.env.COGNITO_USER_POOL_ID_EU || '' },
-        get CLIENT_PATIENT() { return process.env.COGNITO_CLIENT_ID_EU_PATIENT || '' },
-        get CLIENT_DOCTOR() { return process.env.COGNITO_CLIENT_ID_EU_DOCTOR || '' },
-        get CLIENT_ADMIN() { return process.env.COGNITO_CLIENT_ID_EU_ADMIN || '' },
-        get CLIENT_STAFF() { return process.env.COGNITO_CLIENT_ID_EU_STAFF || '' },
+        get REGION() { return setting('PRIVACY_EU_REGION'); },
+        get USER_POOL_ID() { return setting("COGNITO_USER_POOL_ID_EU") },
+        get CLIENT_PATIENT() { return setting("COGNITO_CLIENT_ID_EU_PATIENT") },
+        get CLIENT_DOCTOR() { return setting("COGNITO_CLIENT_ID_EU_DOCTOR") },
+        get CLIENT_ADMIN() { return setting("COGNITO_CLIENT_ID_EU_ADMIN") },
+        get CLIENT_STAFF() { return setting("COGNITO_CLIENT_ID_EU_STAFF") },
     }
 };
 
 const secretCache: Record<string, string> = {};
 
 // 🟢 Secure Regional Parameter Store Fetcher (Used by all services)
-export const getSSMParameter = async (path: string, region: string = "us-east-1", isSecure: boolean = true): Promise<string | undefined> => {
+export const getSSMParameter = async (path: string, region: string = setting("PRIVACY_US_REGION"), isSecure: boolean = true): Promise<string | undefined> => {
     const target = normalizeRegion(region);
     const cacheKey = `${target}:${path}`;
     if (secretCache[cacheKey]) return secretCache[cacheKey];
@@ -152,7 +154,7 @@ export const getSSMParameter = async (path: string, region: string = "us-east-1"
 };
 
 // 🟢 Secure Regional Secrets Manager Fetcher (Used by Booking Service Stripe Webhooks)
-export async function getSecret(secretName: string, region: string = "us-east-1"): Promise<string | null> {
+export async function getSecret(secretName: string, region: string = setting("PRIVACY_US_REGION")): Promise<string | null> {
     const target = normalizeRegion(region);
     try {
         const regionalSecrets = getRegionalSecretsClient(target);
@@ -172,14 +174,14 @@ export async function getSecret(secretName: string, region: string = "us-east-1"
     }
 }
 
-export const getRegionalSESClient = (region: string = "us-east-1"): SESClient => {
+export const getRegionalSESClient = (region: string = setting("PRIVACY_US_REGION")): SESClient => {
     const target = normalizeRegion(region);
     if (clients.ses[target]) return clients.ses[target];
     clients.ses[target] = new SESClient({ ...awsConfigBase, region: target });
     return clients.ses[target];
 };
 
-export const getRegionalCognitoClient = (region: string = "us-east-1"): CognitoIdentityProviderClient => {
+export const getRegionalCognitoClient = (region: string = setting("PRIVACY_US_REGION")): CognitoIdentityProviderClient => {
     const target = normalizeRegion(region);
     if (clients.cognito[target]) return clients.cognito[target];
     clients.cognito[target] = new CognitoIdentityProviderClient({ ...awsConfigBase, region: target });
