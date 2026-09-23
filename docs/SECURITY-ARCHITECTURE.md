@@ -63,7 +63,7 @@ not open a public issue.
 | Independent penetration test | Planned before any real patient data |
 | Branch protection and required reviews on default branches | To configure |
 | Add HSTS and a complete content-security policy (`default-src`, `script-src`, `style-src`) to the public host | Open |
-| Security CI results on the default branches (first run, 2026-09-24): **CMS passes.** Frontend fails only the full-history secret scan (old commits above). Backend Semgrep and Bandit fail on vendored third-party libraries inside `legacy_lambdas/` (for example dnspython, pymongo, requests), which are triaged but not suppressed. Knowledge service Semgrep flags an Nginx `add_header` in a location block that overrides the server-level security headers (`configs/nginx/default.conf`), a real configuration fix | Open |
+| Security CI on the default branches (2026-09-24): **all four repositories pass.** First run: the CMS passed. The frontend failed only its full-history secret scan. The backend's Semgrep and Bandit failed only on third-party libraries vendored into two retired Lambda bundles. The knowledge service's Semgrep flagged one Nginx header setting. Fixes: the Nginx setting was corrected; the vendored library folders are excluded from scanning, while MediConnect's own handler code is still scanned; the frontend's history scan now **reports without blocking**, because its findings are in old commits that cannot be removed without rewriting history | History-scan findings stay open until each old credential is confirmed revoked; then the history scan goes back to blocking |
 
 ## 6. Security rules for contributors
 

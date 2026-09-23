@@ -28,7 +28,7 @@ bash verify_app_vs_iac.sh
 terraform validate   # plan only; never apply without owner review
 ```
 
-The security workflow (Gitleaks, Semgrep, Bandit) runs on every pull request. New findings in your change must be fixed, never suppressed. Known findings in old commits and in vendored third-party libraries under `legacy_lambdas/` are tracked separately and do not block your change.
+The security workflow (Gitleaks, Semgrep, Bandit) runs on every pull request. New findings in your change must be fixed, never suppressed. Third-party libraries vendored into retired bundles under `legacy_lambdas/` are excluded from scanning (see `.semgrepignore`); all other code is scanned and findings block the change.
 
 ## Pull requests
 
