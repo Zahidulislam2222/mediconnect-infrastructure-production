@@ -1,5 +1,7 @@
 # Business Associate Agreement (BAA) Readiness
 
+> ⚠️ *Status note 2026-09-24: “IMPLEMENTED” below means present in source code, not verified in operation. No Business Associate Agreements have been signed. The subprocessor list reflects the retained multi-cloud design. Current position: [docs/COMPLIANCE-AND-LAW.md](../docs/COMPLIANCE-AND-LAW.md).*
+
 ## HIPAA §164.502(e) — Business Associate Contracts
 
 ### Covered Entity Obligations

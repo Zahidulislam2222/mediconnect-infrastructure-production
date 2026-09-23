@@ -1,5 +1,7 @@
 # Disaster Recovery Runbook
 
+> ⚠️ *Status note 2026-09-24: this runbook describes the retained cloud design (including the retired Firebase CDN). The recovery targets have not been measured, the cloud runtime is not running, and no failover drill has been recorded. Current targets and drill policy: [docs/RELIABILITY.md](../docs/RELIABILITY.md).*
+
 ## Recovery Objectives
 
 | Metric | Target | Current |
@@ -28,7 +30,7 @@ Primary: AWS us-east-1 (US) + eu-central-1 (EU)
 - Frontend API layer retries with 5s timeout, then fails over to backup URL
 - K8s liveness/readiness probes restart pod (if K8s deployed)
 
-**Manual Steps**: None required — fully automated
+**Manual Steps**: None required — fully automated ⚠️ *Design intent; not verified by a drill.*
 
 ### Scenario 2: Cloud Run Region Outage
 **Detection**: All services in region return 5xx or timeout

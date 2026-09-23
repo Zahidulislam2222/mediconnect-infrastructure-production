@@ -63,6 +63,8 @@ eligible request counts instead. Do not mix them. Probe a meaningful synthetic t
 process liveness; avoid paid AI calls in routine probes. Define approved maintenance accounting,
 alert ownership, escalation and error-budget release policy before activation.
 
+> ⚠️ *Superseded 2026-09-24: the objective is raised to 99.9% at launch and 99.95% at scale per critical journey. See [docs/RELIABILITY.md](../docs/RELIABILITY.md). The original text is kept unchanged.*
+
 RTO/RPO require product decisions plus measured restore/failover exercises. They are currently
 unverified, not zero. No single deployment check proves30-day uptime.
 

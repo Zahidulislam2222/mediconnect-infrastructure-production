@@ -1,5 +1,8 @@
 # Software Lifecycle & Regulatory Compliance (IEC 62304)
 
+> ⚠️ *Status note 2026-09-24: the safety class below is the developer's own assessment. It has not been reviewed by a regulator or notified body.*
+
+
 ## 1. Safety Classification
 Per **IEC 62304**, the MediConnect DICOM processing pipeline is classified as **Software Safety Class A** (No injury or damage to health is possible). The software acts as a viewing and routing mechanism, not a primary diagnostic tool.
 

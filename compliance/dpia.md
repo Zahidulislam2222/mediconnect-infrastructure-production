@@ -1,4 +1,6 @@
 # Data Protection Impact Assessment (DPIA)
+
+> ⚠️ *Status note 2026-09-24: draft for review. It has not been reviewed or signed by a DPO, and no processing of real personal data takes place today. Risk ratings are the engineering team's estimates.*
 ## GDPR Articles 35-36
 
 ### 1. Processing Description
@@ -57,7 +59,7 @@
 
 This DPIA has been prepared for review by the organization's Data Protection Officer (DPO).
 No prior consultation with the supervisory authority is required at this time as residual
-risks have been mitigated to acceptable levels through technical and organizational measures.
+risks have been mitigated to acceptable levels through technical and organizational measures. ⚠️ *To be confirmed by the DPO before processing begins.*
 
 ### 7. Review Schedule
 

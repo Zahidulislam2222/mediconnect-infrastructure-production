@@ -1,0 +1,15 @@
+{
+  "status": "PLANNING_ONLY_NOT_A_BENCHMARK",
+  "concurrentUsers": 1000000,
+  "requestsPerUserPerMinute": 6,
+  "headroomMultiplier": 1.5,
+  "services": [
+    { "name": "patient-service", "requestFraction": 0.3, "sustainedRequestsPerSecondPerReplica": null },
+    { "name": "doctor-service", "requestFraction": 0.15, "sustainedRequestsPerSecondPerReplica": null },
+    { "name": "booking-service", "requestFraction": 0.2, "sustainedRequestsPerSecondPerReplica": null },
+    { "name": "communication-service", "requestFraction": 0.2, "sustainedRequestsPerSecondPerReplica": null },
+    { "name": "admin-service", "requestFraction": 0.025, "sustainedRequestsPerSecondPerReplica": null },
+    { "name": "staff-service", "requestFraction": 0.075, "sustainedRequestsPerSecondPerReplica": null },
+    { "name": "dicom-service", "requestFraction": 0.05, "sustainedRequestsPerSecondPerReplica": null }
+  ]
+}

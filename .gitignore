@@ -12,6 +12,8 @@ build/
 *.json
 !tsconfig.json
 !app.json
+# Planning example linked from architecture docs; contains no secrets (2026-09-24)
+!architecture/capacity-plan.example.json
 !package.json
 !package-lock.json
 !gcp_key.json.example

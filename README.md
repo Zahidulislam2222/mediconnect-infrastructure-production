@@ -1,3 +1,66 @@
+# MediConnect — backend, infrastructure and platform documentation
+
+![Licence: MIT](https://img.shields.io/badge/licence-MIT-2563EB)
+![Cloud runtime](https://img.shields.io/badge/cloud_runtime-retained%2C_not_running-64748B)
+![Scale target](https://img.shields.io/badge/scale_target-1M%2B_concurrent_%28planned%29-8B5CF6)
+![SLO target](https://img.shields.io/badge/SLO_target-critical_journeys_99.9%25_%E2%86%92_99.95%25-22C55E)
+![Security CI](https://img.shields.io/badge/security_CI-Gitleaks_%7C_Semgrep_%7C_Bandit-06B6D4)
+
+**Live showcase:** <https://mediconnect.zahidul-islam.com> · **Frontend:** [mediconnect-hub](https://github.com/Zahidulislam2222/mediconnect-hub) · **CMS:** [mediconnect-cms](https://github.com/Zahidulislam2222/mediconnect-cms) · **AI knowledge:** [mediconnect-rag](https://github.com/Zahidulislam2222/mediconnect-rag)
+
+This repository holds MediConnect's seven backend services (Node.js/TypeScript and Python/FastAPI),
+the Terraform and Kubernetes definitions for AWS, Google Cloud and Azure, the CI/CD pipeline, and the
+**platform-wide documentation** in [`docs/`](docs/README.md).
+
+## Status (2026-09-24)
+
+| Area | Status |
+|---|---|
+| Backend services (patient, doctor, booking, communication, staff, admin, DICOM) | Implemented in source with local tests. **Not operating** as a live clinical service. |
+| Cloud infrastructure (Terraform, Kubernetes, multi-cloud CI/CD) | **Retained** as reviewable engineering work. Costly cloud resources were intentionally switched off to control cost. |
+| Deployment workflow | Manual only, with a typed cost acknowledgement. Nothing deploys on push. |
+| Scale and uptime | 1M+ concurrent users and 99.9%/99.95% SLOs are **future targets** with a written design and test plan, not measured results. |
+| Compliance | Controls for HIPAA and GDPR are implemented in source. **No certification or legal sign-off.** See the compliance map. |
+
+## Platform documentation
+
+| Document | Summary |
+|---|---|
+| [Documentation index](docs/README.md) | Start here; status labels explained |
+| [Architecture](docs/ARCHITECTURE.md) | Components, request path, key design decisions |
+| [Scalability](docs/SCALABILITY.md) | Cell-based design for 1M+ concurrent users, bottlenecks, load-test plan |
+| [Reliability](docs/RELIABILITY.md) | SLOs, error budgets, disaster recovery targets, incident response |
+| [Security architecture](docs/SECURITY-ARCHITECTURE.md) | Threat model, controls, supply chain, open work |
+| [Law and compliance](docs/COMPLIANCE-AND-LAW.md) | US, EU and UK law mapped to controls, with sources |
+| [Privacy and data](docs/PRIVACY-AND-DATA.md) | Data categories, residency, retention, patient rights, subprocessors |
+| [AI governance](docs/AI-GOVERNANCE.md) | Rules and evaluation for the assistant and symptom checker |
+| [Accessibility](docs/ACCESSIBILITY.md) | WCAG 2.2 AA target and legal drivers |
+| [Roadmap](docs/ROADMAP.md) | Phases from showcase to 1M+ concurrent |
+| [Operations](docs/OPERATIONS.md) | Environments, change rules, workflows, access |
+| [Reviewer guide](REVIEWER-GUIDE.md) | How to read the evidence in this repository |
+
+## Quick start
+
+```bash
+cd backend_v2 && npm install && npm test --workspaces --if-present
+bash verify_app_vs_iac.sh     # application-to-Terraform coverage check (read-only)
+terraform validate            # never apply from this repository without review and cost approval
+```
+
+## Contributing, security and licence
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) · [Code of conduct](CODE_OF_CONDUCT.md) · [Security policy](SECURITY.md)
+- Code is released under the [MIT Licence](LICENSE). Vendored libraries keep their own licences: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+- Not legal or medical advice.
+
+---
+
+## Original README (preserved)
+
+> Everything below is the earlier README, kept word for word as a record of the work. Lines that
+> are out of date are **marked ⚠️**, not removed. The current status is the section above.
+
+
 # MediConnect — Enterprise Healthcare Infrastructure
 
 > **Start here: [engineering reviewer guide](REVIEWER-GUIDE.md).** It separates historical
@@ -33,6 +96,8 @@
 > Control implementations and historical scan results are not compliance certification.
 
 [Live Demo](https://askme-82f72.web.app) · [Frontend Repo](https://github.com/Zahidulislam2222/mediconnect-hub) · [Author](https://zahidul-islam.vercel.app)
+
+⚠️ *Status note 2026-09-24: “Live Demo” is the retired Firebase host. Current public showcase: <https://mediconnect.zahidul-islam.com>.*
 
 [Current infrastructure/showcase status](SHOWCASE-STATUS.md)
 
@@ -76,8 +141,8 @@ Bulk Data export.
 | **10 Terminology Systems** | ICD-10-CM, ICD-11, SNOMED CT, LOINC, RxNorm, CVX, CPT/HCPCS, NDC, NPI, DEA |
 | **Multi-Cloud Failover** | Retained AKS/EKS and GCP Cloud Run failover implementation; not currently verified live |
 | **Cost-controlled retirement** | Costly cloud resources intentionally removed; no current operating-cost claim |
-| **AI Circuit Breaker** | AWS Bedrock → GCP Vertex AI → Azure OpenAI for 99.99% AI availability |
-| **Multi-Region Data Residency** | US data in `us-east-1`, EU data in `eu-central-1` — GDPR Schrems II compliant |
+| **AI Circuit Breaker** | AWS Bedrock → GCP Vertex AI → Azure OpenAI for 99.99% AI availability ⚠️ *99.99% was a design aim, never measured; see docs/RELIABILITY.md (2026-09-24).* |
+| **Multi-Region Data Residency** | US data in `us-east-1`, EU data in `eu-central-1` — GDPR Schrems II compliant ⚠️ *Residency design only; transfer compliance needs legal assessment (2026-09-24).* |
 | **650+ Automated Assertions** | 12 backend TS + 12 Python + 4 frontend + 125 compliance + 4 verification scripts |
 | **Terraform portfolio** | 154 resource blocks and 16 module blocks retained; current remote state read found 412 addresses, while live/state parity is not established |
 | **20 Compliance Framework Scans** | Prowler + Checkov + Trivy + Healthcare Scanner across all 3 clouds |
@@ -290,6 +355,8 @@ QuestionnaireResponse  FamilyMemberHistory   RelatedPerson
 
 ## Compliance Scorecard
 
+> ⚠️ *Status note 2026-09-24: the percentages below are an internal control checklist from March 2026, not an audit, certification or legal opinion. Current position: [docs/COMPLIANCE-AND-LAW.md](docs/COMPLIANCE-AND-LAW.md).*
+
 ### Application-Level Controls
 
 | Domain | Score | Controls Verified |
@@ -313,7 +380,7 @@ QuestionnaireResponse  FamilyMemberHistory   RelatedPerson
 | **Healthcare Scanner** | 20 PASS / 1 WARN | Auth, PHI encryption, audit, FHIR, consent, validation |
 | **App-vs-IaC Verify** | **129 PASS / 0 FAIL / 0 WARN** | Every app resource matched to Terraform |
 
-Full report: [`compliance-report-phase4.md`](compliance-report-phase4.md)
+Full report: [`compliance-report-phase4.md`](compliance-report-phase4.md) ⚠️ *This file was removed from the current tree in commit `86f82cd` and remains available in Git history (status note 2026-09-24).*
 
 ### HIPAA Controls (13/13)
 
@@ -452,6 +519,8 @@ verify_migration.sh:   All 3 clouds verified
 
 ## Cost Model
 
+> ⚠️ *Status note 2026-09-24: historical design comparison, not a current or measured bill. Costs at scale are covered in [docs/SCALABILITY.md](docs/SCALABILITY.md).*
+
 | Resource | V1 (Always-On) | V2 (Zero-Cost Idle) |
 |----------|----------------|---------------------|
 | Compute | $110/mo (EC2 + Azure) | **$0/mo** (scale to zero) |
@@ -466,6 +535,8 @@ verify_migration.sh:   All 3 clouds verified
 ## CI/CD & Deployment
 
 ### GitHub Actions Pipeline (5 stages)
+
+> ⚠️ *Status note 2026-09-24: automatic push deployment was removed. `deploy.yml` now runs only by manual dispatch with a typed cost acknowledgement, and cloud targets default off.*
 
 ```
 Push to main (backend_v2/** changes)
@@ -493,13 +564,13 @@ Push to main (backend_v2/** changes)
 ```
 
 **Deploy toggles** (GitHub repo variables):
-- `DEPLOY_GCP` — `false` to skip GCP (e.g., billing disabled). Default: on.
+- `DEPLOY_GCP` — `false` to skip GCP (e.g., billing disabled). Default: on. ⚠️ *Historical — now defaults off (see SHOWCASE-STATUS.md).*
 - `DEPLOY_AKS` — `true` to enable Azure AKS deploys. Default: off.
 - `DEPLOY_EKS` — `true` to enable AWS EKS deploys. Default: off.
 
 ### Kubernetes
 
-- **AKS** (Azure) + **EKS** (AWS) — active-active
+- **AKS** (Azure) + **EKS** (AWS) — active-active ⚠️ *Retained definitions; clusters not running (2026-09-24).*
 - HPA: 1–5 replicas, scales on CPU/Memory > 70%
 - Probes: `/health` (liveness), `/ready` (readiness)
 - Namespace isolation: staging ↔ production
@@ -595,8 +666,8 @@ docker-compose up                     # All 7 services + frontend
 <div align="center">
 
 **MediConnect** — Enterprise-grade healthcare infrastructure.
-Built with precision. Secured by design. Compliant by default.
+Built with precision. Secured by design. Compliant by default. ⚠️ *Historical marketing line; see the compliance map for the accurate position (2026-09-24).*
 
-*© 2026 Zahidul Islam. All rights reserved.*
+*© 2026 Zahidul Islam. All rights reserved.* ⚠️ *Superseded 2026-09-24: the code is now open source under the MIT Licence — see LICENSE.*
 
 </div>

@@ -34,7 +34,7 @@ design objectives so a reviewer does not have to infer status from badges or dir
 The static frontend release and accepted local cinematic journey are separate from the retained
 clinical application. The journey's appointment/auth interfaces are fictional demonstrations,
 not authenticated backend flows. Flutter migration is requested, not completed. No iOS artifact
-has been verified. The CMS and RAG require their own integration, security and deployment gates.
+has been verified. The CMS and RAG require their own integration, security and deployment gates. ⚠️ *Superseded 2026-09-24: Flutter was replaced by native Kotlin/Swift; iOS unit/UI tests have since passed on macOS CI (see mediconnect-hub native/README.md).*
 
 The 2026-09-09 local app/IaC check reports129 pass/0fail/0warn; showcase preservation reports
 71Terraform files,13Kubernetes manifests and36legacy entry points. These are source checks.
@@ -48,7 +48,7 @@ authorization reference is not proof every execution path enforces it.
 ## Claims a reviewer should not infer
 
 - One million simultaneous users is a **future engineering target**, not measured current capacity.
-- 99% availability is a **target**, not an observed service-level result or a guarantee.
+- 99% availability is a **target**, not an observed service-level result or a guarantee. ⚠️ *Target raised to 99.9% (launch) / 99.95% (scale) on 2026-09-24: docs/RELIABILITY.md.*
 - HIPAA/GDPR control implementations, FHIR resource mappings and SOC2 control mappings are
   not interchangeable with legal approval, formal interoperability validation or an independent audit.
 - Provider failover, Redis, queues and Kubernetes do not remove downstream quotas, state
