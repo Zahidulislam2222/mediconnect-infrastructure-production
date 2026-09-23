@@ -1,0 +1,29 @@
+# Semgrep ignore list (2026-09-24).
+# Once this file exists Semgrep stops using its built-in defaults, so they are repeated here
+# unchanged. The only additions are third-party libraries that were copied into two retired
+# Lambda packages, which are not MediConnect code. The MediConnect handler files next to
+# them (handler.py, diploma_scanner.py, gcp_bigquery.py, secrets_manager.py,
+# lambda_function.py) are still scanned.
+
+# Semgrep defaults
+node_modules/
+build/
+dist/
+vendor/
+.env/
+.venv/
+.tox/
+*.min.js
+.npm/
+.yarn/
+test/
+tests/
+*_test.go
+.semgrep
+.semgrep_logs/
+
+# Vendored third-party packages inside retired Lambda bundles (not MediConnect code)
+legacy_lambdas/DoctorDiplomaScanner/*/
+legacy_lambdas/DoctorDiplomaScanner/six.py
+legacy_lambdas/DoctorDiplomaScanner/typing_extensions.py
+legacy_lambdas/mediconnect-create-patient/*/

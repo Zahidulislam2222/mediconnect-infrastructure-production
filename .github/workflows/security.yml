@@ -35,7 +35,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: pipx run bandit -q -ll -r .
+      # 2026-09-24: previous command kept for reference. It also scanned third-party libraries
+      # copied into two retired Lambda bundles, which are not MediConnect code.
+      # - run: pipx run bandit -q -ll -r .
+      # Same scan with Bandit's default exclusions, plus those vendored library folders
+      # (the same list as .semgrepignore). MediConnect's own handler files are still scanned.
+      - run: >-
+          pipx run bandit -q -ll -r .
+          -x '.svn,CVS,.bzr,.hg,.git,__pycache__,.tox,.eggs,*.egg,./legacy_lambdas/DoctorDiplomaScanner/*/*,./legacy_lambdas/DoctorDiplomaScanner/six.py,./legacy_lambdas/DoctorDiplomaScanner/typing_extensions.py,./legacy_lambdas/mediconnect-create-patient/*/*'
         # Remove this job for non-Python repos.
 
   # OPTIONAL — LLM security review of PR diffs (contextual issues SAST misses:
