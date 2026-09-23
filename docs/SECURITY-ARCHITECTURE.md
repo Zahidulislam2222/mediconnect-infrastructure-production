@@ -63,7 +63,7 @@ not open a public issue.
 | Independent penetration test | Planned before any real patient data |
 | Branch protection and required reviews on default branches | To configure |
 | Add HSTS and a complete content-security policy (`default-src`, `script-src`, `style-src`) to the public host | Open |
-| Security CI history gate: the full-history secret scan fails on repositories whose old commits still hold the findings above | Open until each finding is revoked and triaged |
+| Security CI results on the default branches (first run, 2026-09-24): **CMS passes.** Frontend fails only the full-history secret scan (old commits above). Backend Semgrep and Bandit fail on vendored third-party libraries inside `legacy_lambdas/` (for example dnspython, pymongo, requests), which are triaged but not suppressed. Knowledge service Semgrep flags an Nginx `add_header` in a location block that overrides the server-level security headers (`configs/nginx/default.conf`), a real configuration fix | Open |
 
 ## 6. Security rules for contributors
 

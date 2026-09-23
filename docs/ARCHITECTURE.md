@@ -88,7 +88,7 @@ Browser ──HTTPS──► Cloudflare (DNS and proxy) ──► mediconnect.za
 |---|---|---|
 | Strapi 5 CMS for articles, diseases, drugs, FAQs, health tips and wellness programmes | mediconnect-cms | Local build verified; not deployed |
 | LightRAG knowledge graph with Nginx, Authelia 2FA, Prometheus, Grafana, Loki, Jaeger | mediconnect-rag | Self-hosted stack; app integration not accepted |
-| Security CI (Gitleaks, Semgrep, Bandit) on every repository | all | CURRENT workflow; the full-history secret scan still reports old findings on some repositories ([open work](SECURITY-ARCHITECTURE.md)) |
+| Security CI (Gitleaks, Semgrep, Bandit) on every repository | all | CURRENT workflow; not green on every repository yet ([open work](SECURITY-ARCHITECTURE.md)) |
 | Terraform for AWS, GCP and Azure; Kubernetes manifests with probes, HPA, PDB and network policy | this repository | RETAINED |
 
 ## 6. Where to go next

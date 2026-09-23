@@ -7,7 +7,7 @@ dependency, not fixed dates. A phase is complete only when its exit criteria are
 
 - ✅ Static showcase live at <https://mediconnect.zahidul-islam.com> on the operator's own server.
 - ✅ Full React app, 7 backend services, Terraform and Kubernetes definitions in source, with local test evidence.
-- ✅ Security scanning CI workflow (Gitleaks, Semgrep, Bandit) added to all repositories. Not all runs are green yet: the full-history secret scan still reports findings in old commits (see [open security work](SECURITY-ARCHITECTURE.md)).
+- ✅ Security scanning CI workflow (Gitleaks, Semgrep, Bandit) added to all repositories. Not all runs are green yet: only the CMS passes today; the others fail on old-commit secrets, vendored third-party code or one Nginx header setting (see [open security work](SECURITY-ARCHITECTURE.md)).
 - ✅ Strapi CMS local build; self-hosted knowledge service with verified local backup restore.
 - 🟡 Native Android (Kotlin/Compose) and iOS (SwiftUI): sign-in, registration, MFA, profile, appointments and cancellation done; booking, billing, messaging, consultations and records not finished.
 - ⬜ No live clinical backend, no real patient data, no load tests, no audits.
