@@ -130,6 +130,8 @@ const frontendReferences = collectMatches(
 
 for (const file of walk(path.join(frontendRoot, "src"), new Set([".ts", ".tsx"]))) {
   if (file.endsWith(path.join("src", "config", "env.ts"))) continue;
+  // Test sources may hold bypass examples as fixtures for the frontend's own boundary audit.
+  if (/\.(test|spec)\.tsx?$/.test(file)) continue;
   if (/import\.meta\.env\.VITE_|import\.meta\.env\[["']VITE_/.test(fs.readFileSync(file, "utf8"))) {
     failures.push(`${path.relative(frontendRoot, file)} bypasses src/config/env.ts`);
   }

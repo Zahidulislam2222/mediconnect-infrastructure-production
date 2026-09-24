@@ -1,0 +1,247 @@
+import { test, mock } from 'node:test';
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { once } from 'node:events';
+import { readFile } from 'node:fs/promises';
+for (const line of (await readFile(new URL('../.env.example', import.meta.url), 'utf8')).split(/\r?\n/)) {
+  const match = line.match(/^([A-Z][A-Z0-9_]*)=(.*)$/);
+  if (match) process.env[match[1]] = /^(TABLE_|DYNAMO_TABLE)/.test(match[1])
+    ? `test-${match[1].toLowerCase().replaceAll('_', '-')}` : match[2] || `test-${match[1].toLowerCase()}`;
+}
+process.env.AWS_EC2_METADATA_DISABLED = 'true';
+process.env.COGNITO_USER_POOL_ID_US = 'us-east-1_test';
+process.env.COGNITO_USER_POOL_ID_EU = 'eu-central-1_test';
+const require = createRequire(new URL('../doctor-service/package.json', import.meta.url));
+const express = require('express');
+const { CognitoJwtVerifier } = require('aws-jwt-verify');
+const aws = require('./dist/shared/aws-config.js');
+const audit = require('./dist/shared/audit.js');
+
+// Minimal DynamoDB double: evaluates the condition/update forms the pharmacy controller uses and
+// fails closed (throws) on anything it does not understand, so an unmodelled expression cannot pass.
+const RX = 'mediconnect-prescriptions', BILLS = 'mediconnect-transactions', GRAPH = 'mediconnect-graph-data';
+const keyOf = (table, key) => `${table}|${JSON.stringify(key, Object.keys(key).sort())}`;
+function resolvePath(path, names) { return path.split('.').map(part => part.startsWith('#') ? names[part] : part); }
+function readPath(item, path) { return path.reduce((value, part) => value?.[part], item); }
+function evaluateCondition(item, expression, names = {}, values = {}) {
+  if (!expression) return true;
+  return expression.split(/\s+AND\s+/).every(raw => {
+    const clause = raw.trim().replace(/^\((.*)\)$/, '$1');
+    let m;
+    if ((m = clause.match(/^attribute_not_exists\((\S+)\)$/))) return readPath(item, resolvePath(m[1], names)) === undefined;
+    if ((m = clause.match(/^attribute_exists\((\S+)\)$/))) return readPath(item, resolvePath(m[1], names)) !== undefined;
+    if ((m = clause.match(/^NOT\s*\(?\s*(\S+)\s+IN\s+\(([^)]*)\)\s*\)?$/))) return !m[2].split(',').map(v => values[v.trim()]).includes(readPath(item, resolvePath(m[1], names)));
+    if ((m = clause.match(/^(\S+)\s+IN\s+\(([^)]*)\)$/))) return m[2].split(',').map(v => values[v.trim()]).includes(readPath(item, resolvePath(m[1], names)));
+    if ((m = clause.match(/^(\S+)\s*(=|<>|>)\s*(:\w+)$/))) {
+      const left = readPath(item, resolvePath(m[1], names)), right = values[m[3]];
+      return m[2] === '=' ? left === right : m[2] === '<>' ? left !== right : left > right;
+    }
+    throw new Error(`Test double cannot evaluate condition: ${clause}`);
+  });
+}
+function applyUpdate(item, expression, names = {}, values = {}) {
+  const body = expression.replace(/^SET\s+/i, '');
+  if (/\b(REMOVE|ADD|DELETE)\b/.test(body)) throw new Error(`Test double cannot apply update: ${expression}`);
+  for (const assignment of body.split(',')) {
+    const [target, source] = assignment.split('=').map(s => s.trim());
+    const path = resolvePath(target, names);
+    let value;
+    let m;
+    if ((m = source.match(/^(\S+)\s*-\s*(:\w+)$/))) value = readPath(item, resolvePath(m[1], names)) - values[m[2]];
+    else if (/^:\w+$/.test(source)) value = values[source];
+    else throw new Error(`Test double cannot apply update: ${assignment}`);
+    let parent = item;
+    for (const part of path.slice(0, -1)) parent = parent[part] ??= {};
+    parent[path.at(-1)] = value;
+  }
+}
+function conditionalFailure(name) { const error = new Error(`${name}: The conditional request failed`); error.name = name; return error; }
+
+function createStore() {
+  const tables = new Map();
+  const put = (table, item, keyNames) => tables.set(keyOf(table, Object.fromEntries(keyNames.map(k => [k, item[k]]))), structuredClone(item));
+  const get = (table, key) => tables.get(keyOf(table, key));
+  const bills = () => [...tables.entries()].filter(([k]) => k.startsWith(`${BILLS}|`)).map(([, v]) => v);
+  const rows = table => [...tables.entries()].filter(([k]) => k.startsWith(`${table}|`)).map(([, v]) => v);
+  return { tables, put, get, bills, rows };
+}
+
+const baseRx = () => ({
+  prescriptionId: 'rx-1', patientId: 'pat-1', doctorId: 'doc-1', medication: 'test-med', price: 10,
+  status: 'DISPENSED', paymentStatus: 'PAID', refillsRemaining: 2, resource: { status: 'active' },
+});
+
+for (const region of ['US', 'EU']) {
+  test(`${region}: pharmacy routes enforce ownership, payment and atomic state transitions`, async () => {
+    const store = createStore();
+    const seed = (overrides = {}) => {
+      store.tables.clear();
+      store.put(RX, { ...baseRx(), ...overrides }, ['prescriptionId']);
+      store.put(RX, { ...baseRx(), prescriptionId: 'rx-2', patientId: 'pat-2', doctorId: 'doc-2' }, ['prescriptionId']);
+      for (const doctorId of ['doc-1', 'doc-2', 'doc-3']) store.put(process.env.DYNAMO_TABLE, { doctorId, verificationStatus: 'APPROVED', isIdentityVerified: true }, ['doctorId']);
+      store.put(GRAPH, { PK: 'PATIENT#pat-1', SK: 'DOCTOR#doc-3', relationship: 'isTreatedBy' }, ['PK', 'SK']);
+    };
+    const identities = {
+      'pat-1': { sub: 'pat-1', 'cognito:groups': ['patient'] }, 'pat-2': { sub: 'pat-2', 'cognito:groups': ['patient'] },
+      'doc-1': { sub: 'doc-1', 'cognito:groups': ['doctor'] }, 'doc-2': { sub: 'doc-2', 'cognito:groups': ['doctor'] },
+      'doc-3': { sub: 'doc-3', 'cognito:groups': ['doctor'] },
+    };
+    mock.method(CognitoJwtVerifier, 'create', config => ({ verify: async token => {
+      assert.equal(config.userPoolId, process.env[`COGNITO_USER_POOL_ID_${region}`]);
+      const [tokenRegion, actor] = token.split(':');
+      if (tokenRegion !== region || !identities[actor]) throw new Error('Test wrong regional token');
+      return identities[actor];
+    } }));
+    const keyNamesFor = table => table === RX ? ['prescriptionId'] : table === BILLS ? ['billId'] : table === GRAPH ? ['PK', 'SK']
+      : table === process.env.DYNAMO_TABLE ? ['doctorId'] : null;
+    mock.method(aws, 'getRegionalClient', selected => {
+      assert.equal(selected, region);
+      return { send: async command => {
+        await new Promise(resolve => setImmediate(resolve)); // let concurrent requests interleave like a network hop
+        const input = command.input, kind = command.constructor.name;
+        if (kind === 'GetCommand') {
+          const item = store.get(input.TableName, input.Key);
+          return { Item: item ? structuredClone(item) : undefined };
+        }
+        if (kind === 'QueryCommand') {
+          assert.equal(input.TableName, RX, 'Only prescription queries are expected');
+          const field = input.IndexName === 'PatientIndex' ? 'patientId' : input.IndexName === 'DoctorIndex' ? 'doctorId' : null;
+          assert.ok(field, `Unexpected index ${input.IndexName}`);
+          return { Items: store.rows(RX).filter(rx => rx[field] === input.ExpressionAttributeValues[':id']).map(rx => structuredClone(rx)) };
+        }
+        if (kind === 'UpdateCommand') {
+          const item = store.get(input.TableName, input.Key);
+          if (!item || !evaluateCondition(item, input.ConditionExpression, input.ExpressionAttributeNames, input.ExpressionAttributeValues))
+            throw conditionalFailure('ConditionalCheckFailedException');
+          applyUpdate(item, input.UpdateExpression, input.ExpressionAttributeNames, input.ExpressionAttributeValues);
+          return {};
+        }
+        if (kind === 'TransactWriteCommand') {
+          const staged = input.TransactItems.map(entry => {
+            const [op, spec] = Object.entries(entry)[0];
+            const keyNames = keyNamesFor(spec.TableName);
+            assert.ok(keyNames, `Unexpected transaction table ${spec.TableName}`);
+            const key = op === 'Put' ? Object.fromEntries(keyNames.map(k => [k, spec.Item[k]])) : spec.Key;
+            const current = store.get(spec.TableName, key);
+            const ok = op === 'Put'
+              ? evaluateCondition(current ?? {}, spec.ConditionExpression, spec.ExpressionAttributeNames, spec.ExpressionAttributeValues)
+              : !!current && evaluateCondition(current, spec.ConditionExpression, spec.ExpressionAttributeNames, spec.ExpressionAttributeValues);
+            return { op, spec, key, keyNames, current, ok };
+          });
+          if (staged.some(s => !s.ok)) throw conditionalFailure('TransactionCanceledException');
+          for (const s of staged) {
+            if (s.op === 'Put') store.put(s.spec.TableName, s.spec.Item, s.keyNames);
+            else applyUpdate(s.current, s.spec.UpdateExpression, s.spec.ExpressionAttributeNames, s.spec.ExpressionAttributeValues);
+          }
+          return {};
+        }
+        throw new Error(`Unexpected command ${kind}`);
+      } };
+    });
+    mock.method(audit, 'writeAuditLog', async () => {});
+    const realFetch = globalThis.fetch;
+    mock.method(globalThis, 'fetch', (url, options) => {
+      assert.ok(String(url).startsWith('http://127.0.0.1:'), 'Provider fetch forbidden'); return realFetch(url, options);
+    });
+    const router = require('./dist/doctor-service/src/modules/clinical/clinical.routes.js').default;
+    const app = express(); app.use(express.json()); app.use(router);
+    const server = app.listen(0, '127.0.0.1'); await once(server, 'listening');
+    const call = (actor, method, path, body) => realFetch(`http://127.0.0.1:${server.address().port}${path}`, {
+      method, headers: { 'Content-Type': 'application/json', 'x-user-region': region, Authorization: `Bearer ${region}:${actor}` },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    });
+    const rx1 = () => store.get(RX, { prescriptionId: 'rx-1' });
+    try {
+      // ── Reads: a patient only sees their own prescriptions; a clinician needs ownership or a care relationship ──
+      seed();
+      assert.equal((await call('pat-2', 'GET', '/prescriptions?patientId=pat-1')).status, 403, 'D1: patient must not read another patient');
+      assert.equal((await call('pat-1', 'GET', '/prescriptions?doctorId=doc-1')).status, 403, 'patient must not list by doctor');
+      assert.equal((await call('doc-2', 'GET', '/prescriptions?patientId=pat-1')).status, 403, 'unrelated clinician denied');
+      assert.equal((await call('doc-2', 'GET', '/prescriptions?doctorId=doc-1')).status, 403, 'clinician cannot list another clinician');
+      const own = await call('pat-1', 'GET', '/prescriptions?patientId=pat-1');
+      assert.equal(own.status, 200);
+      assert.deepEqual((await own.json()).prescriptions.map(rx => rx.prescriptionId), ['rx-1']);
+      assert.equal((await call('doc-3', 'GET', '/prescriptions?patientId=pat-1')).status, 200, 'treating clinician allowed');
+      assert.equal((await call('doc-1', 'GET', '/prescriptions?doctorId=doc-1')).status, 200, 'prescriber lists own');
+      assert.equal((await call('doc-1', 'GET', '/prescription?patientId=pat-1')).status, 403, 'prescribing alone is not a standing care relationship');
+
+      // ── Refill: owner patient only (or prescriber); one decrement, one bill, payment reset ──
+      seed();
+      assert.equal((await call('pat-2', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' })).status, 403);
+      assert.equal((await call('doc-2', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' })).status, 403);
+      assert.equal(rx1().refillsRemaining, 2); assert.equal(store.bills().length, 0);
+      const refill = await call('pat-1', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' });
+      assert.equal(refill.status, 200);
+      assert.deepEqual(await refill.json(), { message: 'Refill authorized' }, 'frontend contract refillAcknowledged');
+      assert.equal(rx1().refillsRemaining, 1);
+      assert.equal(rx1().paymentStatus, 'UNPAID', 'D3: refill must require a new payment');
+      assert.equal(store.bills().length, 1);
+      assert.equal(store.bills()[0].patientId, 'pat-1'); assert.equal(store.bills()[0].type, 'PHARMACY');
+      const replay = await call('pat-1', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' });
+      assert.equal(replay.status, 409, 'replayed refill must not bill again');
+      assert.equal(rx1().refillsRemaining, 1); assert.equal(store.bills().length, 1);
+
+      seed();
+      const racing = await Promise.all([1, 2, 3].map(() => call('pat-1', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' })));
+      assert.deepEqual(racing.map(r => r.status).sort(), [200, 409, 409], 'D3: concurrent refills are atomic');
+      assert.equal(rx1().refillsRemaining, 1); assert.equal(store.bills().length, 1);
+
+      seed({ refillsRemaining: 0 });
+      assert.equal((await call('pat-1', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' })).status, 400);
+      assert.equal(store.bills().length, 0);
+      seed({ status: 'READY_FOR_PICKUP' });
+      assert.equal((await call('pat-1', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' })).status, 409, 'no refill before current fill is dispensed');
+      seed();
+      assert.equal((await call('doc-1', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' })).status, 200, 'prescriber may refill');
+      assert.equal((await call('pat-1', 'POST', '/pharmacy/request-refill', { prescriptionId: 'missing' })).status, 404);
+
+      // ── Pickup code: owner only, paid only, never re-opens a dispensed fill ──
+      seed({ status: 'READY_FOR_PICKUP', paymentStatus: 'PAID' });
+      assert.equal((await call('pat-2', 'POST', '/pharmacy/generate-qr', { prescriptionId: 'rx-1' })).status, 403);
+      assert.equal((await call('doc-2', 'POST', '/pharmacy/generate-qr', { prescriptionId: 'rx-1' })).status, 403);
+      const qr = await call('pat-1', 'POST', '/pharmacy/generate-qr', { prescriptionId: 'rx-1' });
+      assert.equal(qr.status, 200); assert.deepEqual(await qr.json(), { qrPayload: 'PICKUP-rx-1' });
+      seed({ status: 'PENDING', paymentStatus: 'UNPAID' });
+      assert.equal((await call('pat-1', 'POST', '/pharmacy/generate-qr', { prescriptionId: 'rx-1' })).status, 402);
+      seed({ status: 'DISPENSED', paymentStatus: 'PAID' });
+      assert.equal((await call('pat-1', 'POST', '/pharmacy/generate-qr', { prescriptionId: 'rx-1' })).status, 409, 'D2: dispensed fill cannot be reopened');
+      assert.equal(rx1().status, 'DISPENSED');
+
+      // ── Dispense: exactly once ──
+      seed({ status: 'READY_FOR_PICKUP', paymentStatus: 'PAID' });
+      const dispenses = await Promise.all([1, 2].map(() => call('doc-2', 'POST', '/pharmacy/fulfill', { token: 'PICKUP-rx-1' })));
+      assert.deepEqual(dispenses.map(r => r.status).sort(), [200, 409], 'D5: concurrent dispense is atomic');
+      assert.equal(rx1().status, 'DISPENSED');
+      assert.equal((await call('pat-1', 'POST', '/pharmacy/fulfill', { token: 'PICKUP-rx-2' })).status, 403, 'patients cannot dispense');
+
+      // ── Generic status update: prescriber only, no payment/cancellation bypass ──
+      seed({ status: 'PENDING', paymentStatus: 'UNPAID' });
+      assert.equal((await call('doc-2', 'PUT', '/prescription', { prescriptionId: 'rx-1', status: 'ISSUED' })).status, 403);
+      assert.equal((await call('pat-1', 'PUT', '/prescription', { prescriptionId: 'rx-1', status: 'ISSUED' })).status, 403);
+      for (const status of ['READY_FOR_PICKUP', 'DISPENSED', 'CANCELLED', 'PAID', 'anything'])
+        assert.equal((await call('doc-1', 'PUT', '/prescription', { prescriptionId: 'rx-1', status })).status, 400, `D4: ${status}`);
+      assert.equal(rx1().status, 'PENDING');
+      assert.equal((await call('doc-1', 'PUT', '/prescription', { prescriptionId: 'rx-1', status: 'ISSUED' })).status, 200);
+      assert.equal(rx1().status, 'ISSUED'); assert.equal(rx1().paymentStatus, 'UNPAID');
+      seed({ status: 'DISPENSED' });
+      assert.equal((await call('doc-1', 'PUT', '/prescription', { prescriptionId: 'rx-1', status: 'ISSUED' })).status, 409);
+      assert.equal(rx1().status, 'DISPENSED');
+
+      // ── A clinician whose verification lapsed loses mutation rights on their own prescriptions ──
+      seed();
+      store.put(process.env.DYNAMO_TABLE, { doctorId: 'doc-1', verificationStatus: 'REVOKED' }, ['doctorId']);
+      assert.equal((await call('doc-1', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' })).status, 403);
+      assert.equal(rx1().refillsRemaining, 2);
+
+      // ── The generic patient clinical-write blockade stays intact everywhere else ──
+      seed();
+      for (const [method, path, body] of [
+        ['POST', '/prescription', { doctorId: 'pat-1', patientId: 'pat-1', medication: 'test-med' }],
+        ['PUT', '/prescriptions/rx-1/cancel'],
+        ['POST', '/lab/orders', { patientId: 'pat-1' }],
+        ['POST', '/referrals', { patientId: 'pat-1' }],
+      ]) assert.equal((await call('pat-1', method, path, body)).status, 403, `${method} ${path}`);
+      assert.equal(rx1().status, 'DISPENSED'); assert.equal(store.bills().length, 0);
+    } finally { await new Promise(resolve => server.close(resolve)); mock.restoreAll(); }
+  });
+}

@@ -12,6 +12,7 @@ import { sendNotification } from '../../../../shared/notifications';
 import { encryptPHI, decryptPHI } from '../../../../shared/kms-crypto';
 import { publishEvent, EventType } from '../../../../shared/event-bus';
 import { TABLE_NAMES, setting } from '../../../../shared/settings';
+import { canListPrescriptions, isApprovedPrescriber, isConditionalFailure, isPrescriptionPatient } from './prescription-access';
 
 const router = Router();
 const pdfGen = new PDFGenerator();
@@ -23,6 +24,16 @@ const TABLE_ALLERGIES = setting("TABLE_ALLERGIES");
 const AUDIT_TABLE = "mediconnect-audit-logs";
 
 const DEFAULT_PHARMACY = setting("DEFAULT_PHARMACY_ID");
+
+// Prescription lifecycle states (protocol values shared with the payment webhook and web client).
+const RX_STATUS = {
+    ISSUED: "ISSUED",
+    PENDING: "PENDING",
+    REFILL_REQUESTED: "REFILL_REQUESTED",
+    READY_FOR_PICKUP: "READY_FOR_PICKUP",
+    DISPENSED: "DISPENSED",
+    PICKED_UP: "PICKED_UP", // legacy synonym of DISPENSED still read by older clients
+} as const;
 
 // 🟢 COMPILER FIX: Safely parse headers to prevent "string | string[]" build failures
 const extractRegion = (req: Request): string => requestJurisdiction(req);
@@ -306,6 +317,18 @@ export const getPrescriptions = async (req: Request, res: Response) => {
     const patientId = (req.query.patientId || req.query.patient || req.query.subject) as string | undefined;
     const doctorId = (req.query.doctorId || req.query.requester) as string | undefined;
     if (!patientId && !doctorId) return res.status(400).json({ error: "ID required" });
+    // One subject per request: the authorized subject must be exactly the one that is queried.
+    if (patientId && doctorId) return res.status(400).json({ error: "Provide either a patient or a doctor identifier, not both" });
+
+    res.set('Cache-Control', 'no-store');
+    try {
+        if (!await canListPrescriptions((req as any).user ?? {}, { patientId, doctorId }, extractRegion(req), TABLE_GRAPH)) {
+            return res.status(403).json({ error: "Prescription access is not authorized" });
+        }
+    } catch (authErr) {
+        safeError("Prescription access check failed", authErr);
+        return res.status(503).json({ error: "Prescription access verification is temporarily unavailable" });
+    }
 
     try {
         const params: any = { TableName: TABLE_RX, IndexName: patientId ? "PatientIndex" : "DoctorIndex", KeyConditionExpression: patientId ? "patientId = :id" : "doctorId = :id", ExpressionAttributeValues: { ":id": patientId || doctorId } };
@@ -337,63 +360,97 @@ export const getPrescriptions = async (req: Request, res: Response) => {
 };
 
 export const requestRefill = async (req: Request, res: Response) => {
-    const docClient = getRegionalClient(extractRegion(req));
-    const { prescriptionId, patientId } = req.body;
+    const region = extractRegion(req);
+    const docClient = getRegionalClient(region);
+    const { prescriptionId } = req.body;
     const authUser = (req as any).user;
 
     try {
-        const rxRes = await docClient.send(new GetCommand({ TableName: TABLE_RX, Key: { prescriptionId } }));
+        const rxRes = await docClient.send(new GetCommand({ TableName: TABLE_RX, Key: { prescriptionId }, ConsistentRead: true }));
         const rx = rxRes.Item;
-
-        if (rx && rx.refillsRemaining > 0) {
-            // 🟢 ATOMIC REFILL: Decrement refills and create bill in one step
-            await docClient.send(new TransactWriteCommand({
-                TransactItems: [
-                    { Update: { TableName: TABLE_RX, Key: { prescriptionId }, UpdateExpression: "SET #s = :s, refillsRemaining = refillsRemaining - :one", ExpressionAttributeNames: { "#s": "status" }, ExpressionAttributeValues: { ":s": "PENDING", ":one": 1 } } },
-                    { Put: { TableName: TABLE_TRANSACTION, Item: { billId: uuidv4(), referenceId: prescriptionId, patientId: rx.patientId, amount: rx.price, status: "PENDING", createdAt: new Date().toISOString() } } }
-                ]
-            }));
-            await writeAuditLog(authUser.sub, rx.patientId, "REQUEST_REFILL", `Refill for ${prescriptionId} processed`, { region: extractRegion(req), ipAddress: req.ip });
-            return res.json({ message: "Refill authorized" });
+        if (!rx) return res.status(404).json({ error: "Prescription not found" });
+        if (!isPrescriptionPatient(authUser, rx) && !await isApprovedPrescriber(authUser, rx, region)) {
+            return res.status(403).json({ error: "Only the patient or the prescribing clinician can request this refill." });
         }
-        res.status(400).json({ error: "No refills remaining" });
-    } catch (e: any) { res.status(500).json({ error: e.message }); }
+
+        const remaining = Number(rx.refillsRemaining);
+        if (!Number.isInteger(remaining) || remaining <= 0) return res.status(400).json({ error: "No refills remaining" });
+        if (rx.status !== RX_STATUS.DISPENSED && rx.status !== RX_STATUS.PICKED_UP) {
+            return res.status(409).json({ error: "A refill can be requested after the current fill has been dispensed." });
+        }
+
+        // One refill per observed count: the condition rejects replays and concurrent duplicates, and the
+        // bill id is derived from that count so a duplicate can never create a second charge.
+        const now = new Date().toISOString();
+        await docClient.send(new TransactWriteCommand({
+            TransactItems: [
+                { Update: {
+                    TableName: TABLE_RX, Key: { prescriptionId },
+                    UpdateExpression: "SET #s = :pending, paymentStatus = :unpaid, refillsRemaining = refillsRemaining - :one, updatedAt = :now",
+                    ConditionExpression: "refillsRemaining = :expected AND #s IN (:dispensed, :pickedUp)",
+                    ExpressionAttributeNames: { "#s": "status" },
+                    ExpressionAttributeValues: {
+                        ":pending": RX_STATUS.PENDING, ":unpaid": "UNPAID", ":one": 1, ":now": now, ":expected": remaining,
+                        ":dispensed": RX_STATUS.DISPENSED, ":pickedUp": RX_STATUS.PICKED_UP,
+                    },
+                } },
+                { Put: {
+                    TableName: TABLE_TRANSACTION,
+                    Item: { billId: `refill-${prescriptionId}-${remaining}`, referenceId: prescriptionId, patientId: rx.patientId, doctorId: rx.doctorId, amount: rx.price, status: "PENDING", type: "PHARMACY", createdAt: now },
+                    ConditionExpression: "attribute_not_exists(billId)",
+                } },
+            ]
+        }));
+        await writeAuditLog(authUser.sub, rx.patientId, "REQUEST_REFILL", `Refill for ${prescriptionId} processed`, { region, ipAddress: req.ip });
+        return res.json({ message: "Refill authorized" });
+    } catch (e: any) {
+        if (isConditionalFailure(e)) {
+            return res.status(409).json({ error: "This refill was already processed or the prescription changed. Refresh before trying again." });
+        }
+        safeError("Refill request failed", e);
+        res.status(500).json({ error: "Refill request failed" });
+    }
 };
 
 export const generateQR = async (req: Request, res: Response) => {
-    // 🟢 GDPR FIX: Define Regional Client
-    const docClient = getRegionalClient(extractRegion(req));
-
+    const region = extractRegion(req);
+    const docClient = getRegionalClient(region);
     const authUser = (req as any).user;
     const { prescriptionId } = req.body;
+    const pickupEligible: string[] = [RX_STATUS.ISSUED, RX_STATUS.PENDING, RX_STATUS.READY_FOR_PICKUP];
 
     try {
-        const rx = await docClient.send(new GetCommand({
-            TableName: TABLE_RX,
-            Key: { prescriptionId }
-        }));
-
-        if (rx.Item?.paymentStatus !== 'PAID') {
+        const rx = (await docClient.send(new GetCommand({ TableName: TABLE_RX, Key: { prescriptionId }, ConsistentRead: true }))).Item;
+        if (!rx) return res.status(404).json({ error: "Prescription not found" });
+        if (!isPrescriptionPatient(authUser, rx) && !await isApprovedPrescriber(authUser, rx, region)) {
+            return res.status(403).json({ error: "Only the patient or the prescribing clinician can generate this pickup code." });
+        }
+        if (rx.paymentStatus !== 'PAID') {
             return res.status(402).json({
                 error: "Payment Required",
                 message: "Please pay for this medication before generating a pickup code."
             });
         }
+        if (!pickupEligible.includes(rx.status)) {
+            return res.status(409).json({ error: `A pickup code cannot be generated while the prescription is ${rx.status}.` });
+        }
 
+        // The condition keeps a dispensed or cancelled fill from being reopened by a concurrent writer.
         await docClient.send(new UpdateCommand({
             TableName: TABLE_RX,
             Key: { prescriptionId },
-            UpdateExpression: "set #status = :s",
+            UpdateExpression: "SET #status = :ready",
+            ConditionExpression: "paymentStatus = :paid AND #status IN (:issued, :pending, :ready)",
             ExpressionAttributeNames: { "#status": "status" },
-            ExpressionAttributeValues: { ":s": "READY_FOR_PICKUP" }
+            ExpressionAttributeValues: { ":ready": RX_STATUS.READY_FOR_PICKUP, ":paid": "PAID", ":issued": RX_STATUS.ISSUED, ":pending": RX_STATUS.PENDING }
         }));
 
+        await writeAuditLog(authUser.sub, rx.patientId, "GENERATE_QR", `Pickup code generated for ${prescriptionId}`, { region, ipAddress: req.ip });
         res.json({ qrPayload: `PICKUP-${prescriptionId}` });
-        await writeAuditLog(authUser.sub, rx.Item?.patientId, "GENERATE_QR", `Pickup code generated for ${prescriptionId}`, { region: extractRegion(req), ipAddress: req.ip });
-
     } catch (e: any) {
+        if (isConditionalFailure(e)) return res.status(409).json({ error: "The prescription changed. Refresh before generating a pickup code." });
         safeError("QR Generation Error:", e);
-        res.status(500).json({ error: e.message });
+        res.status(500).json({ error: "Pickup code generation failed" });
     }
 };
 
@@ -418,13 +475,20 @@ export const fulfillPrescription = async (req: Request, res: Response) => {
         }
 
         const now = new Date().toISOString();
-        await docClient.send(new UpdateCommand({
-            TableName: TABLE_RX,
-            Key: { prescriptionId },
-            UpdateExpression: "SET #s = :s, dispensedAt = :now, dispensedBy = :by",
-            ExpressionAttributeNames: { "#s": "status" },
-            ExpressionAttributeValues: { ":s": "DISPENSED", ":now": now, ":by": authUser.sub }
-        }));
+        try {
+            // Dispense exactly once, even when two scanners submit the same pickup code.
+            await docClient.send(new UpdateCommand({
+                TableName: TABLE_RX,
+                Key: { prescriptionId },
+                UpdateExpression: "SET #s = :s, dispensedAt = :now, dispensedBy = :by",
+                ConditionExpression: "#s = :ready",
+                ExpressionAttributeNames: { "#s": "status" },
+                ExpressionAttributeValues: { ":s": RX_STATUS.DISPENSED, ":now": now, ":by": authUser.sub, ":ready": RX_STATUS.READY_FOR_PICKUP }
+            }));
+        } catch (dispenseErr) {
+            if (isConditionalFailure(dispenseErr)) return res.status(409).json({ error: "This prescription was already dispensed or changed." });
+            throw dispenseErr;
+        }
 
         await writeAuditLog(authUser.sub, rx.patientId, "DISPENSE_PRESCRIPTION", `Prescription ${prescriptionId} dispensed`, { region: extractRegion(req), ipAddress: req.ip });
 
@@ -457,28 +521,48 @@ export const fulfillPrescription = async (req: Request, res: Response) => {
     }
 };
 
+// Payment, pickup, dispensing and cancellation each have their own guarded flow; this endpoint only
+// lets the prescriber re-issue a prescription that is awaiting review or payment.
+export const PRESCRIBER_UPDATABLE_STATUSES = [RX_STATUS.ISSUED] as const;
+const UPDATABLE_FROM: string[] = [RX_STATUS.REFILL_REQUESTED, RX_STATUS.PENDING, RX_STATUS.ISSUED];
+
 export const updatePrescription = async (req: Request, res: Response) => {
-    const docClient = getRegionalClient(extractRegion(req));
+    const region = extractRegion(req);
+    const docClient = getRegionalClient(region);
     const { prescriptionId, status } = req.body;
     const authUser = (req as any).user;
 
     try {
         // 🟢 HIPAA FIX: Fetch the record first to get the Patient ID for the Audit Log
-        const rxRes = await docClient.send(new GetCommand({ TableName: TABLE_RX, Key: { prescriptionId } }));
+        const rxRes = await docClient.send(new GetCommand({ TableName: TABLE_RX, Key: { prescriptionId }, ConsistentRead: true }));
         if (!rxRes.Item) return res.status(404).json({ error: "Not found" });
+        if (!await isApprovedPrescriber(authUser, rxRes.Item, region)) {
+            return res.status(403).json({ error: "Only the prescribing clinician can update this prescription." });
+        }
+        if (!UPDATABLE_FROM.includes(rxRes.Item.status)) {
+            return res.status(409).json({ error: `A ${rxRes.Item.status} prescription cannot be updated here.` });
+        }
 
         const realPatientId = rxRes.Item.patientId;
 
         await docClient.send(new UpdateCommand({
             TableName: TABLE_RX, Key: { prescriptionId },
-            UpdateExpression: "set #s = :status, updatedAt = :time",
+            UpdateExpression: "SET #s = :status, updatedAt = :time",
+            ConditionExpression: "#s IN (:refillRequested, :pending, :issued)",
             ExpressionAttributeNames: { "#s": "status" },
-            ExpressionAttributeValues: { ":status": status, ":time": new Date().toISOString() }
+            ExpressionAttributeValues: {
+                ":status": status, ":time": new Date().toISOString(),
+                ":refillRequested": RX_STATUS.REFILL_REQUESTED, ":pending": RX_STATUS.PENDING, ":issued": RX_STATUS.ISSUED,
+            }
         }));
 
-        await writeAuditLog(authUser.sub, realPatientId, "UPDATE_STATUS", `Status set to ${status} for ${prescriptionId}`, { region: extractRegion(req), ipAddress: req.ip });
+        await writeAuditLog(authUser.sub, realPatientId, "UPDATE_STATUS", `Status set to ${status} for ${prescriptionId}`, { region, ipAddress: req.ip });
         res.json({ message: `Prescription updated to ${status}` });
-    } catch (error: any) { res.status(500).json({ error: error.message }); }
+    } catch (error: any) {
+        if (isConditionalFailure(error)) return res.status(409).json({ error: "The prescription changed. Refresh before updating it." });
+        safeError("Prescription update failed", error);
+        res.status(500).json({ error: "Prescription update failed" });
+    }
 };
 
 // 🟢 FIX #23: Dedicated prescription cancellation endpoint
