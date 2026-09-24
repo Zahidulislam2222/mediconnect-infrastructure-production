@@ -12,6 +12,7 @@ import { sendNotification } from '../../../../shared/notifications';
 import { encryptPHI, decryptPHI } from '../../../../shared/kms-crypto';
 import { publishEvent, EventType } from '../../../../shared/event-bus';
 import { TABLE_NAMES, setting } from '../../../../shared/settings';
+import { PAYABLE_BILL_STATUSES } from '../../../../shared/billing-status';
 import { canListPrescriptions, isApprovedClinician, isApprovedPrescriber, isConditionalFailure, isPrescriptionPatient } from './prescription-access';
 
 const router = Router();
@@ -361,6 +362,10 @@ export const getPrescriptions = async (req: Request, res: Response) => {
     } catch (err: any) { res.status(500).json({ error: err.message }); }
 };
 
+const REFILLABLE_FROM: string[] = [RX_STATUS.DISPENSED, RX_STATUS.PICKED_UP, RX_STATUS.REFILL_REQUESTED];
+/** A refill bill is named after the refill count it consumes, so a replayed or concurrent request cannot bill twice. */
+const refillBillId = (prescriptionId: string, consumedCount: number) => `refill-${prescriptionId}-${consumedCount}`;
+
 export const requestRefill = async (req: Request, res: Response) => {
     const region = extractRegion(req);
     const docClient = getRegionalClient(region);
@@ -377,7 +382,8 @@ export const requestRefill = async (req: Request, res: Response) => {
 
         const remaining = Number(rx.refillsRemaining);
         if (!Number.isInteger(remaining) || remaining <= 0) return res.status(400).json({ error: "No refills remaining" });
-        if (rx.status !== RX_STATUS.DISPENSED && rx.status !== RX_STATUS.PICKED_UP) {
+        // REFILL_REQUESTED rows come from the retired pharmacy service, which neither billed nor counted the refill.
+        if (!REFILLABLE_FROM.includes(rx.status)) {
             return res.status(409).json({ error: "A refill can be requested after the current fill has been dispensed." });
         }
 
@@ -389,16 +395,16 @@ export const requestRefill = async (req: Request, res: Response) => {
                 { Update: {
                     TableName: TABLE_RX, Key: { prescriptionId },
                     UpdateExpression: "SET #s = :pending, paymentStatus = :unpaid, refillsRemaining = refillsRemaining - :one, updatedAt = :now",
-                    ConditionExpression: "refillsRemaining = :expected AND #s IN (:dispensed, :pickedUp)",
+                    ConditionExpression: "refillsRemaining = :expected AND #s IN (:dispensed, :pickedUp, :refillRequested)",
                     ExpressionAttributeNames: { "#s": "status" },
                     ExpressionAttributeValues: {
                         ":pending": RX_STATUS.PENDING, ":unpaid": "UNPAID", ":one": 1, ":now": now, ":expected": remaining,
-                        ":dispensed": RX_STATUS.DISPENSED, ":pickedUp": RX_STATUS.PICKED_UP,
+                        ":dispensed": RX_STATUS.DISPENSED, ":pickedUp": RX_STATUS.PICKED_UP, ":refillRequested": RX_STATUS.REFILL_REQUESTED,
                     },
                 } },
                 { Put: {
                     TableName: TABLE_TRANSACTION,
-                    Item: { billId: `refill-${prescriptionId}-${remaining}`, referenceId: prescriptionId, patientId: rx.patientId, doctorId: rx.doctorId, amount: rx.price, status: "PENDING", type: "PHARMACY", createdAt: now },
+                    Item: { billId: refillBillId(prescriptionId, remaining), referenceId: prescriptionId, patientId: rx.patientId, doctorId: rx.doctorId, amount: rx.price, status: "PENDING", type: "PHARMACY", createdAt: now },
                     ConditionExpression: "attribute_not_exists(billId)",
                 } },
             ]
@@ -530,11 +536,11 @@ export const fulfillPrescription = async (req: Request, res: Response) => {
     }
 };
 
-// Payment, pickup, dispensing and cancellation each have their own guarded flow; this endpoint only
-// lets the prescriber re-issue a prescription that is awaiting review. A PENDING refill is excluded: re-issuing
-// it would let a legacy refill that still carries its previous fill's PAID flag skip its own bill.
+// Payment, pickup, dispensing and cancellation each have their own guarded flow; this endpoint only lets the
+// prescriber re-issue an ISSUED prescription. PENDING and legacy REFILL_REQUESTED refills are excluded: issuing them
+// would let a refill that still carries its previous fill's PAID flag skip its own bill (they go through request-refill).
 export const PRESCRIBER_UPDATABLE_STATUSES = [RX_STATUS.ISSUED] as const;
-const UPDATABLE_FROM: string[] = [RX_STATUS.REFILL_REQUESTED, RX_STATUS.ISSUED];
+const UPDATABLE_FROM: string[] = [RX_STATUS.ISSUED];
 
 export const updatePrescription = async (req: Request, res: Response) => {
     const region = extractRegion(req);
@@ -558,11 +564,11 @@ export const updatePrescription = async (req: Request, res: Response) => {
         await docClient.send(new UpdateCommand({
             TableName: TABLE_RX, Key: { prescriptionId },
             UpdateExpression: "SET #s = :status, updatedAt = :time",
-            ConditionExpression: "#s IN (:refillRequested, :issued)",
+            ConditionExpression: "#s = :issued",
             ExpressionAttributeNames: { "#s": "status" },
             ExpressionAttributeValues: {
                 ":status": status, ":time": new Date().toISOString(),
-                ":refillRequested": RX_STATUS.REFILL_REQUESTED, ":issued": RX_STATUS.ISSUED,
+                ":issued": RX_STATUS.ISSUED,
             }
         }));
 
@@ -576,7 +582,7 @@ export const updatePrescription = async (req: Request, res: Response) => {
 };
 
 // Ledger statuses that /billing/pay still accepts; cancelling the prescription must close them.
-const UNPAID_BILL_STATUSES: string[] = ['PENDING', 'DUE', 'UNPAID', 'FAILED'];
+const UNPAID_BILL_STATUSES = PAYABLE_BILL_STATUSES;
 
 // 🟢 FIX #23: Dedicated prescription cancellation endpoint
 export const cancelPrescription = async (req: Request, res: Response) => {
@@ -627,9 +633,9 @@ export const cancelPrescription = async (req: Request, res: Response) => {
         // The index is eventually consistent. A refill's bill id is derived from the count it consumed, so the
         // current refill bill is read directly in case the index has not caught up with it yet.
         if (rx.status === RX_STATUS.PENDING && typeof rx.refillsRemaining === 'number') {
-            const refillBillId = `refill-${prescriptionId}-${rx.refillsRemaining + 1}`;
-            if (!relatedBills.some(bill => bill.billId === refillBillId)) {
-                const refillBill = (await docClient.send(new GetCommand({ TableName: TABLE_TRANSACTION, Key: { billId: refillBillId }, ConsistentRead: true }))).Item;
+            const currentRefillBillId = refillBillId(prescriptionId, rx.refillsRemaining + 1);
+            if (!relatedBills.some(bill => bill.billId === currentRefillBillId)) {
+                const refillBill = (await docClient.send(new GetCommand({ TableName: TABLE_TRANSACTION, Key: { billId: currentRefillBillId }, ConsistentRead: true }))).Item;
                 if (refillBill) relatedBills.push(refillBill);
             }
         }

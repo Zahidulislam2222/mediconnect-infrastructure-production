@@ -14,6 +14,7 @@ import {
     TABLE_SUBSCRIPTIONS,
 } from '../../../shared/subscription';
 import { TABLE_NAMES, setting } from '../../../shared/settings';
+import { PAYABLE_BILL_STATUSES } from '../../../shared/billing-status';
 
 const STRIPE_SECRET_NAME = "/mediconnect/stripe/keys";
 const STRIPE_WEBHOOK_SECRET_NAME = "/mediconnect/stripe/webhook_secret";
@@ -348,8 +349,19 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
     const paymentType = existingTxItem?.type ?? type;
     const prescriptionId = paymentType === 'PHARMACY' ? (existingTxItem?.referenceId ?? referenceId) : undefined;
     if (paymentType === 'PHARMACY' && !existingTxItem) {
-        // /billing/pay only charges existing bills, so this is an anomaly to surface, not a payment to drop.
-        throw new Error('PHARMACY_LEDGER_ROW_MISSING');
+        // /billing/pay only charges existing bills, so the row was removed after charging (e.g. by erasure). Record the
+        // captured money for reconciliation rather than failing until Stripe gives up; nothing is released to pickup.
+        await regionalDb.send(new PutCommand({
+            TableName: TABLE_TRANSACTIONS,
+            Item: {
+                billId, type: 'PHARMACY', status: 'PAID', reviewReason: 'LEDGER_ROW_MISSING',
+                patientId: paymentIntent.metadata?.patientId, paymentIntentId: paymentIntent.id,
+                amountMinor: paymentIntent.amount, currency: paymentIntent.currency, paidAt: timestamp
+            },
+            ConditionExpression: "attribute_not_exists(billId)"
+        }));
+        safeError(`[WEBHOOK] Payment ${billId} has no ledger row; recorded for reconciliation`);
+        return;
     }
     if (prescriptionId) {
         // Each bill is paid once, and only from a payable status: never over a PAID or REFUNDED row. CANCELLED is
@@ -467,9 +479,9 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
     }
 }
 
-// Ledger statuses a pharmacy payment may settle: the ones /billing/pay charges, plus CANCELLED (see above).
-const PAYABLE_BILL_CONDITION = "#s IN (:payPending, :payDue, :payUnpaid, :payFailed, :payCancelled)";
-const PAYABLE_BILL_VALUES = { ":payPending": "PENDING", ":payDue": "DUE", ":payUnpaid": "UNPAID", ":payFailed": "FAILED", ":payCancelled": "CANCELLED" };
+// Ledger statuses a pharmacy payment may settle: every status /billing/pay charges, plus CANCELLED (see above).
+const PAYABLE_BILL_VALUES = Object.fromEntries([...PAYABLE_BILL_STATUSES, 'CANCELLED'].map((status, i) => [`:payable${i}`, status]));
+const PAYABLE_BILL_CONDITION = `#s IN (${Object.keys(PAYABLE_BILL_VALUES).join(', ')})`;
 
 /** DynamoDB lists one cancellation reason per transaction item, in request order. */
 function cancellationCodes(error: unknown): string[] {

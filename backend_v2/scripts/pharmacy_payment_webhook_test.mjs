@@ -53,12 +53,12 @@ function apply(item, expression, names = {}, values = {}) {
 const cancelled = codes => Object.assign(new Error('Transaction cancelled'), {
   name: 'TransactionCanceledException', CancellationReasons: codes.map(Code => ({ Code })) });
 
-function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, withoutRx = false } = {}) {
+function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, withoutRx = false, withoutBill = false } = {}) {
   const rows = new Map();
   const key = (table, item) => `${table}|${KEYS[table].map(k => item[k]).join('|')}`;
   const put = (table, item) => rows.set(key(table, item), structuredClone(item));
   const get = (table, k) => rows.get(key(table, k));
-  put(BILLS, { billId: 'test-bill', referenceId: 'test-rx', patientId: 'test-patient', amount: 12, status: 'PENDING', type: 'PHARMACY', ...bill });
+  if (!withoutBill) put(BILLS, { billId: 'test-bill', referenceId: 'test-rx', patientId: 'test-patient', amount: 12, status: 'PENDING', type: 'PHARMACY', ...bill });
   if (!withoutRx) put(RX, { prescriptionId: 'test-rx', patientId: 'test-patient', medication: 'test-med', status: 'ISSUED', paymentStatus: 'UNPAID', ...rx });
   put(INVENTORY, { pharmacyId: 'test-pharmacy', drugId: 'test-med', stock: 5 });
   let transactionFailures = failTransactions, billReadFailures = failBillReads;
@@ -249,5 +249,19 @@ test('a ledger reference to a missing prescription is flagged, never created', a
     assert.equal(h.bill().status, 'PAID');
     assert.equal(h.bill().reviewReason, 'PRESCRIPTION_NOT_PAYABLE');
     assert.equal(h.rx(), undefined);
+  } finally { mock.restoreAll(); }
+});
+
+test('a payment whose bill row is gone is recorded for reconciliation instead of failing forever', async () => {
+  try {
+    const h = harness({ withoutBill: true });
+    assert.equal((await h.deliver(BILLING_PAY_METADATA)).status, 200);
+    assert.equal(h.bill().status, 'PAID');
+    assert.equal(h.bill().reviewReason, 'LEDGER_ROW_MISSING');
+    assert.equal(h.bill().paymentIntentId, 'pi_test');
+    assert.equal(h.bill().amountMinor, 1200);
+    assert.equal(h.rx().status, 'ISSUED', 'nothing is released without a bill');
+    assert.equal((await h.deliver(BILLING_PAY_METADATA)).status, 200, 'a later event for the same bill is a no-op');
+    assert.equal(h.rx().status, 'ISSUED');
   } finally { mock.restoreAll(); }
 });

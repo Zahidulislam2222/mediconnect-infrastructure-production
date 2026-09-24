@@ -229,7 +229,10 @@ for (const region of ['US', 'EU']) {
       // ── Dispense: exactly once ──
       seed({ status: 'READY_FOR_PICKUP', paymentStatus: 'PAID' });
       const dispenses = await Promise.all([1, 2].map(() => call('doc-2', 'POST', '/pharmacy/fulfill', { token: 'PICKUP-rx-1' })));
-      assert.deepEqual(dispenses.map(r => r.status).sort(), [200, 409], 'D5: concurrent dispense is atomic');
+      // As with cancel vs dispense below, the loser gets 409 from the write condition or 400 if it read after the winner.
+      const dispenseStatuses = dispenses.map(r => r.status);
+      assert.equal(dispenseStatuses.filter(status => status === 200).length, 1, `D5: concurrent dispense is atomic: ${dispenseStatuses}`);
+      assert.ok(dispenseStatuses.every(status => [200, 400, 409].includes(status)), `D5: unexpected statuses ${dispenseStatuses}`);
       assert.equal(rx1().status, 'DISPENSED');
       assert.equal((await call('pat-1', 'POST', '/pharmacy/fulfill', { token: 'PICKUP-rx-2' })).status, 403, 'patients cannot dispense');
 
@@ -311,6 +314,16 @@ for (const region of ['US', 'EU']) {
       assert.equal(statuses.filter(status => status === 200).length, 1, `cancel and dispense cannot both win: ${statuses}`);
       assert.ok(statuses.every(status => [200, 400, 409].includes(status)), `unexpected statuses ${statuses}`);
       assert.equal(rx1().status, dispenseResult.status === 200 ? 'DISPENSED' : 'CANCELLED');
+
+      // ── A legacy refill request (retired Lambda: no bill, no decrement, previous PAID flag kept) must be billed ──
+      seed({ status: 'REFILL_REQUESTED', paymentStatus: 'PAID' });
+      assert.equal((await call('doc-1', 'PUT', '/prescription', { prescriptionId: 'rx-1', status: 'ISSUED' })).status, 409,
+        'a legacy refill request cannot be issued past billing');
+      assert.equal(rx1().status, 'REFILL_REQUESTED');
+      assert.notEqual((await call('pat-1', 'POST', '/pharmacy/generate-qr', { prescriptionId: 'rx-1' })).status, 200);
+      assert.equal((await call('pat-1', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' })).status, 200);
+      assert.equal(rx1().status, 'PENDING'); assert.equal(rx1().paymentStatus, 'UNPAID'); assert.equal(rx1().refillsRemaining, 1);
+      assert.deepEqual(store.bills().map(b => [b.billId, b.status]), [['refill-rx-1-2', 'PENDING']]);
 
       // ── Cancel is pinned to the state it read: a refill committed meanwhile makes it fail, not strand the new bill ──
       const refillMeanwhile = status => () => {

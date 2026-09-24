@@ -9,6 +9,7 @@ import { GoogleAuth } from "google-auth-library";
 import { createHash, randomUUID } from 'crypto';
 import { z } from 'zod';
 import { requiredEnv, setting, getBillingSettings } from '../../../shared/settings';
+import { PAYABLE_BILL_STATUSES } from '../../../shared/billing-status';
 
 const HIPAA_SALT = requiredEnv('HIPAA_SALT');
 
@@ -101,7 +102,7 @@ export const payBill = async (req: Request, res: Response) => {
         }));
         if (!bill || bill.patientId !== patientId) return res.status(404).json({ error: "Bill not found." });
         if (bill.status === 'PAID') return res.status(409).json({ code: "BILL_ALREADY_PAID" });
-        if (!['PENDING', 'DUE', 'UNPAID', 'FAILED'].includes(bill.status)) {
+        if (!PAYABLE_BILL_STATUSES.includes(bill.status)) {
             return res.status(409).json({ code: "BILL_NOT_PAYABLE" });
         }
         const amount = Math.round(Number(bill.amount) * config.minorUnitScale);
