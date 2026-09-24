@@ -109,7 +109,8 @@ for (const region of ['US', 'EU']) {
         if (kind === 'QueryCommand' && input.TableName === BILLS) {
           assert.equal(input.IndexName, 'PatientIndex', 'The ledger has no reference index');
           const values = input.ExpressionAttributeValues;
-          return { Items: store.bills().filter(bill => bill.patientId === values[':pid'] && bill.referenceId === values[':rid']).map(bill => structuredClone(bill)) };
+          // hiddenFromIndex models GSI replication lag: the row exists but the index has not caught up.
+          return { Items: store.bills().filter(bill => !bill.hiddenFromIndex && bill.patientId === values[':pid'] && bill.referenceId === values[':rid']).map(bill => structuredClone(bill)) };
         }
         if (kind === 'QueryCommand') {
           assert.equal(input.TableName, RX, 'Only prescription queries are expected');
@@ -125,6 +126,8 @@ for (const region of ['US', 'EU']) {
           return {};
         }
         if (kind === 'TransactWriteCommand') {
+          // beforeTransact lets a test commit a competing write between the handler's reads and its transaction.
+          const competing = store.beforeTransact; store.beforeTransact = null; competing?.();
           if (store.transientFailures > 0) {
             store.transientFailures--;
             throw Object.assign(conditionalFailure('TransactionCanceledException'), { CancellationReasons: input.TransactItems.map(() => ({ Code: 'TransactionConflict' })) });
@@ -231,14 +234,18 @@ for (const region of ['US', 'EU']) {
       assert.equal((await call('pat-1', 'POST', '/pharmacy/fulfill', { token: 'PICKUP-rx-2' })).status, 403, 'patients cannot dispense');
 
       // ── Generic status update: prescriber only, no payment/cancellation bypass ──
-      seed({ status: 'PENDING', paymentStatus: 'UNPAID' });
+      seed({ status: 'ISSUED', paymentStatus: 'UNPAID' });
       assert.equal((await call('doc-2', 'PUT', '/prescription', { prescriptionId: 'rx-1', status: 'ISSUED' })).status, 403);
       assert.equal((await call('pat-1', 'PUT', '/prescription', { prescriptionId: 'rx-1', status: 'ISSUED' })).status, 403);
       for (const status of ['READY_FOR_PICKUP', 'DISPENSED', 'CANCELLED', 'PAID', 'anything'])
         assert.equal((await call('doc-1', 'PUT', '/prescription', { prescriptionId: 'rx-1', status })).status, 400, `D4: ${status}`);
-      assert.equal(rx1().status, 'PENDING');
+      assert.equal(rx1().status, 'ISSUED');
       assert.equal((await call('doc-1', 'PUT', '/prescription', { prescriptionId: 'rx-1', status: 'ISSUED' })).status, 200);
       assert.equal(rx1().status, 'ISSUED'); assert.equal(rx1().paymentStatus, 'UNPAID');
+      seed({ status: 'PENDING', paymentStatus: 'PAID' });
+      assert.equal((await call('doc-1', 'PUT', '/prescription', { prescriptionId: 'rx-1', status: 'ISSUED' })).status, 409,
+        'a refill awaiting its own bill cannot be re-issued past payment');
+      assert.equal(rx1().status, 'PENDING');
       seed({ status: 'DISPENSED' });
       assert.equal((await call('doc-1', 'PUT', '/prescription', { prescriptionId: 'rx-1', status: 'ISSUED' })).status, 409);
       assert.equal(rx1().status, 'DISPENSED');
@@ -304,6 +311,24 @@ for (const region of ['US', 'EU']) {
       assert.equal(statuses.filter(status => status === 200).length, 1, `cancel and dispense cannot both win: ${statuses}`);
       assert.ok(statuses.every(status => [200, 400, 409].includes(status)), `unexpected statuses ${statuses}`);
       assert.equal(rx1().status, dispenseResult.status === 200 ? 'DISPENSED' : 'CANCELLED');
+
+      // ── Cancel is pinned to the state it read: a refill committed meanwhile makes it fail, not strand the new bill ──
+      const refillMeanwhile = status => () => {
+        Object.assign(rx1(), { status, paymentStatus: 'UNPAID', refillsRemaining: 1 });
+        bill('refill-rx-1-2');
+      };
+      for (const status of ['PENDING', 'READY_FOR_PICKUP']) {
+        seed({ status: 'READY_FOR_PICKUP', paymentStatus: 'PAID' });
+        store.beforeTransact = refillMeanwhile(status);
+        assert.equal((await call('doc-1', 'PUT', '/prescriptions/rx-1/cancel')).status, 409, `refill committed meanwhile (${status})`);
+        assert.equal(rx1().status, status);
+        assert.equal(billRow('refill-rx-1-2').status, 'PENDING');
+      }
+      // A refill bill the patient index has not replicated yet is still closed.
+      seed({ status: 'PENDING', paymentStatus: 'UNPAID', refillsRemaining: 1 });
+      bill('refill-rx-1-2', { hiddenFromIndex: true });
+      assert.equal((await call('doc-1', 'PUT', '/prescriptions/rx-1/cancel')).status, 200);
+      assert.equal(billRow('refill-rx-1-2').status, 'CANCELLED', 'deterministic refill bill found despite index lag');
 
       // ── The generic patient clinical-write blockade stays intact everywhere else ──
       seed();

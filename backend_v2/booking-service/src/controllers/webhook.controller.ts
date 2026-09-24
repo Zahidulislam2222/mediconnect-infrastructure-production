@@ -316,23 +316,16 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
         return;
     }
 
-    let existingTxItem: any = null; // 🟢 Declare OUTSIDE the try block
+    // The ledger row decides what this payment is for, so an unreadable row fails the delivery and Stripe retries it.
+    const existingTxItem: any = (await regionalDb.send(new GetCommand({
+        TableName: TABLE_TRANSACTIONS,
+        Key: { billId },
+        ConsistentRead: true
+    }))).Item;
 
-    try {
-        const existingTx = await regionalDb.send(new GetCommand({
-            TableName: TABLE_TRANSACTIONS,
-            Key: { billId }
-        }));
-        
-        existingTxItem = existingTx.Item;
-
-        if (existingTxItem && existingTxItem.status === 'PAID') {
-
-            safeLog(`Idempotency Check: Transaction ${billId} is already PAID. Skipping.`);
-            return; // STOP EXECUTION HERE
-        }
-    } catch (err) {
-        safeLog("Idempotency check failed, proceeding cautiously...");
+    if (existingTxItem && existingTxItem.status === 'PAID') {
+        safeLog(`Idempotency Check: Transaction ${billId} is already PAID. Skipping.`);
+        return; // STOP EXECUTION HERE
     }
 
     const timestamp = new Date().toISOString();
@@ -350,14 +343,20 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
     });
 
     // ACTION B: Sync Source
-    // The ledger row is authoritative: /billing/pay intents carry only billId, patientId, type and region.
-    const prescriptionId = existingTxItem?.type === 'PHARMACY'
-        ? existingTxItem.referenceId
-        : (type === 'PHARMACY' ? referenceId : undefined);
+    // The ledger row is authoritative: /billing/pay intents carry only billId, patientId, type and region, and
+    // refill bills written before typed refills have no type (/billing/pay then reports PHARMACY).
+    const paymentType = existingTxItem?.type ?? type;
+    const prescriptionId = paymentType === 'PHARMACY' ? (existingTxItem?.referenceId ?? referenceId) : undefined;
+    if (paymentType === 'PHARMACY' && !existingTxItem) {
+        // /billing/pay only charges existing bills, so this is an anomaly to surface, not a payment to drop.
+        throw new Error('PHARMACY_LEDGER_ROW_MISSING');
+    }
     if (prescriptionId) {
-        // Each bill is paid once (ledger condition). The fill must still await collection: ISSUED (first fill) or
-        // PENDING (refill, which may still carry the previous fill's PAID flag). Never reopen a cancelled or dispensed one.
-        transactItems[0].Update.ConditionExpression = "#s <> :s";
+        // Each bill is paid once, and only from a payable status: never over a PAID or REFUNDED row. CANCELLED is
+        // payable because money captured during a cancellation must still be recorded. The fill must still await
+        // collection: ISSUED (first fill) or PENDING (refill, which may still carry the previous fill's PAID flag).
+        transactItems[0].Update.ConditionExpression = PAYABLE_BILL_CONDITION;
+        Object.assign(transactItems[0].Update.ExpressionAttributeValues, PAYABLE_BILL_VALUES);
         transactItems.push({
             Update: {
                 TableName: TABLE_PRESCRIPTIONS,
@@ -386,7 +385,7 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
         } catch (error) {
             const [ledger, prescription] = cancellationCodes(error);
             if (ledger === 'ConditionalCheckFailed') {
-                safeLog(`Idempotency Check: Transaction ${billId} is already PAID. Skipping.`);
+                safeLog(`Idempotency Check: Transaction ${billId} is no longer payable (paid or refunded). Skipping.`);
                 return;
             }
             if (ledger !== 'None' || prescription !== 'ConditionalCheckFailed') throw error;
@@ -395,9 +394,9 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
                 TableName: TABLE_TRANSACTIONS,
                 Key: { billId },
                 UpdateExpression: "SET #s = :s, paymentIntentId = :pid, paidAt = :now, reviewReason = :reason",
-                ConditionExpression: "#s <> :s",
+                ConditionExpression: PAYABLE_BILL_CONDITION,
                 ExpressionAttributeNames: { "#s": "status" },
-                ExpressionAttributeValues: { ":s": "PAID", ":pid": paymentIntent.id, ":now": timestamp, ":reason": "PRESCRIPTION_NOT_PAYABLE" }
+                ExpressionAttributeValues: { ":s": "PAID", ":pid": paymentIntent.id, ":now": timestamp, ":reason": "PRESCRIPTION_NOT_PAYABLE", ...PAYABLE_BILL_VALUES }
             })).catch((ledgerError: unknown) => {
                 if ((ledgerError as { name?: string })?.name !== 'ConditionalCheckFailedException') throw ledgerError;
             });
@@ -467,6 +466,10 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
         safeError("CRITICAL DB ERROR: Webhook failed to write to Regional DynamoDB");
     }
 }
+
+// Ledger statuses a pharmacy payment may settle: the ones /billing/pay charges, plus CANCELLED (see above).
+const PAYABLE_BILL_CONDITION = "#s IN (:payPending, :payDue, :payUnpaid, :payFailed, :payCancelled)";
+const PAYABLE_BILL_VALUES = { ":payPending": "PENDING", ":payDue": "DUE", ":payUnpaid": "UNPAID", ":payFailed": "FAILED", ":payCancelled": "CANCELLED" };
 
 /** DynamoDB lists one cancellation reason per transaction item, in request order. */
 function cancellationCodes(error: unknown): string[] {

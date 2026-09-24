@@ -531,9 +531,10 @@ export const fulfillPrescription = async (req: Request, res: Response) => {
 };
 
 // Payment, pickup, dispensing and cancellation each have their own guarded flow; this endpoint only
-// lets the prescriber re-issue a prescription that is awaiting review or payment.
+// lets the prescriber re-issue a prescription that is awaiting review. A PENDING refill is excluded: re-issuing
+// it would let a legacy refill that still carries its previous fill's PAID flag skip its own bill.
 export const PRESCRIBER_UPDATABLE_STATUSES = [RX_STATUS.ISSUED] as const;
-const UPDATABLE_FROM: string[] = [RX_STATUS.REFILL_REQUESTED, RX_STATUS.PENDING, RX_STATUS.ISSUED];
+const UPDATABLE_FROM: string[] = [RX_STATUS.REFILL_REQUESTED, RX_STATUS.ISSUED];
 
 export const updatePrescription = async (req: Request, res: Response) => {
     const region = extractRegion(req);
@@ -557,11 +558,11 @@ export const updatePrescription = async (req: Request, res: Response) => {
         await docClient.send(new UpdateCommand({
             TableName: TABLE_RX, Key: { prescriptionId },
             UpdateExpression: "SET #s = :status, updatedAt = :time",
-            ConditionExpression: "#s IN (:refillRequested, :pending, :issued)",
+            ConditionExpression: "#s IN (:refillRequested, :issued)",
             ExpressionAttributeNames: { "#s": "status" },
             ExpressionAttributeValues: {
                 ":status": status, ":time": new Date().toISOString(),
-                ":refillRequested": RX_STATUS.REFILL_REQUESTED, ":pending": RX_STATUS.PENDING, ":issued": RX_STATUS.ISSUED,
+                ":refillRequested": RX_STATUS.REFILL_REQUESTED, ":issued": RX_STATUS.ISSUED,
             }
         }));
 
@@ -586,7 +587,7 @@ export const cancelPrescription = async (req: Request, res: Response) => {
 
     try {
         // Fetch the prescription
-        const rxRes = await docClient.send(new GetCommand({ TableName: TABLE_RX, Key: { prescriptionId } }));
+        const rxRes = await docClient.send(new GetCommand({ TableName: TABLE_RX, Key: { prescriptionId }, ConsistentRead: true }));
         if (!rxRes.Item) return res.status(404).json({ error: "Prescription not found" });
 
         const rx = rxRes.Item;
@@ -623,6 +624,15 @@ export const cancelPrescription = async (req: Request, res: Response) => {
             relatedBills.push(...(billRes.Items || []));
             billPage = billRes.LastEvaluatedKey;
         } while (billPage);
+        // The index is eventually consistent. A refill's bill id is derived from the count it consumed, so the
+        // current refill bill is read directly in case the index has not caught up with it yet.
+        if (rx.status === RX_STATUS.PENDING && typeof rx.refillsRemaining === 'number') {
+            const refillBillId = `refill-${prescriptionId}-${rx.refillsRemaining + 1}`;
+            if (!relatedBills.some(bill => bill.billId === refillBillId)) {
+                const refillBill = (await docClient.send(new GetCommand({ TableName: TABLE_TRANSACTION, Key: { billId: refillBillId }, ConsistentRead: true }))).Item;
+                if (refillBill) relatedBills.push(refillBill);
+            }
+        }
 
         // Build atomic transaction: prescription cancellation + billing updates
         const transactItems: any[] = [
@@ -631,13 +641,16 @@ export const cancelPrescription = async (req: Request, res: Response) => {
                     TableName: TABLE_RX,
                     Key: { prescriptionId },
                     UpdateExpression: "SET #s = :cancelled, updatedAt = :now, cancelledAt = :now, cancelledBy = :by, #res.#st = :fhirCancelled",
-                    // A concurrent dispense or cancel wins; this write then fails instead of overwriting it.
-                    ConditionExpression: "NOT (#s IN (:dispensed, :pickedUp, :cancelled))",
+                    // Pinned to the state read above: a concurrent dispense, cancel or refill (which also creates a
+                    // bill this cancel has not seen) makes this write fail instead of overwriting it.
+                    ConditionExpression: typeof rx.refillsRemaining === 'number'
+                        ? "#s = :observed AND refillsRemaining = :observedRefills"
+                        : "#s = :observed AND attribute_not_exists(refillsRemaining)",
                     ExpressionAttributeNames: { "#s": "status", "#res": "resource", "#st": "status" },
                     ExpressionAttributeValues: {
                         ":cancelled": RX_STATUS.CANCELLED,
-                        ":dispensed": RX_STATUS.DISPENSED,
-                        ":pickedUp": RX_STATUS.PICKED_UP,
+                        ":observed": rx.status,
+                        ...(typeof rx.refillsRemaining === 'number' ? { ":observedRefills": rx.refillsRemaining } : {}),
                         ":now": now,
                         ":by": authUser.sub,
                         ":fhirCancelled": "cancelled"
