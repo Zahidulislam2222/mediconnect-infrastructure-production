@@ -12,7 +12,7 @@ import { sendNotification } from '../../../../shared/notifications';
 import { encryptPHI, decryptPHI } from '../../../../shared/kms-crypto';
 import { publishEvent, EventType } from '../../../../shared/event-bus';
 import { TABLE_NAMES, setting } from '../../../../shared/settings';
-import { canListPrescriptions, isApprovedPrescriber, isConditionalFailure, isPrescriptionPatient } from './prescription-access';
+import { canListPrescriptions, isApprovedClinician, isApprovedPrescriber, isConditionalFailure, isPrescriptionPatient } from './prescription-access';
 
 const router = Router();
 const pdfGen = new PDFGenerator();
@@ -25,7 +25,8 @@ const AUDIT_TABLE = "mediconnect-audit-logs";
 
 const DEFAULT_PHARMACY = setting("DEFAULT_PHARMACY_ID");
 
-// Prescription lifecycle states (protocol values shared with the payment webhook and web client).
+// Prescription lifecycle states. These are protocol values: the booking-service payment webhook and the web
+// client use the same literals, so a change here must be made there too.
 const RX_STATUS = {
     ISSUED: "ISSUED",
     PENDING: "PENDING",
@@ -33,6 +34,7 @@ const RX_STATUS = {
     READY_FOR_PICKUP: "READY_FOR_PICKUP",
     DISPENSED: "DISPENSED",
     PICKED_UP: "PICKED_UP", // legacy synonym of DISPENSED still read by older clients
+    CANCELLED: "CANCELLED",
 } as const;
 
 // 🟢 COMPILER FIX: Safely parse headers to prevent "string | string[]" build failures
@@ -417,7 +419,9 @@ export const generateQR = async (req: Request, res: Response) => {
     const docClient = getRegionalClient(region);
     const authUser = (req as any).user;
     const { prescriptionId } = req.body;
-    const pickupEligible: string[] = [RX_STATUS.ISSUED, RX_STATUS.PENDING, RX_STATUS.READY_FOR_PICKUP];
+    // A refill (PENDING) becomes collectable only when the payment webhook marks it READY_FOR_PICKUP, so a legacy
+    // refill that still carries its previous fill's PAID flag cannot skip the refill bill.
+    const pickupEligible: string[] = [RX_STATUS.ISSUED, RX_STATUS.READY_FOR_PICKUP];
 
     try {
         const rx = (await docClient.send(new GetCommand({ TableName: TABLE_RX, Key: { prescriptionId }, ConsistentRead: true }))).Item;
@@ -440,9 +444,9 @@ export const generateQR = async (req: Request, res: Response) => {
             TableName: TABLE_RX,
             Key: { prescriptionId },
             UpdateExpression: "SET #status = :ready",
-            ConditionExpression: "paymentStatus = :paid AND #status IN (:issued, :pending, :ready)",
+            ConditionExpression: "paymentStatus = :paid AND #status IN (:issued, :ready)",
             ExpressionAttributeNames: { "#status": "status" },
-            ExpressionAttributeValues: { ":ready": RX_STATUS.READY_FOR_PICKUP, ":paid": "PAID", ":issued": RX_STATUS.ISSUED, ":pending": RX_STATUS.PENDING }
+            ExpressionAttributeValues: { ":ready": RX_STATUS.READY_FOR_PICKUP, ":paid": "PAID", ":issued": RX_STATUS.ISSUED }
         }));
 
         await writeAuditLog(authUser.sub, rx.patientId, "GENERATE_QR", `Pickup code generated for ${prescriptionId}`, { region, ipAddress: req.ip });
@@ -466,6 +470,10 @@ export const fulfillPrescription = async (req: Request, res: Response) => {
     const prescriptionId = token.replace('PICKUP-', '');
 
     try {
+        // There is no pharmacist role yet, so dispensing is limited to verified, approved clinicians.
+        if (!await isApprovedClinician(authUser, extractRegion(req))) {
+            return res.status(403).json({ error: "Only verified, approved clinicians can dispense prescriptions." });
+        }
         const rxRes = await docClient.send(new GetCommand({ TableName: TABLE_RX, Key: { prescriptionId } }));
         const rx = rxRes.Item;
 
@@ -517,7 +525,8 @@ export const fulfillPrescription = async (req: Request, res: Response) => {
             }
         });
     } catch (error: any) {
-        res.status(500).json({ error: error.message });
+        safeError("Prescription dispense failed", error);
+        res.status(500).json({ error: "Prescription dispense failed" });
     }
 };
 
@@ -565,6 +574,9 @@ export const updatePrescription = async (req: Request, res: Response) => {
     }
 };
 
+// Ledger statuses that /billing/pay still accepts; cancelling the prescription must close them.
+const UNPAID_BILL_STATUSES: string[] = ['PENDING', 'DUE', 'UNPAID', 'FAILED'];
+
 // 🟢 FIX #23: Dedicated prescription cancellation endpoint
 export const cancelPrescription = async (req: Request, res: Response) => {
     const userRegion = extractRegion(req);
@@ -579,13 +591,13 @@ export const cancelPrescription = async (req: Request, res: Response) => {
 
         const rx = rxRes.Item;
 
-        // Only the prescribing doctor can cancel
-        if (rx.doctorId !== authUser.sub) {
+        // Only the prescribing doctor, while still verified and approved, can cancel
+        if (!await isApprovedPrescriber(authUser, rx, userRegion)) {
             return res.status(403).json({ error: "HIPAA Violation: Only the prescribing doctor can cancel this prescription." });
         }
 
         // Cannot cancel already dispensed or cancelled prescriptions
-        if (rx.status === 'DISPENSED') {
+        if (rx.status === RX_STATUS.DISPENSED || rx.status === RX_STATUS.PICKED_UP) {
             return res.status(400).json({ error: "Cannot cancel a dispensed prescription." });
         }
         if (rx.status === 'CANCELLED') {
@@ -594,19 +606,23 @@ export const cancelPrescription = async (req: Request, res: Response) => {
 
         const now = new Date().toISOString();
 
-        // Query related billing transactions BEFORE the atomic write so we can include them
-        let relatedBills: any[] = [];
-        try {
+        // Find the prescription's bills BEFORE the atomic write so they change together. The ledger has no
+        // reference index, so bills are found through the patient index. A failed lookup aborts the cancel:
+        // leaving a bill payable for a cancelled prescription is worse than asking the doctor to retry.
+        const relatedBills: any[] = [];
+        let billPage: Record<string, any> | undefined;
+        do {
             const billRes = await docClient.send(new QueryCommand({
                 TableName: TABLE_TRANSACTION,
-                IndexName: "ReferenceIndex",
-                KeyConditionExpression: "referenceId = :rid",
-                ExpressionAttributeValues: { ":rid": prescriptionId }
+                IndexName: "PatientIndex",
+                KeyConditionExpression: "patientId = :pid",
+                FilterExpression: "referenceId = :rid",
+                ExpressionAttributeValues: { ":pid": rx.patientId, ":rid": prescriptionId },
+                ExclusiveStartKey: billPage
             }));
-            relatedBills = billRes.Items || [];
-        } catch (billErr: any) {
-            safeError("Failed to query related billing transactions:", billErr.message);
-        }
+            relatedBills.push(...(billRes.Items || []));
+            billPage = billRes.LastEvaluatedKey;
+        } while (billPage);
 
         // Build atomic transaction: prescription cancellation + billing updates
         const transactItems: any[] = [
@@ -615,9 +631,13 @@ export const cancelPrescription = async (req: Request, res: Response) => {
                     TableName: TABLE_RX,
                     Key: { prescriptionId },
                     UpdateExpression: "SET #s = :cancelled, updatedAt = :now, cancelledAt = :now, cancelledBy = :by, #res.#st = :fhirCancelled",
+                    // A concurrent dispense or cancel wins; this write then fails instead of overwriting it.
+                    ConditionExpression: "NOT (#s IN (:dispensed, :pickedUp, :cancelled))",
                     ExpressionAttributeNames: { "#s": "status", "#res": "resource", "#st": "status" },
                     ExpressionAttributeValues: {
-                        ":cancelled": "CANCELLED",
+                        ":cancelled": RX_STATUS.CANCELLED,
+                        ":dispensed": RX_STATUS.DISPENSED,
+                        ":pickedUp": RX_STATUS.PICKED_UP,
                         ":now": now,
                         ":by": authUser.sub,
                         ":fhirCancelled": "cancelled"
@@ -626,17 +646,33 @@ export const cancelPrescription = async (req: Request, res: Response) => {
             },
         ];
 
-        // Include billing cancellations in the same atomic transaction
+        // Include billing changes in the same atomic transaction. Each is conditioned on the status read above,
+        // so a payment that lands meanwhile fails the cancel rather than being silently overwritten.
         for (const bill of relatedBills) {
-            transactItems.push({
-                Update: {
-                    TableName: TABLE_TRANSACTION,
-                    Key: { billId: (bill as any).billId },
-                    UpdateExpression: "SET #s = :cancelled, updatedAt = :now",
-                    ExpressionAttributeNames: { "#s": "status" },
-                    ExpressionAttributeValues: { ":cancelled": "CANCELLED", ":now": now }
-                }
-            });
+            if (UNPAID_BILL_STATUSES.includes(bill.status)) {
+                transactItems.push({
+                    Update: {
+                        TableName: TABLE_TRANSACTION,
+                        Key: { billId: bill.billId },
+                        UpdateExpression: "SET #s = :cancelled, updatedAt = :now",
+                        ConditionExpression: "#s = :observed",
+                        ExpressionAttributeNames: { "#s": "status" },
+                        ExpressionAttributeValues: { ":cancelled": "CANCELLED", ":now": now, ":observed": bill.status }
+                    }
+                });
+            } else if (bill.status === 'PAID') {
+                // Money already captured for this fill: keep the payment record and flag it for refund review.
+                transactItems.push({
+                    Update: {
+                        TableName: TABLE_TRANSACTION,
+                        Key: { billId: bill.billId },
+                        UpdateExpression: "SET reviewReason = :reason, updatedAt = :now",
+                        ConditionExpression: "#s = :paid",
+                        ExpressionAttributeNames: { "#s": "status" },
+                        ExpressionAttributeValues: { ":reason": "PRESCRIPTION_CANCELLED_AFTER_PAYMENT", ":now": now, ":paid": "PAID" }
+                    }
+                });
+            }
         }
 
         await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
@@ -695,6 +731,10 @@ export const cancelPrescription = async (req: Request, res: Response) => {
             cancelledAt: now
         });
     } catch (error: any) {
-        res.status(500).json({ error: error.message });
+        if (isConditionalFailure(error)) {
+            return res.status(409).json({ error: "The prescription or its bill changed. Refresh before cancelling it." });
+        }
+        safeError("Prescription cancellation failed", error);
+        res.status(500).json({ error: "Prescription cancellation failed" });
     }
 };

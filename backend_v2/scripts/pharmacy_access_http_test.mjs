@@ -16,6 +16,8 @@ const express = require('express');
 const { CognitoJwtVerifier } = require('aws-jwt-verify');
 const aws = require('./dist/shared/aws-config.js');
 const audit = require('./dist/shared/audit.js');
+const notifications = require('./dist/shared/notifications.js');
+const eventBus = require('./dist/shared/event-bus.js');
 
 // Minimal DynamoDB double: evaluates the condition/update forms the pharmacy controller uses and
 // fails closed (throws) on anything it does not understand, so an unmodelled expression cannot pass.
@@ -103,6 +105,12 @@ for (const region of ['US', 'EU']) {
           const item = store.get(input.TableName, input.Key);
           return { Item: item ? structuredClone(item) : undefined };
         }
+        if (kind === 'DeleteCommand') { store.tables.delete(keyOf(input.TableName, input.Key)); return {}; }
+        if (kind === 'QueryCommand' && input.TableName === BILLS) {
+          assert.equal(input.IndexName, 'PatientIndex', 'The ledger has no reference index');
+          const values = input.ExpressionAttributeValues;
+          return { Items: store.bills().filter(bill => bill.patientId === values[':pid'] && bill.referenceId === values[':rid']).map(bill => structuredClone(bill)) };
+        }
         if (kind === 'QueryCommand') {
           assert.equal(input.TableName, RX, 'Only prescription queries are expected');
           const field = input.IndexName === 'PatientIndex' ? 'patientId' : input.IndexName === 'DoctorIndex' ? 'doctorId' : null;
@@ -117,6 +125,10 @@ for (const region of ['US', 'EU']) {
           return {};
         }
         if (kind === 'TransactWriteCommand') {
+          if (store.transientFailures > 0) {
+            store.transientFailures--;
+            throw Object.assign(conditionalFailure('TransactionCanceledException'), { CancellationReasons: input.TransactItems.map(() => ({ Code: 'TransactionConflict' })) });
+          }
           const staged = input.TransactItems.map(entry => {
             const [op, spec] = Object.entries(entry)[0];
             const keyNames = keyNamesFor(spec.TableName);
@@ -128,7 +140,8 @@ for (const region of ['US', 'EU']) {
               : !!current && evaluateCondition(current, spec.ConditionExpression, spec.ExpressionAttributeNames, spec.ExpressionAttributeValues);
             return { op, spec, key, keyNames, current, ok };
           });
-          if (staged.some(s => !s.ok)) throw conditionalFailure('TransactionCanceledException');
+          // DynamoDB reports one reason per item, in request order.
+          if (staged.some(s => !s.ok)) throw Object.assign(conditionalFailure('TransactionCanceledException'), { CancellationReasons: staged.map(s => ({ Code: s.ok ? 'None' : 'ConditionalCheckFailed' })) });
           for (const s of staged) {
             if (s.op === 'Put') store.put(s.spec.TableName, s.spec.Item, s.keyNames);
             else applyUpdate(s.current, s.spec.UpdateExpression, s.spec.ExpressionAttributeNames, s.spec.ExpressionAttributeValues);
@@ -139,6 +152,9 @@ for (const region of ['US', 'EU']) {
       } };
     });
     mock.method(audit, 'writeAuditLog', async () => {});
+    mock.method(aws, 'getRegionalS3Client', () => ({ send: async () => ({}) }));
+    mock.method(notifications, 'sendNotification', async () => {});
+    mock.method(eventBus, 'publishEvent', async () => {});
     const realFetch = globalThis.fetch;
     mock.method(globalThis, 'fetch', (url, options) => {
       assert.ok(String(url).startsWith('http://127.0.0.1:'), 'Provider fetch forbidden'); return realFetch(url, options);
@@ -232,6 +248,62 @@ for (const region of ['US', 'EU']) {
       store.put(process.env.DYNAMO_TABLE, { doctorId: 'doc-1', verificationStatus: 'REVOKED' }, ['doctorId']);
       assert.equal((await call('doc-1', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' })).status, 403);
       assert.equal(rx1().refillsRemaining, 2);
+      assert.equal((await call('doc-1', 'GET', '/prescriptions?doctorId=doc-1')).status, 403, 'revoked clinician cannot list');
+      assert.equal((await call('doc-1', 'PUT', '/prescription', { prescriptionId: 'rx-1', status: 'ISSUED' })).status, 403);
+      seed({ status: 'READY_FOR_PICKUP', paymentStatus: 'PAID' });
+      store.put(process.env.DYNAMO_TABLE, { doctorId: 'doc-1', verificationStatus: 'REVOKED' }, ['doctorId']);
+      assert.equal((await call('doc-1', 'POST', '/pharmacy/generate-qr', { prescriptionId: 'rx-1' })).status, 403);
+      assert.equal((await call('doc-1', 'POST', '/pharmacy/fulfill', { token: 'PICKUP-rx-1' })).status, 403, 'unapproved clinician cannot dispense');
+      assert.equal(rx1().status, 'READY_FOR_PICKUP');
+
+      // ── Reads: ambiguous listings and incomplete verification are refused ──
+      seed();
+      assert.equal((await call('doc-1', 'GET', '/prescriptions?patientId=pat-1&doctorId=doc-1')).status, 400, 'both ids are ambiguous');
+      store.put(process.env.DYNAMO_TABLE, { doctorId: 'doc-1', verificationStatus: 'APPROVED', isIdentityVerified: false }, ['doctorId']);
+      assert.equal((await call('doc-1', 'GET', '/prescriptions?doctorId=doc-1')).status, 403, 'APPROVED without identity verification');
+      store.put(process.env.DYNAMO_TABLE, { doctorId: 'doc-3', verificationStatus: 'REVOKED', isIdentityVerified: true }, ['doctorId']);
+      assert.equal((await call('doc-3', 'GET', '/prescriptions?patientId=pat-1')).status, 403, 'revoked treating clinician');
+
+      // ── A legacy refill still carrying its previous fill's PAID flag must pay its refill bill first ──
+      seed({ status: 'PENDING', paymentStatus: 'PAID' });
+      assert.equal((await call('pat-1', 'POST', '/pharmacy/generate-qr', { prescriptionId: 'rx-1' })).status, 409);
+      assert.equal(rx1().status, 'PENDING');
+
+      // ── A transient transaction conflict is a retryable failure, never "already processed" ──
+      seed();
+      store.transientFailures = 1;
+      assert.equal((await call('pat-1', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' })).status, 500);
+      assert.equal(rx1().refillsRemaining, 2); assert.equal(store.bills().length, 0);
+      assert.equal((await call('pat-1', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' })).status, 200, 'retry succeeds');
+
+      // ── Cancel: approved prescriber only; closes unpaid bills, flags paid ones, never overrides a dispense ──
+      const bill = (billId, changes = {}) => store.put(BILLS, { billId, referenceId: 'rx-1', patientId: 'pat-1', status: 'PENDING', type: 'PHARMACY', ...changes }, ['billId']);
+      const billRow = billId => store.get(BILLS, { billId });
+      seed({ status: 'ISSUED', paymentStatus: 'UNPAID' });
+      bill('bill-1'); bill('bill-other', { referenceId: 'rx-2', patientId: 'pat-2' });
+      assert.equal((await call('doc-2', 'PUT', '/prescriptions/rx-1/cancel')).status, 403, 'another clinician cannot cancel');
+      store.put(process.env.DYNAMO_TABLE, { doctorId: 'doc-1', verificationStatus: 'REVOKED' }, ['doctorId']);
+      assert.equal((await call('doc-1', 'PUT', '/prescriptions/rx-1/cancel')).status, 403, 'revoked prescriber cannot cancel');
+      store.put(process.env.DYNAMO_TABLE, { doctorId: 'doc-1', verificationStatus: 'APPROVED', isIdentityVerified: true }, ['doctorId']);
+      assert.equal(rx1().status, 'ISSUED');
+      assert.equal((await call('doc-1', 'PUT', '/prescriptions/rx-1/cancel')).status, 200);
+      assert.equal(rx1().status, 'CANCELLED');
+      assert.equal(billRow('bill-1').status, 'CANCELLED', 'an unpaid bill cannot be paid after cancellation');
+      assert.equal(billRow('bill-other').status, 'PENDING', 'other prescriptions are untouched');
+      assert.equal((await call('doc-1', 'PUT', '/prescriptions/rx-1/cancel')).status, 400, 'already cancelled');
+      seed({ status: 'READY_FOR_PICKUP', paymentStatus: 'PAID' });
+      bill('bill-1', { status: 'PAID' });
+      assert.equal((await call('doc-1', 'PUT', '/prescriptions/rx-1/cancel')).status, 200);
+      assert.equal(billRow('bill-1').status, 'PAID');
+      assert.equal(billRow('bill-1').reviewReason, 'PRESCRIPTION_CANCELLED_AFTER_PAYMENT', 'captured money is flagged for refund review');
+      seed({ status: 'READY_FOR_PICKUP', paymentStatus: 'PAID' });
+      const [cancelResult, dispenseResult] = await Promise.all([
+        call('doc-1', 'PUT', '/prescriptions/rx-1/cancel'), call('doc-2', 'POST', '/pharmacy/fulfill', { token: 'PICKUP-rx-1' })]);
+      // The loser is rejected by the write condition (409) or, if it read after the winner finished, by the status check (400).
+      const statuses = [cancelResult.status, dispenseResult.status];
+      assert.equal(statuses.filter(status => status === 200).length, 1, `cancel and dispense cannot both win: ${statuses}`);
+      assert.ok(statuses.every(status => [200, 400, 409].includes(status)), `unexpected statuses ${statuses}`);
+      assert.equal(rx1().status, dispenseResult.status === 200 ? 'DISPENSED' : 'CANCELLED');
 
       // ── The generic patient clinical-write blockade stays intact everywhere else ──
       seed();

@@ -1,7 +1,7 @@
 import { Request, Response } from 'express';
 import Stripe from 'stripe';
 import { getRegionalClient, getSSMParameter } from '../../../shared/aws-config';
-import { TransactWriteCommand, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { TransactWriteCommand, GetCommand, PutCommand, UpdateCommand, DeleteCommand } from "@aws-sdk/lib-dynamodb";
 import { createHash } from 'crypto';
 import { pushRevenueToBigQuery, pushAppointmentToBigQuery } from './billing.controller';
 import { writeAuditLog } from '../../../shared/audit';
@@ -131,7 +131,15 @@ export const handleStripeWebhook = async (req: Request, res: Response) => {
     if (event.type === 'payment_intent.succeeded') {
         const paymentIntent = event.data.object as Stripe.PaymentIntent;
         safeLog(`Payment Captured: ${paymentIntent.id} in region ${region}`);
-        await handlePaymentSuccess(paymentIntent, regionalDb, region);
+        try {
+            await handlePaymentSuccess(paymentIntent, regionalDb, region);
+        } catch {
+            // Release the claim so Stripe's redelivery is processed instead of being skipped as a duplicate.
+            await regionalDb.send(new DeleteCommand({ TableName: TABLE_WEBHOOK_EVENTS, Key: { eventId: event.id } }))
+                .catch(() => safeError(`[WEBHOOK] Could not release event ${event.id}; manual reconciliation required`));
+            safeError(`[WEBHOOK] Payment sync failed for event ${event.id}; asking Stripe to retry`);
+            return res.status(500).json({ received: false });
+        }
     } else if (event.type === 'payment_intent.payment_failed') {
         const paymentIntent = event.data.object as Stripe.PaymentIntent;
         await handlePaymentFailure(paymentIntent, regionalDb, region);
@@ -301,7 +309,7 @@ async function handlePaymentFailure(paymentIntent: Stripe.PaymentIntent, regiona
 }
 
 async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regionalDb: any, region: string) {
-    const { billId, referenceId, type, pharmacyId, medication } = paymentIntent.metadata || {};
+    const { billId, referenceId, type, pharmacyId } = paymentIntent.metadata || {};
 
     if (!billId) {
         safeLog("Skipping Webhook: Missing 'billId' in metadata.");
@@ -342,23 +350,22 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
     });
 
     // ACTION B: Sync Source
-    if (type === 'PHARMACY' && referenceId) {
+    // The ledger row is authoritative: /billing/pay intents carry only billId, patientId, type and region.
+    const prescriptionId = existingTxItem?.type === 'PHARMACY'
+        ? existingTxItem.referenceId
+        : (type === 'PHARMACY' ? referenceId : undefined);
+    if (prescriptionId) {
+        // Each bill is paid once (ledger condition). The fill must still await collection: ISSUED (first fill) or
+        // PENDING (refill, which may still carry the previous fill's PAID flag). Never reopen a cancelled or dispensed one.
+        transactItems[0].Update.ConditionExpression = "#s <> :s";
         transactItems.push({
             Update: {
                 TableName: TABLE_PRESCRIPTIONS,
-                Key: { prescriptionId: referenceId },
+                Key: { prescriptionId },
                 UpdateExpression: "SET paymentStatus = :ps, #s = :rs, updatedAt = :now",
+                ConditionExpression: "#s IN (:issued, :pending)",
                 ExpressionAttributeNames: { "#s": "status" },
-                ExpressionAttributeValues: { ":ps": "PAID", ":rs": "READY_FOR_PICKUP", ":now": timestamp }
-            }
-        });
-
-        transactItems.push({
-            Update: {
-                TableName: TABLE_INVENTORY,
-                Key: { pharmacyId: pharmacyId || "CVS-001", drugId: medication },
-                UpdateExpression: "SET stock = stock - :one",
-                ExpressionAttributeValues: { ":one": 1 }
+                ExpressionAttributeValues: { ":ps": "PAID", ":rs": "READY_FOR_PICKUP", ":now": timestamp, ":issued": "ISSUED", ":pending": "PENDING" }
             }
         });
     } else if (type === 'BOOKING_FEE' && referenceId) {
@@ -373,8 +380,36 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
         });
     }
 
+    if (prescriptionId) {
+        try {
+            await regionalDb.send(new TransactWriteCommand({ TransactItems: transactItems }));
+        } catch (error) {
+            const [ledger, prescription] = cancellationCodes(error);
+            if (ledger === 'ConditionalCheckFailed') {
+                safeLog(`Idempotency Check: Transaction ${billId} is already PAID. Skipping.`);
+                return;
+            }
+            if (ledger !== 'None' || prescription !== 'ConditionalCheckFailed') throw error;
+            // Money was captured for a fill that can no longer be collected: record it and flag it for refund review.
+            await regionalDb.send(new UpdateCommand({
+                TableName: TABLE_TRANSACTIONS,
+                Key: { billId },
+                UpdateExpression: "SET #s = :s, paymentIntentId = :pid, paidAt = :now, reviewReason = :reason",
+                ConditionExpression: "#s <> :s",
+                ExpressionAttributeNames: { "#s": "status" },
+                ExpressionAttributeValues: { ":s": "PAID", ":pid": paymentIntent.id, ":now": timestamp, ":reason": "PRESCRIPTION_NOT_PAYABLE" }
+            })).catch((ledgerError: unknown) => {
+                if ((ledgerError as { name?: string })?.name !== 'ConditionalCheckFailedException') throw ledgerError;
+            });
+            safeError(`[WEBHOOK] Payment ${billId} received for a prescription that is not awaiting payment; refund review required`);
+            return;
+        }
+        await decrementPharmacyStock(regionalDb, prescriptionId, pharmacyId);
+    }
+
     try {
-        await regionalDb.send(new TransactWriteCommand({ TransactItems: transactItems }));
+        // Other payment types keep their existing best-effort write.
+        if (!prescriptionId) await regionalDb.send(new TransactWriteCommand({ TransactItems: transactItems }));
         safeLog(`DATABASE SYNCED: Transaction ${billId} + ${type} Record`);
 
         // Push revenue to BigQuery (patientId hashed internally by pushRevenueToBigQuery)
@@ -430,6 +465,33 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
         }).catch(() => {});
     } catch (error) {
         safeError("CRITICAL DB ERROR: Webhook failed to write to Regional DynamoDB");
+    }
+}
+
+/** DynamoDB lists one cancellation reason per transaction item, in request order. */
+function cancellationCodes(error: unknown): string[] {
+    const { name, CancellationReasons } = (error ?? {}) as { name?: string; CancellationReasons?: { Code?: string }[] };
+    return name === 'TransactionCanceledException' && Array.isArray(CancellationReasons)
+        ? CancellationReasons.map(reason => reason?.Code ?? 'None')
+        : [];
+}
+
+/** Stock is bookkeeping: a missing or empty inventory row must never un-record a captured payment. */
+async function decrementPharmacyStock(regionalDb: any, prescriptionId: string, pharmacyId?: string) {
+    try {
+        const rx = (await regionalDb.send(new GetCommand({
+            TableName: TABLE_PRESCRIPTIONS, Key: { prescriptionId }, ProjectionExpression: "medication, pharmacyId"
+        }))).Item;
+        if (!rx?.medication) return;
+        await regionalDb.send(new UpdateCommand({
+            TableName: TABLE_INVENTORY,
+            Key: { pharmacyId: rx.pharmacyId || pharmacyId || setting("DEFAULT_PHARMACY_ID"), drugId: rx.medication },
+            UpdateExpression: "SET stock = stock - :one",
+            ConditionExpression: "stock > :zero",
+            ExpressionAttributeValues: { ":one": 1, ":zero": 0 }
+        }));
+    } catch {
+        safeError(`[WEBHOOK] Pharmacy stock for ${prescriptionId} requires reconciliation`);
     }
 }
 

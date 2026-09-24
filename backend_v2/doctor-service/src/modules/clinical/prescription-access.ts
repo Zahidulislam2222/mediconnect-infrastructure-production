@@ -47,5 +47,14 @@ export async function canListPrescriptions(
     return relationship.Item?.relationship === 'isTreatedBy';
 }
 
-export const isConditionalFailure = (error: unknown): boolean =>
-    ['ConditionalCheckFailedException', 'TransactionCanceledException'].includes((error as { name?: string })?.name ?? '');
+/**
+ * True only when a write lost because the record changed. A transaction cancelled for a transient reason
+ * (TransactionConflict, throttling, validation) is not a conflict and must not be reported as "already processed".
+ */
+export function isConditionalFailure(error: unknown): boolean {
+    const { name, CancellationReasons } = (error ?? {}) as { name?: string; CancellationReasons?: { Code?: string }[] };
+    if (name === 'ConditionalCheckFailedException') return true;
+    if (name !== 'TransactionCanceledException' || !Array.isArray(CancellationReasons)) return false;
+    const codes = CancellationReasons.map(reason => reason?.Code ?? 'None');
+    return codes.includes('ConditionalCheckFailed') && codes.every(code => code === 'None' || code === 'ConditionalCheckFailed');
+}
