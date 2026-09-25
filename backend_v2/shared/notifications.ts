@@ -12,6 +12,16 @@ interface NotificationOptions {
   metadata?: Record<string, string>;
 }
 
+// Record IDs that say which notice went unsent. Metadata can also carry clinical detail (medication, doctor name),
+// so only these keys are ever logged.
+const TRACEABLE_METADATA_KEYS = [
+  'appointmentId', 'billId', 'refundId', 'prescriptionId', 'subscriptionId', 'invoiceId', 'disputeId', 'shiftId', 'taskId',
+] as const;
+
+function traceIds(metadata: Record<string, string> | undefined): Record<string, string> {
+  return Object.fromEntries(TRACEABLE_METADATA_KEYS.filter(key => metadata?.[key]).map(key => [key, String(metadata![key])]));
+}
+
 /**
  * Send a notification via SES email.
  * Non-blocking: failures are logged but never thrown.
@@ -20,7 +30,7 @@ interface NotificationOptions {
 export async function sendNotification(options: NotificationOptions): Promise<void> {
   try {
     if (!options.recipientEmail) {
-      safeLog('Notification skipped — no recipient email', { type: options.type });
+      safeLog('Notification skipped — no recipient email', { type: options.type, ...traceIds(options.metadata) });
       return;
     }
 
@@ -47,7 +57,7 @@ export async function sendNotification(options: NotificationOptions): Promise<vo
     safeLog('Notification sent', { type: options.type, subject: options.subject });
   } catch (error) {
     // Non-blocking: log and continue
-    safeError('Failed to send notification', { type: options.type, error: (error as Error).message });
+    safeError('Failed to send notification', { type: options.type, ...traceIds(options.metadata), error: (error as Error).message });
   }
 }
 
