@@ -363,8 +363,11 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
                 ConditionExpression: "attribute_not_exists(billId)"
             }));
         } catch (recordErr) {
-            // A concurrent delivery for the same bill already recorded it.
             if ((recordErr as { name?: string })?.name !== 'ConditionalCheckFailedException') throw recordErr;
+            // Done only if the row that won records this same payment (a concurrent delivery of it); anything else
+            // stays unacknowledged so Stripe retries and the mismatch is investigated.
+            const recorded = await regionalDb.send(new GetCommand({ TableName: TABLE_TRANSACTIONS, Key: { billId }, ConsistentRead: true }));
+            if (recorded.Item?.paymentIntentId !== paymentIntent.id) throw recordErr;
         }
         safeError(`[WEBHOOK] Payment ${billId} has no ledger row; recorded for reconciliation`);
         return;

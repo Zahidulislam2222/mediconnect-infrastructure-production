@@ -53,7 +53,7 @@ function apply(item, expression, names = {}, values = {}) {
 const cancelled = codes => Object.assign(new Error('Transaction cancelled'), {
   name: 'TransactionCanceledException', CancellationReasons: codes.map(Code => ({ Code })) });
 
-function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, withoutRx = false, withoutBill = false } = {}) {
+function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, withoutRx = false, withoutBill = false, failBillPuts = 0, beforeBillPut } = {}) {
   const rows = new Map();
   const key = (table, item) => `${table}|${KEYS[table].map(k => item[k]).join('|')}`;
   const put = (table, item) => rows.set(key(table, item), structuredClone(item));
@@ -61,7 +61,7 @@ function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, 
   if (!withoutBill) put(BILLS, { billId: 'test-bill', referenceId: 'test-rx', patientId: 'test-patient', amount: 12, status: 'PENDING', type: 'PHARMACY', ...bill });
   if (!withoutRx) put(RX, { prescriptionId: 'test-rx', patientId: 'test-patient', medication: 'test-med', status: 'ISSUED', paymentStatus: 'UNPAID', ...rx });
   put(INVENTORY, { pharmacyId: 'test-pharmacy', drugId: 'test-med', stock: 5 });
-  let transactionFailures = failTransactions, billReadFailures = failBillReads;
+  let transactionFailures = failTransactions, billReadFailures = failBillReads, billPutFailures = failBillPuts;
   mock.method(aws, 'getSSMParameter', async name => name.includes('webhook') ? WEBHOOK_SECRET : 'sk_test_key');
   mock.method(audit, 'writeAuditLog', async () => {});
   mock.method(notifications, 'sendNotification', async () => {});
@@ -75,6 +75,10 @@ function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, 
     }
     if (kind === 'GetCommand') { const item = get(input.TableName, input.Key); return { Item: item && structuredClone(item) }; }
     if (kind === 'PutCommand') {
+      if (input.TableName === BILLS && billPutFailures > 0) {
+        billPutFailures--; throw Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' });
+      }
+      if (input.TableName === BILLS && beforeBillPut) { const competing = beforeBillPut; beforeBillPut = undefined; competing(put); }
       if (!holds(get(input.TableName, input.Item), input.ConditionExpression, input.ExpressionAttributeNames, input.ExpressionAttributeValues))
         throw Object.assign(new Error('conditional'), { name: 'ConditionalCheckFailedException' });
       put(input.TableName, input.Item); return {};
@@ -275,5 +279,17 @@ test('concurrent deliveries for a missing bill row record it once and both succe
     // Erasure anonymises ledger rows; a reconciliation row must not re-attach an identifier from payment metadata.
     assert.equal(h.bill().patientId, undefined, 'R4-4: reconciliation row carries the payment reference only');
     assert.equal(h.rx().status, 'ISSUED');
+  } finally { mock.restoreAll(); }
+});
+
+test('a reconciliation write is only treated as done when the row that exists records this payment', async () => {
+  try {
+    const throttled = harness({ withoutBill: true, failBillPuts: 1 });
+    assert.equal((await throttled.deliver(BILLING_PAY_METADATA)).status, 500, 'V5: a failed write is retried by Stripe, not acknowledged');
+    assert.equal(throttled.bill(), undefined);
+    mock.restoreAll();
+    const other = harness({ withoutBill: true, beforeBillPut: put => put(BILLS, { billId: 'test-bill', status: 'PAID', paymentIntentId: 'pi_other' }) });
+    assert.equal((await other.deliver(BILLING_PAY_METADATA)).status, 500, 'V5: a row recording a different payment is not this payment');
+    assert.equal(other.bill().paymentIntentId, 'pi_other');
   } finally { mock.restoreAll(); }
 });

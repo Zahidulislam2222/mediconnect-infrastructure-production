@@ -148,6 +148,7 @@ for (const region of ['US', 'EU']) {
           // DynamoDB reports one reason per item, in request order.
           if (staged.some(s => !s.ok)) throw Object.assign(conditionalFailure('TransactionCanceledException'), { CancellationReasons: staged.map(s => ({ Code: s.ok ? 'None' : 'ConditionalCheckFailed' })) });
           for (const s of staged) {
+            if (s.op === 'ConditionCheck') continue;
             if (s.op === 'Put') store.put(s.spec.TableName, s.spec.Item, s.keyNames);
             else applyUpdate(s.current, s.spec.UpdateExpression, s.spec.ExpressionAttributeNames, s.spec.ExpressionAttributeValues);
           }
@@ -156,7 +157,8 @@ for (const region of ['US', 'EU']) {
         throw new Error(`Unexpected command ${kind}`);
       } };
     });
-    mock.method(audit, 'writeAuditLog', async () => {});
+    const audits = [];
+    mock.method(audit, 'writeAuditLog', async (_actor, _patient, action) => { audits.push(action); });
     mock.method(aws, 'getRegionalS3Client', () => ({ send: async () => ({}) }));
     mock.method(notifications, 'sendNotification', async () => {});
     mock.method(eventBus, 'publishEvent', async () => {});
@@ -317,48 +319,111 @@ for (const region of ['US', 'EU']) {
       assert.ok(statuses.every(status => [200, 400, 409].includes(status)), `unexpected statuses ${statuses}`);
       assert.equal(rx1().status, dispenseResult.status === 200 ? 'DISPENSED' : 'CANCELLED');
 
-      // ── Legacy refill requests: the retired Lambda set REFILL_REQUESTED with no bill, no decrement and no status check ──
-      // A fill that was dispensed (dispensedAt from this service, fulfilledAt from the Lambda) is billed as a real refill.
-      for (const evidence of [{ dispensedAt: '2026-01-01T00:00:00Z' }, { fulfilledAt: '2026-01-01T00:00:00Z' }]) {
-        seed({ status: 'REFILL_REQUESTED', paymentStatus: 'PAID', ...evidence });
+      // ── Legacy refill requests: the retired Lambda (and the old unguarded PUT) set REFILL_REQUESTED with no bill, no
+      // decrement and no status check. dispensedAt/fulfilledAt are never cleared, so they only prove that SOME earlier fill
+      // was handed over; the ledger shows whether a later fill was billed and never collected. ──
+      const DISPENSED_AT = '2026-01-05T00:00:00Z';
+      const firstFill = (changes = {}) => bill('first-fill', { status: 'PAID', createdAt: '2026-01-01T00:00:00Z', ...changes });
+      const legacy = (overrides = {}) => seed({ status: 'REFILL_REQUESTED', paymentStatus: 'PAID', ...overrides });
+      const refillAs = actor => call(actor, 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' });
+      const bills = () => store.bills().map(b => [b.billId, b.status]).sort();
+      // A11: a dispensed fill with no later bill is a genuine refill request: bill once, decrement once.
+      for (const evidence of [{ dispensedAt: DISPENSED_AT }, { fulfilledAt: DISPENSED_AT }]) {
+        legacy(evidence); firstFill();
         assert.equal((await call('doc-1', 'PUT', '/prescription', { prescriptionId: 'rx-1', status: 'ISSUED' })).status, 409,
           'a legacy refill request cannot be issued past billing');
         assert.equal(rx1().status, 'REFILL_REQUESTED');
         assert.notEqual((await call('pat-1', 'POST', '/pharmacy/generate-qr', { prescriptionId: 'rx-1' })).status, 200);
-        const approved = await call('doc-1', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' });
+        const approved = await refillAs('doc-1');
         assert.equal(approved.status, 200, 'R4-1: the prescriber approves a dispensed legacy refill');
         assert.deepEqual(await approved.json(), { message: 'Refill authorized', status: 'PENDING' });
         assert.equal(rx1().status, 'PENDING'); assert.equal(rx1().paymentStatus, 'UNPAID'); assert.equal(rx1().refillsRemaining, 1);
-        assert.deepEqual(store.bills().map(b => [b.billId, b.status]), [['refill-rx-1-2', 'PENDING']]);
+        assert.deepEqual(bills(), [['first-fill', 'PAID'], ['refill-rx-1-2', 'PENDING']]);
       }
-      // R4-2: without dispense evidence the previous fill was never collected. Restore it; never bill or decrement again.
-      for (const paymentStatus of ['PAID', 'UNPAID']) {
-        seed({ status: 'REFILL_REQUESTED', paymentStatus, refillsRemaining: 0 });
-        if (paymentStatus === 'UNPAID') bill('first-fill');
-        const restored = await call('pat-1', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' });
-        assert.equal(restored.status, 200, `R4-2: uncollected ${paymentStatus} fill is restored`);
+      // A12 (V1): an earlier fill was dispensed, then an old-style refill was billed and PAID but never collected.
+      legacy({ dispensedAt: DISPENSED_AT }); firstFill(); bill('old-refill', { status: 'PAID', createdAt: '2026-02-01T00:00:00Z' });
+      audits.length = 0;
+      let restored = await refillAs('doc-1');
+      assert.equal(restored.status, 200, 'V1: a paid, uncollected later fill is restored, not billed again');
+      assert.deepEqual(await restored.json(), { message: 'Previous fill restored', status: 'ISSUED' });
+      assert.equal(rx1().status, 'ISSUED'); assert.equal(rx1().paymentStatus, 'PAID'); assert.equal(rx1().refillsRemaining, 2);
+      assert.deepEqual(bills(), [['first-fill', 'PAID'], ['old-refill', 'PAID']], 'V1: no second charge');
+      assert.deepEqual(audits, ['RESTORE_UNCOLLECTED_FILL']);
+      assert.equal((await call('pat-1', 'POST', '/pharmacy/generate-qr', { prescriptionId: 'rx-1' })).status, 200);
+      // A12 (V3): the uncollected fill's own bill is still payable -> restore UNPAID so that bill is the one paid.
+      for (const evidence of [{ dispensedAt: DISPENSED_AT }, {}]) {
+        legacy({ paymentStatus: 'PAID', refillsRemaining: 0, ...evidence });
+        if (evidence.dispensedAt) firstFill();
+        bill('open-bill', { status: 'PENDING', createdAt: '2026-02-01T00:00:00Z' });
+        restored = await refillAs('pat-1');
+        assert.equal(restored.status, 200);
         assert.deepEqual(await restored.json(), { message: 'Previous fill restored', status: 'ISSUED' });
-        assert.equal(rx1().status, 'ISSUED'); assert.equal(rx1().paymentStatus, paymentStatus); assert.equal(rx1().refillsRemaining, 0);
-        assert.deepEqual(store.bills().map(b => [b.billId, b.status]), paymentStatus === 'UNPAID' ? [['first-fill', 'PENDING']] : [],
-          'R4-2: no second charge for a fill that was never collected');
-        assert.equal((await call('pat-1', 'POST', '/pharmacy/generate-qr', { prescriptionId: 'rx-1' })).status,
-          paymentStatus === 'PAID' ? 200 : 402, 'a paid restored fill is collectable; an unpaid one still needs its own bill');
+        assert.equal(rx1().status, 'ISSUED'); assert.equal(rx1().paymentStatus, 'UNPAID', 'V3: the open bill must be paid first');
+        assert.equal(rx1().refillsRemaining, 0);
+        assert.equal(store.bills().filter(b => b.status === 'PENDING').length, 1, 'V3: exactly one payable bill');
+        assert.equal((await call('pat-1', 'POST', '/pharmacy/generate-qr', { prescriptionId: 'rx-1' })).status, 402);
       }
-      seed({ status: 'REFILL_REQUESTED', paymentStatus: 'PAID' });
-      assert.equal((await call('pat-2', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' })).status, 403);
-      assert.equal((await call('doc-2', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' })).status, 403);
+      // A14: no dispense and no bill: a PAID flag is the only record of the payment -> restore; otherwise refuse.
+      legacy({ paymentStatus: 'PAID', refillsRemaining: 0 });
+      assert.equal((await refillAs('pat-1')).status, 200); assert.equal(rx1().status, 'ISSUED'); assert.equal(rx1().paymentStatus, 'PAID');
+      assert.deepEqual(store.bills(), []);
+      for (const paymentStatus of ['UNPAID', undefined]) {
+        legacy({ paymentStatus });
+        assert.equal((await refillAs('doc-1')).status, 409, 'V3: never "restore" a fill that can be neither paid nor collected');
+        assert.equal(rx1().status, 'REFILL_REQUESTED'); assert.deepEqual(store.bills(), []);
+      }
+      // A13: ambiguous ledgers need a person.
+      legacy({ dispensedAt: DISPENSED_AT }); firstFill();
+      bill('open-a', { status: 'PENDING', createdAt: '2026-02-01T00:00:00Z' }); bill('open-b', { status: 'PAID', createdAt: '2026-02-02T00:00:00Z' });
+      assert.equal((await refillAs('doc-1')).status, 409, 'two open bills');
+      legacy({ dispensedAt: DISPENSED_AT }); firstFill({ createdAt: undefined });
+      assert.equal((await refillAs('doc-1')).status, 409, 'undated bill');
+      assert.equal(rx1().status, 'REFILL_REQUESTED'); assert.equal(store.bills().length, 1);
+      // Cancelled or refunded bills do not count as open.
+      legacy({ dispensedAt: DISPENSED_AT }); firstFill(); bill('old-refill', { status: 'REFUNDED', createdAt: '2026-02-01T00:00:00Z' });
+      assert.equal((await refillAs('doc-1')).status, 200); assert.equal(rx1().status, 'PENDING');
+      // A5: other patients and other clinicians.
+      legacy();
+      assert.equal((await refillAs('pat-2')).status, 403);
+      assert.equal((await refillAs('doc-2')).status, 403);
       assert.equal(rx1().status, 'REFILL_REQUESTED');
-      // A legacy request on a cancelled prescription is neither billed nor restored.
-      for (const evidence of [{}, { dispensedAt: '2026-01-01T00:00:00Z' }]) {
-        seed({ status: 'REFILL_REQUESTED', paymentStatus: 'PAID', cancelledAt: '2026-01-02T00:00:00Z', ...evidence });
-        assert.equal((await call('doc-1', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' })).status, 409);
+      // A3: a legacy request on a cancelled prescription is neither billed nor restored.
+      for (const evidence of [{}, { dispensedAt: DISPENSED_AT }]) {
+        legacy({ cancelledAt: '2026-01-02T00:00:00Z', ...evidence });
+        const refused = await refillAs('doc-1');
+        assert.equal(refused.status, 409);
+        assert.match((await refused.json()).error, /cancelled/, 'the doctor is told why, not asked to retry');
         assert.equal(rx1().status, 'REFILL_REQUESTED'); assert.equal(store.bills().length, 0);
       }
-      // A dispense recorded between the read and the restore makes the restore fail instead of releasing a free fill.
-      seed({ status: 'REFILL_REQUESTED', paymentStatus: 'PAID' });
-      store.beforeUpdate = () => { rx1().dispensedAt = '2026-01-03T00:00:00Z'; };
-      assert.equal((await call('pat-1', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' })).status, 409);
-
+      // A15: every competing write between the read and the write makes it fail with no mutation.
+      const competing = {
+        'concurrent cancel': rx => Object.assign(rx, { cancelledAt: '2026-03-01T00:00:00Z' }),
+        'concurrent status change': rx => Object.assign(rx, { status: 'READY_FOR_PICKUP' }),
+        'concurrent dispense (dispensedAt)': rx => Object.assign(rx, { dispensedAt: '2026-03-01T00:00:00Z' }),
+        'concurrent pickup (fulfilledAt)': rx => Object.assign(rx, { fulfilledAt: '2026-03-01T00:00:00Z' }),
+      };
+      for (const [name, change] of Object.entries(competing)) {
+        for (const [shape, setup] of [
+          ['restore', () => { legacy(); }],
+          ['restore with bill', () => { legacy(); bill('open-bill', { status: 'PENDING', createdAt: '2026-02-01T00:00:00Z' }); }],
+          ['billed refill', () => { legacy({ dispensedAt: DISPENSED_AT }); firstFill(); }],
+        ]) {
+          setup();
+          const before = structuredClone(rx1());
+          store.beforeUpdate = store.beforeTransact = () => change(rx1());
+          const result = await refillAs('doc-1');
+          store.beforeUpdate = store.beforeTransact = null;
+          assert.equal(result.status, 409, `${shape}: ${name}`);
+          assert.equal(rx1().status, change(structuredClone(before)).status, `${shape}: ${name} leaves the competing state`);
+          assert.equal(rx1().refillsRemaining, before.refillsRemaining);
+          assert.ok(!store.bills().some(b => b.billId.startsWith('refill-')), `${shape}: ${name} creates no bill`);
+        }
+      }
+      // A12: a payment landing on the open bill between read and restore makes the restore fail (it would set UNPAID).
+      legacy(); bill('open-bill', { status: 'PENDING', createdAt: '2026-02-01T00:00:00Z' });
+      store.beforeTransact = () => { billRow('open-bill').status = 'PAID'; };
+      assert.equal((await refillAs('pat-1')).status, 409);
+      store.beforeTransact = null;
       assert.equal(rx1().status, 'REFILL_REQUESTED');
 
       // ── Cancel is pinned to the state it read: a refill committed meanwhile makes it fail, not strand the new bill ──

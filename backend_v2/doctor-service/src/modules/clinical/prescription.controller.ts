@@ -3,6 +3,7 @@ import { Router, Request, Response } from "express";
 import { PDFGenerator } from "../../utils/pdf-generator";
 import { getRegionalClient, getRegionalS3Client } from '../../../../shared/aws-config';
 import { PutCommand, QueryCommand, GetCommand, UpdateCommand, DeleteCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import type { QueryCommandOutput, TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import { DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { v4 as uuidv4 } from "uuid";
 import { safeLog, safeError } from '../../../../shared/logger';
@@ -366,20 +367,92 @@ const REFILLABLE_FROM: string[] = [RX_STATUS.DISPENSED, RX_STATUS.PICKED_UP, RX_
 /** A refill bill is named after the refills remaining before it, so a replayed or concurrent request cannot bill twice. */
 const refillBillId = (prescriptionId: string, remainingBeforeRefill: number) => `refill-${prescriptionId}-${remainingBeforeRefill}`;
 // Evidence that a fill was handed over: this service records dispensedAt, the retired pharmacy Lambda fulfilledAt.
+// Neither is cleared when a new fill starts, so together they date the LAST hand-over, not the current fill's.
 const DISPENSE_EVIDENCE = ["dispensedAt", "fulfilledAt"] as const;
 
+type DocClient = ReturnType<typeof getRegionalClient>;
+/** A DynamoDB item as the document client returns it. */
+type Row = NonNullable<QueryCommandOutput["Items"]>[number];
+
+/** Every ledger row of a prescription. The ledger has no reference index, so bills are found through the patient index. */
+const findPrescriptionBills = async (docClient: DocClient, patientId: string, prescriptionId: string) => {
+    const bills: Row[] = [];
+    let page: QueryCommandOutput["LastEvaluatedKey"];
+    do {
+        const result = await docClient.send(new QueryCommand({
+            TableName: TABLE_TRANSACTION,
+            IndexName: "PatientIndex",
+            KeyConditionExpression: "patientId = :pid",
+            FilterExpression: "referenceId = :rid",
+            ExpressionAttributeValues: { ":pid": patientId, ":rid": prescriptionId },
+            ExclusiveStartKey: page
+        }));
+        bills.push(...(result.Items || []));
+        page = result.LastEvaluatedKey;
+    } while (page);
+    return bills;
+};
+
+/** Pins a write to the hand-over evidence and cancellation state that were read, so a concurrent dispense or cancel fails it. */
+const observedHandoverCondition = (rx: Row) => {
+    const clauses = ["attribute_not_exists(cancelledAt)"];
+    const values: Record<string, unknown> = {};
+    for (const field of DISPENSE_EVIDENCE) {
+        if (rx[field] === undefined) clauses.push(`attribute_not_exists(${field})`);
+        else { clauses.push(`${field} = :observed_${field}`); values[`:observed_${field}`] = rx[field]; }
+    }
+    return { expression: clauses.join(" AND "), values };
+};
+
+type LegacyRefillPlan =
+    | { kind: "bill" }
+    | { kind: "restore"; paymentStatus: "PAID" | "UNPAID"; openBill?: Row }
+    | { kind: "review"; error: string };
+
 /**
- * Restores a legacy refill request whose previous fill was never collected. The retired Lambda set REFILL_REQUESTED
- * without checking the status, so an undispensed fill could be overwritten. That fill keeps its own payment state and
- * bill: nothing is billed or decremented, and a concurrent dispense or cancellation makes the write fail.
+ * The retired pharmacy Lambda, and the old unguarded status update, set REFILL_REQUESTED without a bill, a count or a
+ * status check, so the flag can sit on a fill that was billed but never collected. A bill created after the last
+ * hand-over is that fill: it is restored with its own payment state instead of being billed again. Only a hand-over
+ * with no later bill is a genuine refill request.
  */
-const restoreUncollectedFill = (docClient: ReturnType<typeof getRegionalClient>, prescriptionId: string) => docClient.send(new UpdateCommand({
-    TableName: TABLE_RX, Key: { prescriptionId },
-    UpdateExpression: "SET #s = :issued, updatedAt = :now",
-    ConditionExpression: "#s = :refillRequested AND attribute_not_exists(dispensedAt) AND attribute_not_exists(fulfilledAt) AND attribute_not_exists(cancelledAt)",
-    ExpressionAttributeNames: { "#s": "status" },
-    ExpressionAttributeValues: { ":issued": RX_STATUS.ISSUED, ":refillRequested": RX_STATUS.REFILL_REQUESTED, ":now": new Date().toISOString() },
-}));
+const planLegacyRefill = (rx: Row, bills: Row[]): LegacyRefillPlan => {
+    const live = bills.filter(bill => bill.status === "PAID" || PAYABLE_BILL_STATUSES.includes(bill.status));
+    if (live.some(bill => typeof bill.createdAt !== "string")) {
+        return { kind: "review", error: "This prescription's billing needs review before the refill can be approved." };
+    }
+    const lastHandover = DISPENSE_EVIDENCE.map(field => rx[field]).filter((value): value is string => typeof value === "string").sort().at(-1);
+    const open = live.filter(bill => lastHandover === undefined || bill.createdAt > lastHandover);
+    if (open.length > 1) return { kind: "review", error: "This prescription's billing needs review before the refill can be approved." };
+    if (open.length === 1) return { kind: "restore", paymentStatus: open[0].status === "PAID" ? "PAID" : "UNPAID", openBill: open[0] };
+    if (lastHandover !== undefined) return { kind: "bill" };
+    // Neither handed over nor billed: a PAID flag is then the only record of this fill's payment.
+    if (rx.paymentStatus === "PAID") return { kind: "restore", paymentStatus: "PAID" };
+    return { kind: "review", error: "This fill has no bill and was never paid. Issue a new prescription instead." };
+};
+
+/** Restores the uncollected fill in one transaction; its bill must still be in the state it was classified by. */
+const restoreUncollectedFill = (docClient: DocClient, rx: Row, plan: Extract<LegacyRefillPlan, { kind: "restore" }>) => {
+    const pinned = observedHandoverCondition(rx);
+    const transactItems: NonNullable<TransactWriteCommandInput["TransactItems"]> = [{ Update: {
+        TableName: TABLE_RX, Key: { prescriptionId: rx.prescriptionId },
+        UpdateExpression: "SET #s = :issued, paymentStatus = :paymentStatus, updatedAt = :now",
+        ConditionExpression: `#s = :refillRequested AND ${pinned.expression}`,
+        ExpressionAttributeNames: { "#s": "status" },
+        ExpressionAttributeValues: {
+            ":issued": RX_STATUS.ISSUED, ":paymentStatus": plan.paymentStatus, ":refillRequested": RX_STATUS.REFILL_REQUESTED,
+            ":now": new Date().toISOString(), ...pinned.values,
+        },
+    } }];
+    if (plan.openBill) {
+        transactItems.push({ ConditionCheck: {
+            TableName: TABLE_TRANSACTION, Key: { billId: plan.openBill.billId },
+            ConditionExpression: "#s = :observedBill",
+            ExpressionAttributeNames: { "#s": "status" },
+            ExpressionAttributeValues: { ":observedBill": plan.openBill.status },
+        } });
+    }
+    return docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
+};
 
 export const requestRefill = async (req: Request, res: Response) => {
     const region = extractRegion(req);
@@ -400,15 +473,17 @@ export const requestRefill = async (req: Request, res: Response) => {
         }
         // REFILL_REQUESTED rows come from the retired pharmacy service, which neither billed nor counted the refill
         // and did not check that the previous fill had been handed over.
-        const legacyRequest = rx.status === RX_STATUS.REFILL_REQUESTED;
-        const wasDispensed = DISPENSE_EVIDENCE.some(field => rx[field] !== undefined);
-        if (legacyRequest && rx.cancelledAt !== undefined) {
-            return res.status(409).json({ error: "This prescription was cancelled. Issue a new prescription instead." });
-        }
-        if (legacyRequest && !wasDispensed) {
-            await restoreUncollectedFill(docClient, prescriptionId);
-            await writeAuditLog(authUser.sub, rx.patientId, "RESTORE_UNCOLLECTED_FILL", `Uncollected fill for ${prescriptionId} restored`, { region, ipAddress: req.ip });
-            return res.json({ message: "Previous fill restored", status: RX_STATUS.ISSUED });
+        if (rx.status === RX_STATUS.REFILL_REQUESTED) {
+            if (rx.cancelledAt !== undefined) {
+                return res.status(409).json({ error: "This prescription was cancelled. Issue a new prescription instead." });
+            }
+            const plan = planLegacyRefill(rx, await findPrescriptionBills(docClient, rx.patientId, prescriptionId));
+            if (plan.kind === "review") return res.status(409).json({ error: plan.error });
+            if (plan.kind === "restore") {
+                await restoreUncollectedFill(docClient, rx, plan);
+                await writeAuditLog(authUser.sub, rx.patientId, "RESTORE_UNCOLLECTED_FILL", `Uncollected fill for ${prescriptionId} restored`, { region, ipAddress: req.ip });
+                return res.json({ message: "Previous fill restored", status: RX_STATUS.ISSUED });
+            }
         }
 
         const remaining = Number(rx.refillsRemaining);
@@ -417,15 +492,17 @@ export const requestRefill = async (req: Request, res: Response) => {
         // One refill per observed count: the condition rejects replays and concurrent duplicates, and the
         // bill id is derived from that count so a duplicate can never create a second charge.
         const now = new Date().toISOString();
+        const pinned = observedHandoverCondition(rx);
         await docClient.send(new TransactWriteCommand({
             TransactItems: [
                 { Update: {
                     TableName: TABLE_RX, Key: { prescriptionId },
                     UpdateExpression: "SET #s = :pending, paymentStatus = :unpaid, refillsRemaining = refillsRemaining - :one, updatedAt = :now",
-                    ConditionExpression: "refillsRemaining = :expected AND #s = :observed AND attribute_not_exists(cancelledAt)",
+                    ConditionExpression: `refillsRemaining = :expected AND #s = :observed AND ${pinned.expression}`,
                     ExpressionAttributeNames: { "#s": "status" },
                     ExpressionAttributeValues: {
                         ":pending": RX_STATUS.PENDING, ":unpaid": "UNPAID", ":one": 1, ":now": now, ":expected": remaining, ":observed": rx.status,
+                        ...pinned.values,
                     },
                 } },
                 { Put: {
@@ -639,23 +716,9 @@ export const cancelPrescription = async (req: Request, res: Response) => {
 
         const now = new Date().toISOString();
 
-        // Find the prescription's bills BEFORE the atomic write so they change together. The ledger has no
-        // reference index, so bills are found through the patient index. A failed lookup aborts the cancel:
-        // leaving a bill payable for a cancelled prescription is worse than asking the doctor to retry.
-        const relatedBills: any[] = [];
-        let billPage: Record<string, any> | undefined;
-        do {
-            const billRes = await docClient.send(new QueryCommand({
-                TableName: TABLE_TRANSACTION,
-                IndexName: "PatientIndex",
-                KeyConditionExpression: "patientId = :pid",
-                FilterExpression: "referenceId = :rid",
-                ExpressionAttributeValues: { ":pid": rx.patientId, ":rid": prescriptionId },
-                ExclusiveStartKey: billPage
-            }));
-            relatedBills.push(...(billRes.Items || []));
-            billPage = billRes.LastEvaluatedKey;
-        } while (billPage);
+        // Find the prescription's bills BEFORE the atomic write so they change together. A failed lookup aborts the
+        // cancel: leaving a bill payable for a cancelled prescription is worse than asking the doctor to retry.
+        const relatedBills = await findPrescriptionBills(docClient, rx.patientId, prescriptionId);
         // The index is eventually consistent. A refill's bill id is derived from the count it consumed, so the
         // current refill bill is read directly in case the index has not caught up with it yet.
         if (rx.status === RX_STATUS.PENDING && typeof rx.refillsRemaining === 'number') {
