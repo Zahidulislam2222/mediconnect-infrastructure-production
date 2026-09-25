@@ -28,17 +28,41 @@ const CLEANUP_SECRET = 'test-cleanup-secret';
 
 // Evaluates only the expression forms the controller uses; anything else throws so it cannot silently pass.
 const resolve = (path, names = {}) => path.startsWith('#') ? names[path] : path;
+/** Splits on a keyword outside parentheses, so `a AND (b OR c)` keeps its group. */
+function splitTop(expression, word) {
+  const parts = []; let depth = 0, last = 0;
+  for (let i = 0; i < expression.length; i++) {
+    if (expression[i] === '(') depth++;
+    else if (expression[i] === ')') depth--;
+    else if (depth === 0 && expression.startsWith(` ${word} `, i)) { parts.push(expression.slice(last, i)); last = i + word.length + 2; i = last - 1; }
+  }
+  parts.push(expression.slice(last));
+  return parts.map(part => part.trim());
+}
+const wrapped = e => {
+  if (!e.startsWith('(') || !e.endsWith(')')) return false;
+  let depth = 0;
+  for (let i = 0; i < e.length; i++) { depth += e[i] === '(' ? 1 : e[i] === ')' ? -1 : 0; if (depth === 0 && i < e.length - 1) return false; }
+  return true;
+};
 function holds(item, expression, names = {}, values = {}) {
   if (!expression) return true;
-  return expression.split(/\s+AND\s+/).every(raw => {
-    const clause = raw.trim();
+  const e = expression.trim();
+  const ors = splitTop(e, 'OR');
+  if (ors.length > 1) return ors.some(part => holds(item, part, names, values));
+  const ands = splitTop(e, 'AND');
+  if (ands.length > 1) return ands.every(part => holds(item, part, names, values));
+  if (wrapped(e)) return holds(item, e.slice(1, -1), names, values);
+  return [e].every(clause => {
     let m;
     if ((m = clause.match(/^attribute_not_exists\((\S+)\)$/))) return item?.[resolve(m[1], names)] === undefined;
     if ((m = clause.match(/^attribute_exists\((\S+)\)$/))) return item?.[resolve(m[1], names)] !== undefined;
     if ((m = clause.match(/^(\S+)\s+IN\s+\(([^)]*)\)$/))) return m[2].split(',').map(v => values[v.trim()]).includes(item?.[resolve(m[1], names)]);
-    if ((m = clause.match(/^(\S+)\s*(=|<>|>)\s*(:\w+)$/))) {
+    if ((m = clause.match(/^(\S+)\s*(=|<>|>|<)\s*(:\w+)$/))) {
       const left = item?.[resolve(m[1], names)], right = values[m[3]];
-      return m[2] === '=' ? left === right : m[2] === '<>' ? left !== undefined && left !== right : left > right;
+      if (m[2] === '=') return left === right;
+      if (m[2] === '<>') return left !== undefined && left !== right;
+      return left !== undefined && (m[2] === '>' ? left > right : left < right);
     }
     throw new Error(`Test double cannot evaluate condition: ${clause}`);
   });
@@ -75,7 +99,7 @@ const appointment = (overrides = {}) => ({
 });
 
 function harness({ region = 'US', appointments = [appointment()], refund = 'succeeded', stripeKey = true, failFinalize = 0,
-  bills = [], beforeFinalize = null } = {}) {
+  bills = [], beforeFinalize = null, providerRefunds = [], commitThenFail = 0, afterStatusQuery = null } = {}) {
   const rows = new Map();
   const key = (table, item) => `${table}|${KEYS[table].map(k => item[k]).join('|')}`;
   const put = (table, item) => rows.set(key(table, item), structuredClone(item));
@@ -90,8 +114,10 @@ function harness({ region = 'US', appointments = [appointment()], refund = 'succ
   put(PATIENTS, { patientId: 'test-patient', name: 'Test Patient', isIdentityVerified: true, email: 'patient@example.test' });
   put(DOCTORS, { doctorId: 'test-doctor', name: 'Test Doctor', verificationStatus: 'APPROVED', consultationFee: 50 });
 
-  const stripe = { refundCalls: [], refunds: new Map(), captured: [] };
-  let finalizeFailures = failFinalize;
+  // refunds: idempotency-key cache (Stripe may prune it after 24h); created: every refund the provider holds.
+  const stripe = { refundCalls: [], refunds: new Map(), created: structuredClone(providerRefunds), captured: [], listCalls: 0 };
+  stripe.expireKeys = () => stripe.refunds.clear();
+  let finalizeFailures = failFinalize, committedFailures = commitThenFail;
   mock.method(aws, 'getSSMParameter', async name => /cleanup/.test(name) ? CLEANUP_SECRET : (stripeKey ? 'sk_test_key' : undefined));
   mock.method(audit, 'writeAuditLog', async () => {});
   mock.method(kms, 'decryptPHI', async fields => Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, String(v).replace(/^phi:kms:/, 'plain-')])));
@@ -109,9 +135,20 @@ function harness({ region = 'US', appointments = [appointment()], refund = 'succ
       // Stripe replays the first result saved for an idempotency key.
       if (options.idempotencyKey && stripe.refunds.has(options.idempotencyKey)) return structuredClone(stripe.refunds.get(options.idempotencyKey));
       if (refund === 'throw') throw Object.assign(new Error('test provider failure'), { type: 'StripeAPIError' });
-      const result = { id: `re_test_${stripe.refunds.size + 1}`, object: 'refund', status: refund, payment_intent: params.payment_intent };
+      if (refund === 'already_refunded') throw Object.assign(new Error('test charge already refunded'), { type: 'StripeInvalidRequestError', code: 'charge_already_refunded' });
+      const result = { id: `re_test_${stripe.created.length + 1}`, object: 'refund', status: refund, payment_intent: params.payment_intent,
+        metadata: params.metadata ?? {} };
+      stripe.created.push(result);
       if (options.idempotencyKey) stripe.refunds.set(options.idempotencyKey, result);
       return structuredClone(result);
+    },
+    // One refund per page, newest first like Stripe, so a reader that ignores has_more misses refunds.
+    list: async ({ payment_intent, starting_after } = {}) => {
+      stripe.listCalls++;
+      await new Promise(done => setImmediate(done));
+      const all = stripe.created.filter(r => r.payment_intent === payment_intent).reverse();
+      const start = starting_after ? all.findIndex(r => r.id === starting_after) + 1 : 0;
+      return { object: 'list', data: all.slice(start, start + 1).map(r => structuredClone(r)), has_more: start + 1 < all.length };
     } };
     this.paymentIntents = {
       create: async () => ({ id: 'pi_new', status: 'requires_capture' }),
@@ -125,7 +162,12 @@ function harness({ region = 'US', appointments = [appointment()], refund = 'succ
     const input = command.input, kind = command.constructor.name;
     if (kind === 'GetCommand') { const item = get(input.TableName, input.Key); return { Item: item && structuredClone(item) }; }
     if (kind === 'QueryCommand') {
-      if (input.IndexName === 'StatusIndex') return { Items: table(APPOINTMENTS).filter(a => a.status === input.ExpressionAttributeValues[':confirmed']).map(a => structuredClone(a)) };
+      if (input.IndexName === 'StatusIndex') {
+        const items = table(APPOINTMENTS).filter(a => a.status === input.ExpressionAttributeValues[':confirmed']).map(a => structuredClone(a));
+        // Runs once, after the (eventually consistent) index read, to model a write the index has not seen yet.
+        if (afterStatusQuery) { const hook = afterStatusQuery; afterStatusQuery = null; hook({ apt: id => get(APPOINTMENTS, { appointmentId: id }) }); }
+        return { Items: items };
+      }
       if (input.IndexName === 'PatientIndex') return { Items: [] };
       throw new Error(`Unexpected query ${input.TableName}/${input.IndexName}`);
     }
@@ -161,6 +203,8 @@ function harness({ region = 'US', appointments = [appointment()], refund = 'succ
         else if (s.op === 'Delete') rows.delete(key(s.spec.TableName, s.k));
         else { const next = s.current ? structuredClone(s.current) : { ...s.k }; apply(next, s.spec.UpdateExpression, s.spec.ExpressionAttributeNames, s.spec.ExpressionAttributeValues); put(s.spec.TableName, next); }
       }
+      // The write committed but the reply was lost, as a network timeout after commit looks to the SDK.
+      if (writesAppointment && committedFailures > 0) { committedFailures--; throw Object.assign(new Error('test socket hang up'), { name: 'TimeoutError' }); }
       return {};
     }
     throw new Error(`Unexpected command ${kind}`);
@@ -184,6 +228,9 @@ function harness({ region = 'US', appointments = [appointment()], refund = 'succ
     doctorCancel: (status = 'CANCELLED', appointmentId = 'test-apt') => invoke(controller.updateAppointment,
       { body: { appointmentId, status }, user: user('test-doctor', { isDoctor: true }) }),
     cleanup: () => invoke(controller.cleanupAppointments, { headers: { 'x-internal-secret': CLEANUP_SECRET }, user: user('SYSTEM') }),
+    receipt: (appointmentId = 'test-apt') => invoke(controller.getReceipt, { params: { appointmentId }, user: user('test-patient') }),
+    doctorUpdate: body => invoke(controller.updateAppointment, { body: { appointmentId: 'test-apt', ...body }, user: user('test-doctor', { isDoctor: true }) }),
+    patientCheckIn: () => invoke(controller.updateAppointment, { body: { appointmentId: 'test-apt', patientArrived: true }, user: user('test-patient') }),
     book: () => invoke(controller.createBooking, { body: { doctorId: 'test-doctor', timeSlot: slot(96 * HOUR), paymentToken: 'pm_test' }, user: user('test-patient') }),
   };
 }
@@ -196,11 +243,12 @@ for (const region of ['US', 'EU']) {
       const result = await h.patientCancel();
       assert.equal(result.status, 200);
       assert.ok(claimsRefund(result.body.message), result.body.message);
-      assert.deepEqual(h.stripe.refundCalls, [{ params: { payment_intent: 'pi_test' }, idempotencyKey: 'appointment-refund:test-apt' }]);
+      assert.deepEqual(h.stripe.refundCalls, [{ params: { payment_intent: 'pi_test', metadata: { appointmentRefund: 'test-apt' } }, idempotencyKey: 'appointment-refund:test-apt' }]);
+      assert.equal(result.body.refundStatus, 'ISSUED'); assert.equal(h.apt().refundStatus, 'ISSUED');
       assert.equal(h.apt().status, 'CANCELLED'); assert.equal(h.apt().cancellationClaim, undefined);
       assert.deepEqual(h.refundRows().map(r => [r.billId, r.status, r.amount]), [['refund-test-apt', 'PROCESSED', -50]]);
       assert.equal(h.lock(), undefined, 'slot released');
-      assert.equal(h.receipts.at(-1).status, 'REFUNDED');
+      assert.deepEqual([h.receipts.at(-1).type, h.receipts.at(-1).status], ['REFUND', 'REFUNDED']);
       assert.deepEqual([...h.regions], [region]);
       // R8: the stored FHIR resource keeps the encrypted names; only the receipt copy is decrypted.
       for (const participant of h.apt().resource.participant) assert.match(participant.actor.display, /^phi:/);
@@ -219,16 +267,24 @@ for (const refund of ['throw', 'failed', 'canceled', 'requires_action']) {
       assert.deepEqual(h.refundRows().map(r => r.status), ['FAILED_REQUIRES_MANUAL_REFUND']);
       assert.ok(!claimsRefund(result.body.message), result.body.message);
       assert.ok(h.notices.every(n => !claimsRefund(n.message)), h.notices.map(n => n.message).join(' | '));
-      assert.notEqual(h.receipts.at(-1).status, 'REFUNDED');
+      // C11: no credit note and no negative amount for money that was not returned.
+      assert.deepEqual([h.receipts.at(-1).type, h.receipts.at(-1).status, h.receipts.at(-1).amount], ['CANCELLATION', 'REFUND UNDER REVIEW', 50]);
+      assert.equal(result.body.refundStatus, 'REQUIRES_MANUAL_REFUND'); assert.equal(h.apt().refundStatus, 'REQUIRES_MANUAL_REFUND');
     } finally { mock.restoreAll(); }
   });
 }
 
-test('a pending refund counts as issued', async () => {
+// C20: Stripe accepted the refund but has not completed it, so it is requested, never "issued".
+test('a pending refund is reported as requested, not issued', async () => {
   try {
     const h = harness({ refund: 'pending' });
-    assert.equal((await h.patientCancel()).status, 200);
+    const result = await h.patientCancel();
+    assert.equal(result.status, 200);
     assert.deepEqual(h.refundRows().map(r => r.status), ['PROCESSED']);
+    assert.equal(result.body.refundStatus, 'PENDING'); assert.equal(h.apt().refundStatus, 'PENDING');
+    assert.match(result.body.message, /refund has been requested/i); assert.ok(!claimsRefund(result.body.message), result.body.message);
+    assert.ok(h.notices.every(n => !claimsRefund(n.message)), h.notices.map(n => n.message).join(' | '));
+    assert.deepEqual([h.receipts.at(-1).type, h.receipts.at(-1).status], ['REFUND', 'REFUND PENDING']);
   } finally { mock.restoreAll(); }
 });
 
@@ -251,6 +307,8 @@ test('an appointment without a real payment is cancelled without a refund record
     assert.equal(h.stripe.refundCalls.length, 0);
     assert.equal(h.refundRows().length, 0);
     assert.ok(!claimsRefund(result.body.message));
+    assert.deepEqual([h.receipts.at(-1).type, h.receipts.at(-1).status], ['CANCELLATION', 'CANCELLED']);
+    assert.equal(h.apt().refundStatus, 'NOT_APPLICABLE');
   } finally { mock.restoreAll(); }
 });
 
@@ -304,6 +362,7 @@ test('a doctor cancellation that cannot be saved fails, and a retry reuses the s
     assert.ok(claimsRefund(retry.body.message));
     assert.equal(new Set(h.stripe.refundCalls.map(c => c.idempotencyKey)).size, 1);
     assert.equal(h.stripe.refunds.size, 1, 'the provider saw one refund');
+    assert.equal(h.stripe.created.length, 1, 'the provider holds one refund');
     assert.equal(h.refundRows().length, 1);
     assert.equal(h.apt().status, 'CANCELLED');
   } finally { mock.restoreAll(); }
@@ -337,7 +396,11 @@ test('cleanup refunds a doctor no-show with its key, keeps the patient no-show p
     const rows = Object.fromEntries(h.refundRows().map(r => [r.billId, r.status]));
     assert.deepEqual(rows, { 'refund-test-no-show': 'FAILED_REQUIRES_MANUAL_REFUND', 'refund-test-doctor-fault': 'PROCESSED' });
     const noShowReceipt = h.receipts.find(r => r.appointmentId === 'test-no-show');
-    assert.notEqual(noShowReceipt.status, 'REFUNDED', 'no refund was made for a patient no-show');
+    assert.deepEqual([noShowReceipt.type, noShowReceipt.status], ['CANCELLATION', 'NO-SHOW'], 'no credit note for a patient no-show');
+    // C13: the no-show refund policy is an owner decision, so the notice must not promise one.
+    const noShowNotice = h.notices.find(n => n.metadata?.appointmentId === 'test-no-show');
+    assert.ok(noShowNotice, 'the patient is told about the no-show');
+    assert.doesNotMatch(noShowNotice.message, /refund/i);
     assert.equal((await h.cleanup()).body.processed, 0, 'nothing is cancelled twice');
   } finally { mock.restoreAll(); }
 });
@@ -366,15 +429,181 @@ test('a cancellation whose claim was taken over is never finalized over the new 
   }
 });
 
-test('an existing refund record is never overwritten', async () => {
-  const existing = { billId: 'refund-test-apt', referenceId: 'test-apt', type: 'REFUND', status: 'PROCESSED', amount: -50, note: 'test-operator-record' };
+// C19: a refund already recorded for this appointment decides the outcome; nothing is refunded or recorded twice.
+test('an existing refund record is reused, never overwritten or refunded again', async () => {
+  for (const [status, refundStatus] of [['PROCESSED', 'ISSUED'], ['FAILED_REQUIRES_MANUAL_REFUND', 'REQUIRES_MANUAL_REFUND']]) {
+    const existing = { billId: 'refund-test-apt', referenceId: 'test-apt', type: 'REFUND', status, amount: -50, note: 'test-operator-record' };
+    for (const cancel of ['patientCancel', 'doctorCancel']) {
+      try {
+        const h = harness({ bills: [existing] });
+        const result = await h[cancel]();
+        assert.equal(result.status, 200, `${cancel}/${status}`);
+        assert.equal(h.stripe.refundCalls.length, 0, `${cancel}/${status}: no provider call`);
+        assert.deepEqual(h.refundRows(), [existing], `${cancel}/${status}: ledger unchanged`);
+        assert.equal(h.apt().status, 'CANCELLED');
+        assert.equal(result.body.refundStatus, refundStatus, `${cancel}/${status}`);
+        assert.equal(claimsRefund(result.body.message), status === 'PROCESSED', result.body.message);
+      } finally { mock.restoreAll(); }
+    }
+  }
+});
+
+// ── Independent review of 535263b (C11-C21) ──────────────────────────────────────────────────────────────────────
+
+// C11: a stored receipt request for a cancelled appointment follows what actually happened to the money.
+test('a receipt for a cancelled appointment is a credit note only when the refund was issued', async () => {
+  for (const [label, overrides, expected] of [
+    ['issued refund', { status: 'CANCELLED', refundStatus: 'ISSUED' }, ['REFUND', 'REFUNDED', 50]],
+    ['manual refund', { status: 'CANCELLED', refundStatus: 'REQUIRES_MANUAL_REFUND' }, ['CANCELLATION', 'REFUND UNDER REVIEW', 50]],
+    ['legacy cancellation', { status: 'CANCELLED' }, ['CANCELLATION', 'CANCELLED', 50]],
+    ['legacy no-show without an amount', { status: 'CANCELLED_NO_SHOW', amountPaid: undefined }, ['CANCELLATION', 'CANCELLED', 0]],
+    ['booking without an amount', { amountPaid: undefined }, ['BOOKING', 'PAID', 0]],
+  ]) {
+    try {
+      const h = harness({ appointments: [appointment(overrides)] });
+      const result = await h.receipt();
+      assert.equal(result.status, 200, label);
+      const r = h.receipts.at(-1);
+      assert.deepEqual([r.type, r.status, r.amount], expected, label);
+    } finally { mock.restoreAll(); }
+  }
+});
+
+// C14: a no-show without a real payment leaves no refund-review row.
+test('a no-show without a real payment writes no refund-review row', async () => {
+  for (const overrides of [{ paymentId: 'TEST_MODE' }, { paymentId: undefined }, { amountPaid: 0 }]) {
+    try {
+      const h = harness({ appointments: [appointment({ timeSlot: slot(-20 * 60_000), ...overrides })] });
+      assert.equal((await h.cleanup()).body.processed, 1, JSON.stringify(overrides));
+      assert.equal(h.apt().status, 'CANCELLED_NO_SHOW');
+      assert.equal(h.refundRows().length, 0, JSON.stringify(overrides));
+    } finally { mock.restoreAll(); }
+  }
+});
+
+// C15: a claim abandoned by a crashed request expires; a live one still blocks.
+test('an expired cancellation claim is taken over and refunded with the same key; a live one is respected', async () => {
+  const claimedAt = offset => new Date(Date.now() + offset).toISOString();
+  for (const cancel of ['patientCancel', 'doctorCancel', 'cleanup']) {
+    try {
+      const timeSlot = cancel === 'cleanup' ? slot(-40 * 60_000) : slot(72 * HOUR);
+      const h = harness({ appointments: [appointment({ timeSlot, patientArrived: cancel === 'cleanup' ? true : undefined,
+        cancellationClaim: 'test-crashed-claim', cancellationClaimedAt: claimedAt(-2 * HOUR) })] });
+      const result = await h[cancel]();
+      assert.equal(result.status, 200, cancel);
+      assert.equal(h.apt().cancellationClaim, undefined, `${cancel}: finalized`);
+      assert.match(h.apt().status, /^CANCELLED/, cancel);
+      assert.deepEqual(h.stripe.refundCalls.map(c => c.idempotencyKey), ['appointment-refund:test-apt'], cancel);
+    } finally { mock.restoreAll(); }
+    try {
+      const h = harness({ appointments: [appointment({ cancellationClaim: 'test-live-claim', cancellationClaimedAt: claimedAt(-60_000) })] });
+      if (cancel === 'cleanup') continue;
+      assert.equal((await h[cancel]()).status, 409, `${cancel}: live claim`);
+      assert.equal(h.stripe.refundCalls.length, 0);
+      assert.equal(h.apt().cancellationClaim, 'test-live-claim');
+    } finally { mock.restoreAll(); }
+  }
+});
+
+// C16: the charge.refunded webhook marks the appointment REFUNDED; it must still be possible to finish cancelling it.
+test('a refunded appointment whose cancellation was not saved can still be cancelled, without a second refund', async () => {
   for (const cancel of ['patientCancel', 'doctorCancel']) {
     try {
-      const h = harness({ bills: [existing] });
+      const h = harness({ failFinalize: 1 });
       assert.equal((await h[cancel]()).status, 500, cancel);
-      assert.deepEqual(h.refundRows(), [existing], `${cancel}: ledger unchanged`);
-      assert.equal(h.apt().status, 'CONFIRMED');
-      assert.equal(h.apt().cancellationClaim, undefined, `${cancel}: claim released for operator review and retry`);
+      h.apt().status = 'REFUNDED'; // what handleChargeRefunded writes for our own refund
+      const retry = await h[cancel]();
+      assert.equal(retry.status, 200, cancel);
+      assert.equal(h.apt().status, 'CANCELLED');
+      assert.equal(h.stripe.created.length, 1, `${cancel}: one refund at the provider`);
+      assert.equal(h.refundRows().length, 1);
+      assert.equal(h.lock(), undefined, `${cancel}: slot released`);
+    } finally { mock.restoreAll(); }
+  }
+});
+
+// C17: once Stripe forgets the key (after 24h), our own refund is still found by its metadata, across list pages.
+test('a retry after the idempotency key expired reuses the refund already made', async () => {
+  try {
+    const other = { id: 're_test_dashboard_partial', object: 'refund', status: 'succeeded', payment_intent: 'pi_test', metadata: {} };
+    const h = harness({ failFinalize: 1 });
+    assert.equal((await h.doctorCancel()).status, 500);
+    h.stripe.expireKeys();
+    h.stripe.created.push(other); // a newer unrelated refund, so ours is on the second page
+    const retry = await h.doctorCancel();
+    assert.equal(retry.status, 200);
+    assert.equal(h.stripe.created.length, 2, 'no second appointment refund');
+    assert.equal(h.apt().refundId, 're_test_1');
+    assert.equal(retry.body.refundStatus, 'ISSUED');
+  } finally { mock.restoreAll(); }
+});
+
+// C17: a charge someone else already refunded in full has its money back; the outcome follows the provider's record.
+test('a charge that was already refunded elsewhere is reported from the provider record', async () => {
+  for (const [label, providerRefunds, expected] of [
+    ['refunded elsewhere', [{ id: 're_test_erasure', object: 'refund', status: 'succeeded', payment_intent: 'pi_test', metadata: {} }], ['ISSUED', 'PROCESSED']],
+    ['no refund on record', [], ['REQUIRES_MANUAL_REFUND', 'FAILED_REQUIRES_MANUAL_REFUND']],
+  ]) {
+    try {
+      const h = harness({ refund: 'already_refunded', providerRefunds });
+      const result = await h.patientCancel();
+      assert.equal(result.status, 200, label);
+      assert.equal(result.body.refundStatus, expected[0], label);
+      assert.deepEqual(h.refundRows().map(r => r.status), [expected[1]], label);
+    } finally { mock.restoreAll(); }
+  }
+});
+
+// C18: an account erasure that lands during a cancellation keeps the anonymized record.
+test('an erasure during a cancellation is never overwritten with the pre-erasure record', async () => {
+  for (const cancel of ['patientCancel', 'doctorCancel']) {
+    try {
+      const h = harness({ beforeFinalize: ({ apt }) => Object.assign(apt('test-apt'), {
+        status: 'CANCELLED', patientName: 'ANONYMIZED_GDPR', resource: { resourceType: 'Appointment', status: 'cancelled', participant: [] } }) });
+      await h[cancel]();
+      assert.equal(h.apt().patientName, 'ANONYMIZED_GDPR', cancel);
+      assert.deepEqual(h.apt().resource.participant, [], `${cancel}: erased participants stay erased`);
+      assert.equal(h.refundRows().length, 0, cancel);
+    } finally { mock.restoreAll(); }
+  }
+});
+
+// C18: while a cancellation is in flight nothing else may change the appointment it is cancelling.
+test('status changes and check-in wait for a live cancellation; an expired claim does not block them', async () => {
+  const claimedAt = offset => new Date(Date.now() + offset).toISOString();
+  for (const [label, act] of [['doctor status', h => h.doctorUpdate({ status: 'IN_PROGRESS' })], ['check-in', h => h.patientCheckIn()]]) {
+    try {
+      const h = harness({ appointments: [appointment({ cancellationClaim: 'test-live-claim', cancellationClaimedAt: claimedAt(-60_000) })] });
+      assert.equal((await act(h)).status, 409, label);
+      assert.equal(h.apt().status, 'CONFIRMED'); assert.equal(h.apt().patientArrived, undefined);
+    } finally { mock.restoreAll(); }
+    try {
+      const h = harness({ appointments: [appointment({ cancellationClaim: 'test-crashed-claim', cancellationClaimedAt: claimedAt(-2 * HOUR) })] });
+      assert.equal((await act(h)).status, 200, `${label}: expired claim`);
+    } finally { mock.restoreAll(); }
+  }
+});
+
+// C18: cleanup decides no-show vs doctor fault from an index that may lag; the claim pins the fact it decided from.
+test('cleanup never records a no-show for a patient who checked in after the index was read', async () => {
+  try {
+    const h = harness({ appointments: [appointment({ timeSlot: slot(-20 * 60_000) })],
+      afterStatusQuery: ({ apt }) => { apt('test-apt').patientArrived = true; } });
+    assert.equal((await h.cleanup()).body.processed, 0);
+    assert.equal(h.apt().status, 'CONFIRMED');
+    assert.equal(h.apt().cancellationClaim, undefined);
+  } finally { mock.restoreAll(); }
+});
+
+// C21: a save that committed but whose reply was lost is a completed cancellation, not a failure.
+test('a cancellation whose save committed but timed out reports success', async () => {
+  for (const cancel of ['patientCancel', 'doctorCancel']) {
+    try {
+      const h = harness({ commitThenFail: 1 });
+      const result = await h[cancel]();
+      assert.equal(result.status, 200, cancel);
+      assert.equal(h.apt().status, 'CANCELLED');
+      assert.equal(h.refundRows().length, 1);
     } finally { mock.restoreAll(); }
   }
 });

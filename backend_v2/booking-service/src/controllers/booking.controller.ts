@@ -14,7 +14,10 @@ import { pushAppointmentToBigQuery, pushRevenueToBigQuery } from './billing.cont
 import { sendNotification } from '../../../shared/notifications';
 import { publishEvent, EventType } from '../../../shared/event-bus';
 
-import { setting } from '../../../shared/settings';
+import { getCancellationSettings, setting } from '../../../shared/settings';
+import { ERASED_MARKER } from '../../../shared/erasure';
+import { CANCELLATION_COPY, RECEIPT_STATUS, REFUND_NOTICES, type RefundStatus } from '../content/cancellation';
+import { CLEANUP_CANCELLABLE, DOCTOR_CANCELLABLE, PATIENT_CANCELLABLE } from '../cancellation-policy';
 import {
     PlanId,
     SubscriptionStatus,
@@ -440,7 +443,7 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         // ORIGINAL: Cancelled the payment hold (which hadn't been captured yet).
         // FIX: Now that capture happens first, we must REFUND (not cancel).
         logger.error("[BOOKING] CRITICAL: DB transaction failed after payment capture. Issuing refund.", { error: dbError.message });
-        let refundIssued = false;
+        let compensationRefund: RefundStatus = "REQUIRES_MANUAL_REFUND";
         if (stripeInstance && paymentIntentId) {
             try {
                 // A retried compensation must never refund twice; Stripe replays the first result for this key.
@@ -448,8 +451,8 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
                     { payment_intent: paymentIntentId },
                     { idempotencyKey: `booking-compensation-refund:${paymentIntentId}` }
                 );
-                refundIssued = ISSUED_REFUND_STATUSES.has(refund.status ?? '');
-                if (!refundIssued) logger.error("CRITICAL ESCALATION: Booking compensation refund was not issued. Manual intervention required.", { appointmentId, paymentIntentId, refundStatus: refund.status });
+                compensationRefund = PROVIDER_REFUND_STATUS[refund.status ?? ''] ?? "REQUIRES_MANUAL_REFUND";
+                if (compensationRefund === "REQUIRES_MANUAL_REFUND") logger.error("CRITICAL ESCALATION: Booking compensation refund was not issued. Manual intervention required.", { appointmentId, paymentIntentId, refundStatus: refund.status });
                 else logger.info(`Refund issued for failed booking: ${paymentIntentId}`);
             } catch (refundError) {
                 // CRITICAL: Money taken but DB and refund both failed
@@ -463,7 +466,8 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
             try { await docClient.send(new DeleteCommand({ TableName: TABLE_LOCKS, Key: { lockId: lockKey } })); } catch { logger.warn('BOOKING_COMPENSATION_FAILED'); }
         }
         const outcome = !paymentIntentId ? "Your booking was not completed."
-            : refundIssued ? "Your payment has been refunded."
+            : compensationRefund === "ISSUED" ? "Your payment has been refunded."
+            : compensationRefund === "PENDING" ? "A refund of your payment has been requested and is being processed."
             : "Your booking was not completed and the automatic refund did not go through. Support will refund your payment.";
         res.status(500).json({ error: `System Error. ${outcome}` });
     }
@@ -644,14 +648,14 @@ export const cleanupAppointments = catchAsync(async (req: Request, res: Response
 
             // Each appointment stands alone: one that fails is logged and retried by the next run.
             try {
-                const claim = await claimCancellation(docClient, apt.appointmentId, CLEANUP_CANCELLABLE);
-                if (!claim) continue; // cancelled or claimed by someone else meanwhile
-                if (isNoShow) {
-                    // Existing policy: a patient no-show is not refunded automatically; paid ones are queued for review.
-                    await cancelAppointment(apt, "CANCELLED_NO_SHOW", { refundId: "FAILED", ledgerStatus: apt.amountPaid > 0 ? MANUAL_REFUND : null }, region, claim);
-                } else {
-                    await cancelAppointment(apt, "CANCELLED_DOCTOR_FAULT", await refundAppointmentPayment(apt.appointmentId, apt, region), region, claim);
-                }
+                // The index may lag a check-in, so the claim pins the arrival fact this decision was made from.
+                const arrival = apt.patientArrived === undefined
+                    ? { expression: "attribute_not_exists(patientArrived)", values: {} }
+                    : { expression: "patientArrived = :arrived", values: { ":arrived": apt.patientArrived } };
+                const claim = await claimCancellation(docClient, apt.appointmentId, CLEANUP_CANCELLABLE, arrival);
+                if (!claim) continue; // cancelled, checked in, or claimed by someone else meanwhile
+                const status = isNoShow ? "CANCELLED_NO_SHOW" : "CANCELLED_DOCTOR_FAULT";
+                await cancelAppointment(apt, status, await decideRefund(docClient, apt, region, isNoShow ? "NO_SHOW" : "REFUND"), region, claim);
                 processed++;
             } catch (e: any) {
                 logger.error("[BOOKING] Cleanup could not cancel appointment", { appointmentId: apt.appointmentId, error: e.message });
@@ -714,11 +718,10 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
 
     // 1. Claim the cancellation so repeated or concurrent requests cannot refund twice.
     const claim = await claimCancellation(docClient, appointmentId, PATIENT_CANCELLABLE);
-    if (!claim) return res.status(409).json({ message: "This appointment is already cancelled or can no longer be cancelled." });
+    if (!claim) return res.status(409).json({ message: CANCELLATION_COPY.conflict });
 
     // 2. Refund Logic
-    const refund = await refundAppointmentPayment(appointmentId, apt, region);
-    const txStatus = refund.ledgerStatus;
+    const refund = await decideRefund(docClient, apt, region, "REFUND");
 
     // 3. Update Appointment Status
     const fhirResource = storedResource;
@@ -732,53 +735,9 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
 
     // 3b. Atomic: Update appointment status + create refund transaction (only when a payment was taken)
     const transactionId = refundBillId(appointmentId);
-
-    const transactItems: any[] = [
-        {
-            Update: {
-                TableName: TABLE_APPOINTMENTS, Key: { appointmentId },
-                UpdateExpression: "set #s = :s, #res = :resource, refundId = :r REMOVE cancellationClaim, cancellationClaimedAt",
-                ConditionExpression: "cancellationClaim = :claim",
-                ExpressionAttributeNames: { "#s": "status", "#res": "resource" },
-                ExpressionAttributeValues: { ":s": "CANCELLED", ":resource": fhirResource || null, ":r": refund.refundId, ":claim": claim }
-            }
-        }
-    ];
-
-    if (txStatus) {
-        transactItems.push({
-            Put: {
-                TableName: TABLE_TRANSACTIONS,
-                ConditionExpression: "attribute_not_exists(billId)",
-                Item: {
-                    billId: transactionId, referenceId: appointmentId,
-                    patientId, doctorId: apt.doctorId || "UNKNOWN",
-                    type: "REFUND", amount: -(apt.amountPaid || 0),
-                    currency: "USD", status: txStatus,
-                    createdAt: new Date().toISOString(),
-                    description: txStatus === "PROCESSED" ? "User requested cancellation" : "Refund Failed - Contact Support"
-                }
-            }
-        });
-    }
-
-    // Include lock release in the atomic transaction to prevent orphaned locks
-    if (apt.doctorId && apt.timeSlot) {
-        const lockKey = `${apt.doctorId}#${normalizeTimeSlot(apt.timeSlot)}`;
-        transactItems.push({
-            Delete: {
-                TableName: TABLE_LOCKS,
-                Key: { lockId: lockKey }
-            }
-        });
-    }
-
-    try {
-        await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
-    } catch (finalizeError) {
-        await releaseCancellationClaim(docClient, appointmentId, claim);
-        throw finalizeError;
-    }
+    const ledgerDescription = refund.refundStatus === "REQUIRES_MANUAL_REFUND"
+        ? CANCELLATION_COPY.ledgerPatient.manual : CANCELLATION_COPY.ledgerPatient.refunded;
+    await finalizeCancellation(docClient, apt, { status: "CANCELLED", resource: fhirResource, refund, claim, ledgerDescription });
 
     if (apt.googleEventId && apt.doctorId) {
         deleteFromGoogleCalendar(apt.doctorId, apt.googleEventId, region).catch(e => logger.error("[BOOKING] Calendar delete failed on user cancel", { error: e.message }));
@@ -835,10 +794,9 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
             billId: apt.paymentId || appointmentId,
             patientName: apt.patientName,
             doctorName: apt.doctorName,
-            amount: apt.amountPaid || 0,
+            amount: apt.amountPaid ?? 0,
             date: new Date().toISOString(),
-            status: txStatus === "PROCESSED" ? "REFUNDED" : "CANCELLED",
-            type: "REFUND"
+            ...receiptFor({ status: "CANCELLED", refundStatus: refund.refundStatus })
         }, region).catch(e => logger.error("[BOOKING] Auto-refund PDF generation failed", { error: e.message }));
     } catch (e) { logger.error("[BOOKING] Audit log failed for user cancellation"); }
 
@@ -854,13 +812,13 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
     }, region).catch(e => logger.error("[BOOKING] BigQuery cancellation sync failed", { error: e.message }));
 
     // Push refund revenue to BigQuery analytics
-    if (txStatus) {
+    if (refund.recordLedger) {
         pushRevenueToBigQuery({
             billId: transactionId,
             patientId: apt.patientId,
             doctorId: apt.doctorId || "UNKNOWN",
             amount: -(apt.amountPaid || 0),
-            status: txStatus === "PROCESSED" ? "REFUNDED" : "REFUND_FAILED",
+            status: REVENUE_STATUS[refund.refundStatus],
             type: "REFUND",
         }, region).catch(e => logger.error("[BOOKING] BigQuery refund revenue sync failed", { error: e.message }));
     }
@@ -869,8 +827,8 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
     sendNotification({
         region,
         recipientEmail: (req as any).user?.email,
-        subject: 'Booking Cancelled',
-        message: `Your appointment (${appointmentId}) has been cancelled. ${refundNotice(txStatus)}`.trim(),
+        subject: CANCELLATION_COPY.noticeSubjectPatient,
+        message: cancellationNotice(appointmentId, "CANCELLED", refund.refundStatus),
         type: 'BOOKING_CANCELLATION',
         metadata: { appointmentId }
     }).catch(() => {});
@@ -878,7 +836,7 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
     // Event bus: appointment cancelled
     publishEvent(EventType.APPOINTMENT_CANCELLED, { appointmentId, patientId: apt.patientId, doctorId: apt.doctorId, reason: "Patient cancellation" }, region).catch(() => {});
 
-    res.status(200).json({ message: `Appointment cancelled. ${refundNotice(txStatus)}`.trim(), refundStatus: refundStatusOf(txStatus) });
+    res.status(200).json({ message: `${CANCELLATION_COPY.patientResponse} ${REFUND_NOTICES[refund.refundStatus]}`.trim(), refundStatus: refund.refundStatus });
 });
 
 export const updateAppointment = catchAsync(async (req: Request, res: Response) => {
@@ -907,14 +865,14 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
 
     if (status === 'CANCELLED' || status === 'CANCELLED_NO_SHOW') {
         const claim = await claimCancellation(docClient, appointmentId, DOCTOR_CANCELLABLE);
-        if (!claim) return res.status(409).json({ message: "This appointment is already cancelled or can no longer be cancelled." });
+        if (!claim) return res.status(409).json({ message: CANCELLATION_COPY.conflict });
 
-        const refund = await refundAppointmentPayment(appointmentId, existing.Item, region);
+        const refund = await decideRefund(docClient, existing.Item, region, "REFUND");
         await cancelAppointment(existing.Item, status, refund, region, claim);
 
         await writeAuditLog(requesterId || "SYSTEM", existing.Item.patientId, "CANCEL_APPOINTMENT_DOCTOR", `Doctor cancelled appointment ${appointmentId}`, { region, ipAddress: req.ip });
 
-        return res.status(200).json({ message: `Appointment cancelled and schedule unlocked. ${refundNotice(refund.ledgerStatus)}`.trim(), refundStatus: refundStatusOf(refund.ledgerStatus) });
+        return res.status(200).json({ message: `${CANCELLATION_COPY.doctorResponse} ${REFUND_NOTICES[refund.refundStatus]}`.trim(), refundStatus: refund.refundStatus });
     }
 
     let updateExpression = "set lastUpdated = :now";
@@ -932,12 +890,23 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
         expressionAttributeValues[":s"] = status;
     }
 
-    await docClient.send(new UpdateCommand({
-        TableName: TABLE_APPOINTMENTS, Key: { appointmentId },
-        UpdateExpression: updateExpression,
-        ExpressionAttributeNames: Object.keys(expressionAttributeNames).length > 0 ? expressionAttributeNames : undefined,
-        ExpressionAttributeValues: expressionAttributeValues
-    }));
+    // A live cancellation owns the appointment until it finishes; only an abandoned (expired) claim may be written over.
+    expressionAttributeValues[":staleClaim"] = staleClaimCutoff();
+    try {
+        await docClient.send(new UpdateCommand({
+            TableName: TABLE_APPOINTMENTS, Key: { appointmentId },
+            UpdateExpression: updateExpression,
+            ConditionExpression: CLAIM_FREE,
+            ExpressionAttributeNames: Object.keys(expressionAttributeNames).length > 0 ? expressionAttributeNames : undefined,
+            ExpressionAttributeValues: expressionAttributeValues
+        }));
+    } catch (e) {
+        if ((e as { name?: string })?.name === "ConditionalCheckFailedException") return res.status(409).json({ message: CANCELLATION_COPY.changeConflict });
+        throw e;
+    }
+    if (existing.Item.cancellationClaim) {
+        logger.error("[BOOKING] Appointment changed over an abandoned cancellation claim; check for an unrecorded refund", { appointmentId });
+    }
 
     let actionType = "UPDATE_APPOINTMENT";
     let actionDesc = `Updated appointment ${appointmentId}`;
@@ -963,42 +932,65 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
     res.status(200).json({ message: "Appointment updated successfully" });
 });
 // ─── Cancellation and refund helpers ─────────────────────────────────────────
-// Every cancellation path claims the appointment first, so only one caller ever talks to the payment provider,
-// and records exactly one refund row under a deterministic id. A refund counts as issued only when Stripe reports
-// it succeeded or pending; anything else is queued for a manual refund and never described as refunded.
-const PATIENT_CANCELLABLE = ["CONFIRMED"];
-const DOCTOR_CANCELLABLE = ["CONFIRMED", "IN_PROGRESS"];
-const CLEANUP_CANCELLABLE = ["CONFIRMED"];
-const ISSUED_REFUND_STATUSES = new Set(["succeeded", "pending"]);
+// Every cancellation path claims the appointment first, so only one live caller talks to the payment provider, and
+// records at most one refund row under a deterministic id. A refund counts as issued only when Stripe reports it
+// succeeded and as requested while it is pending; anything else is queued for a manual refund and never described as
+// refunded. A claim whose request died expires after the configured TTL and may be taken over; the refund keeps its
+// idempotency key and metadata, so the taker finds the refund already made instead of making another.
 const MANUAL_REFUND = "FAILED_REQUIRES_MANUAL_REFUND";
-type LedgerStatus = "PROCESSED" | typeof MANUAL_REFUND | null;
-type RefundOutcome = { refundId: string; ledgerStatus: LedgerStatus };
+type RefundOutcome = { refundId: string; refundStatus: RefundStatus; recordLedger: boolean };
+const PROVIDER_REFUND_STATUS: Record<string, RefundStatus> = { succeeded: "ISSUED", pending: "PENDING" };
+const RECORDED_REFUND_STATUSES: readonly string[] = ["ISSUED", "PENDING", "REQUIRES_MANUAL_REFUND"];
+const REVENUE_STATUS: Record<RefundStatus, string> = {
+    ISSUED: "REFUNDED", PENDING: "REFUND_PENDING", REQUIRES_MANUAL_REFUND: "REFUND_FAILED", NOT_APPLICABLE: "NOT_APPLICABLE"
+};
+const ledgerStatusOf = (refundStatus: RefundStatus) =>
+    refundStatus === "ISSUED" || refundStatus === "PENDING" ? "PROCESSED" : MANUAL_REFUND;
 
 const refundBillId = (appointmentId: string) => `refund-${appointmentId}`;
 type DocClient = ReturnType<typeof getRegionalClient>;
 type PaymentRecord = { paymentId?: string; amountPaid?: number };
 const errorMessage = (e: unknown) => e instanceof Error ? e.message : String(e);
+const hasRealPayment = (apt: PaymentRecord) => !!apt.paymentId && apt.paymentId !== "TEST_MODE" && (apt.amountPaid ?? 0) > 0;
 
-function refundNotice(ledgerStatus: LedgerStatus): string {
-    if (ledgerStatus === "PROCESSED") return "A refund has been issued.";
-    if (ledgerStatus === MANUAL_REFUND) return "Your refund could not be completed automatically; our support team will process it.";
-    return "";
+/** True for writes that may proceed: no cancellation claim, or only one abandoned past its TTL. */
+const CLAIM_FREE = "(attribute_not_exists(cancellationClaim) OR cancellationClaimedAt < :staleClaim)";
+const staleClaimCutoff = () => new Date(Date.now() - getCancellationSettings().claimTtlSeconds * 1000).toISOString();
+
+/** What the patient is told. A no-show notice promises nothing about money that was not actually returned. */
+function cancellationNotice(appointmentId: string, status: string, refundStatus: RefundStatus): string {
+    const returned = refundStatus === "ISSUED" || refundStatus === "PENDING";
+    const lead = status === "CANCELLED_NO_SHOW" ? CANCELLATION_COPY.noShowNotice(appointmentId) : CANCELLATION_COPY.notice(appointmentId);
+    return status === "CANCELLED_NO_SHOW" && !returned ? lead : `${lead} ${REFUND_NOTICES[refundStatus]}`.trim();
 }
 
-function refundStatusOf(ledgerStatus: LedgerStatus): string {
-    return ledgerStatus === "PROCESSED" ? "ISSUED" : ledgerStatus === MANUAL_REFUND ? "REQUIRES_MANUAL_REFUND" : "NOT_APPLICABLE";
+/** What a receipt may say about an appointment: a credit note only for money actually returned or on its way back. */
+function receiptFor(apt: { status?: string; refundStatus?: string }): { type: "BOOKING" | "REFUND" | "CANCELLATION"; status: string } {
+    if (apt.status === "REFUNDED") return { type: "REFUND", status: RECEIPT_STATUS.refunded };
+    if (!String(apt.status ?? "").includes("CANCELLED")) return { type: "BOOKING", status: RECEIPT_STATUS.paid };
+    if (apt.refundStatus === "ISSUED") return { type: "REFUND", status: RECEIPT_STATUS.refunded };
+    if (apt.refundStatus === "PENDING") return { type: "REFUND", status: RECEIPT_STATUS.refundPending };
+    // Cancellations recorded before refundStatus existed cannot prove a refund, so they never get a credit note.
+    if (apt.refundStatus === undefined) return { type: "CANCELLATION", status: RECEIPT_STATUS.cancelled };
+    if (apt.status === "CANCELLED_NO_SHOW") return { type: "CANCELLATION", status: RECEIPT_STATUS.noShow };
+    if (apt.refundStatus === "REQUIRES_MANUAL_REFUND") return { type: "CANCELLATION", status: RECEIPT_STATUS.underReview };
+    return { type: "CANCELLATION", status: RECEIPT_STATUS.cancelled };
 }
 
-async function claimCancellation(docClient: DocClient, appointmentId: string, allowedStatuses: string[]): Promise<string | null> {
+/** A condition the claim must also hold, pinning a fact the caller decided from. */
+type ClaimFact = { expression: string; values: Record<string, unknown> };
+
+async function claimCancellation(docClient: DocClient, appointmentId: string, allowedStatuses: readonly string[], fact?: ClaimFact): Promise<string | null> {
     const claim = randomUUID();
     const statusValues = Object.fromEntries(allowedStatuses.map((status, i) => [`:allowed${i}`, status]));
+    const conditions = [`#s IN (${Object.keys(statusValues).join(", ")})`, CLAIM_FREE, ...(fact ? [`(${fact.expression})`] : [])];
     try {
         await docClient.send(new UpdateCommand({
             TableName: TABLE_APPOINTMENTS, Key: { appointmentId },
             UpdateExpression: "SET cancellationClaim = :claim, cancellationClaimedAt = :now",
-            ConditionExpression: `#s IN (${Object.keys(statusValues).join(", ")}) AND attribute_not_exists(cancellationClaim)`,
+            ConditionExpression: conditions.join(" AND "),
             ExpressionAttributeNames: { "#s": "status" },
-            ExpressionAttributeValues: { ":claim": claim, ":now": new Date().toISOString(), ...statusValues }
+            ExpressionAttributeValues: { ":claim": claim, ":now": new Date().toISOString(), ":staleClaim": staleClaimCutoff(), ...statusValues, ...fact?.values }
         }));
         return claim;
     } catch (e) {
@@ -1017,103 +1009,143 @@ async function releaseCancellationClaim(docClient: DocClient, appointmentId: str
     })).catch(() => logger.error("[BOOKING] Cancellation claim could not be released; operator review required", { appointmentId }));
 }
 
-async function refundAppointmentPayment(appointmentId: string, apt: PaymentRecord, region: string): Promise<RefundOutcome> {
-    if (!apt.paymentId || apt.paymentId === "TEST_MODE" || !((apt.amountPaid ?? 0) > 0)) {
-        return { refundId: "NOT_APPLICABLE", ledgerStatus: null };
+/**
+ * What happens to the money of a claimed cancellation. A refund row already recorded for the appointment decides the
+ * outcome, so nothing is refunded or recorded twice. A patient no-show is not refunded automatically (existing
+ * policy); a paid one is queued for staff review.
+ */
+async function decideRefund(docClient: DocClient, apt: Record<string, any>, region: string, policy: "REFUND" | "NO_SHOW"): Promise<RefundOutcome> {
+    const recorded = (await docClient.send(new GetCommand({
+        TableName: TABLE_TRANSACTIONS, Key: { billId: refundBillId(apt.appointmentId) }, ConsistentRead: true
+    }))).Item;
+    if (recorded) {
+        const refundStatus: RefundStatus = RECORDED_REFUND_STATUSES.includes(recorded.refundStatus) ? recorded.refundStatus
+            : recorded.status === "PROCESSED" ? "ISSUED" : "REQUIRES_MANUAL_REFUND";
+        return { refundId: typeof recorded.refundId === "string" ? recorded.refundId : "RECORDED", refundStatus, recordLedger: false };
     }
+    if (!hasRealPayment(apt)) return { refundId: "NOT_APPLICABLE", refundStatus: "NOT_APPLICABLE", recordLedger: false };
+    if (policy === "NO_SHOW") return { refundId: "NOT_REFUNDED", refundStatus: "REQUIRES_MANUAL_REFUND", recordLedger: true };
+    return { ...await refundAppointmentPayment(apt.appointmentId, apt, region), recordLedger: true };
+}
+
+async function refundAppointmentPayment(appointmentId: string, apt: PaymentRecord, region: string): Promise<Omit<RefundOutcome, "recordLedger">> {
     try {
         const stripeKey = await getSSMParameter(STRIPE_SECRET_NAME, region, true);
-        if (!stripeKey) throw new Error("Payment provider key unavailable");
-        const refund = await new Stripe(stripeKey).refunds.create(
-            { payment_intent: apt.paymentId },
-            { idempotencyKey: `appointment-refund:${appointmentId}` }
-        );
-        const issued = ISSUED_REFUND_STATUSES.has(refund.status ?? "");
-        if (!issued) logger.error("[BOOKING] Refund not issued; manual refund required", { appointmentId, refundStatus: refund.status });
-        return { refundId: refund.id, ledgerStatus: issued ? "PROCESSED" : MANUAL_REFUND };
+        if (!stripeKey || !apt.paymentId) throw new Error("Payment provider key unavailable");
+        const stripe = new Stripe(stripeKey);
+        const refund = (await listPaymentRefunds(stripe, apt.paymentId)).find(r => r.metadata?.appointmentRefund === appointmentId)
+            ?? await createAppointmentRefund(stripe, apt.paymentId, appointmentId);
+        const refundStatus = PROVIDER_REFUND_STATUS[refund.status ?? ""] ?? "REQUIRES_MANUAL_REFUND";
+        if (refundStatus === "REQUIRES_MANUAL_REFUND") logger.error("[BOOKING] Refund not issued; manual refund required", { appointmentId, refundStatus: refund.status });
+        return { refundId: refund.id, refundStatus };
     } catch (e) {
         logger.error("[BOOKING] Refund failed; manual refund required", { appointmentId, error: errorMessage(e) });
-        return { refundId: "REFUND_FAILED", ledgerStatus: MANUAL_REFUND };
+        return { refundId: "REFUND_FAILED", refundStatus: "REQUIRES_MANUAL_REFUND" };
+    }
+}
+
+/** Every refund on a payment. Stripe's idempotency cache can expire, so our own refund is found by its metadata. */
+async function listPaymentRefunds(stripe: Stripe, paymentIntent: string): Promise<Stripe.Refund[]> {
+    const refunds: Stripe.Refund[] = [];
+    let cursor: string | undefined;
+    do {
+        const page = await stripe.refunds.list({ payment_intent: paymentIntent, starting_after: cursor });
+        refunds.push(...page.data);
+        const next = page.has_more ? page.data.at(-1)?.id : undefined;
+        if (page.has_more && (!next || next === cursor)) throw new Error("Refund list pagination stalled");
+        cursor = next;
+    } while (cursor);
+    return refunds;
+}
+
+async function createAppointmentRefund(stripe: Stripe, paymentIntent: string, appointmentId: string): Promise<Stripe.Refund> {
+    try {
+        return await stripe.refunds.create(
+            { payment_intent: paymentIntent, metadata: { appointmentRefund: appointmentId } },
+            { idempotencyKey: `appointment-refund:${appointmentId}` }
+        );
+    } catch (e) {
+        // charge_already_refunded (docs.stripe.com/error-codes): the money is already back, so the refund on record
+        // decides the outcome; with none on record the case goes to a person.
+        if ((e as { code?: string })?.code !== "charge_already_refunded") throw e;
+        const refunds = await listPaymentRefunds(stripe, paymentIntent);
+        const onRecord = refunds.find(r => r.status === "pending") ?? refunds.find(r => r.status === "succeeded");
+        if (!onRecord) throw e;
+        return onRecord;
+    }
+}
+
+type Finalization = { status: string; resource: unknown; refund: RefundOutcome; claim: string; ledgerDescription: string };
+
+/**
+ * Saves a claimed cancellation atomically: the appointment, its refund row and the released slot. The write is pinned
+ * to the claim and to the patient not having been erased meanwhile. A write can commit and still fail on the way
+ * back, so a failure is checked against a consistent read; a real failure releases the claim and propagates.
+ */
+async function finalizeCancellation(docClient: DocClient, apt: any, f: Finalization): Promise<void> {
+    const now = new Date().toISOString();
+    const transactItems: any[] = [{
+        Update: {
+            TableName: TABLE_APPOINTMENTS, Key: { appointmentId: apt.appointmentId },
+            UpdateExpression: "SET #s = :s, #res = :resource, refundId = :r, refundStatus = :rs, cancellationId = :claim, lastUpdated = :now REMOVE cancellationClaim, cancellationClaimedAt",
+            ConditionExpression: "cancellationClaim = :claim AND (attribute_not_exists(patientName) OR patientName <> :erased)",
+            ExpressionAttributeNames: { "#s": "status", "#res": "resource" },
+            ExpressionAttributeValues: { ":s": f.status, ":resource": f.resource ?? null, ":r": f.refund.refundId, ":rs": f.refund.refundStatus,
+                ":claim": f.claim, ":now": now, ":erased": ERASED_MARKER }
+        }
+    }];
+    if (f.refund.recordLedger) {
+        transactItems.push({
+            Put: {
+                TableName: TABLE_TRANSACTIONS,
+                ConditionExpression: "attribute_not_exists(billId)",
+                Item: {
+                    billId: refundBillId(apt.appointmentId), referenceId: apt.appointmentId,
+                    patientId: apt.patientId, doctorId: apt.doctorId || "UNKNOWN",
+                    type: "REFUND", amount: -(apt.amountPaid || 0),
+                    currency: "USD", status: ledgerStatusOf(f.refund.refundStatus),
+                    refundId: f.refund.refundId, refundStatus: f.refund.refundStatus,
+                    createdAt: now, description: f.ledgerDescription
+                }
+            }
+        });
+    }
+    // Include lock release in the atomic transaction to prevent orphaned locks
+    if (apt.doctorId && apt.timeSlot) {
+        transactItems.push({ Delete: { TableName: TABLE_LOCKS, Key: { lockId: `${apt.doctorId}#${normalizeTimeSlot(apt.timeSlot)}` } } });
+    }
+    try {
+        await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
+    } catch (finalizeError) {
+        const saved = await docClient.send(new GetCommand({ TableName: TABLE_APPOINTMENTS, Key: { appointmentId: apt.appointmentId }, ConsistentRead: true }))
+            .then(result => result.Item, () => undefined);
+        if (saved?.cancellationId === f.claim) {
+            logger.info("[BOOKING] Cancellation save reported an error after it committed", { appointmentId: apt.appointmentId });
+            return;
+        }
+        await releaseCancellationClaim(docClient, apt.appointmentId, f.claim);
+        throw finalizeError;
     }
 }
 
 /** Finalizes a claimed cancellation. A failed save releases the claim and propagates; side effects stay best-effort. */
 async function cancelAppointment(apt: any, newStatus: string, refund: RefundOutcome, region: string, claim: string) {
     const docClient = getRegionalClient(region);
-    const { refundId, ledgerStatus: txStatus } = refund;
+    const { refundId, refundStatus } = refund;
     // Decryption below works in place; the stored resource must keep its encrypted participant names.
     const storedResource = apt.resource ? structuredClone(apt.resource) : null;
     // FIX #7: Decrypt PHI names for downstream use (PDF receipt)
     await decryptAppointmentNames(apt, region);
     const refundBill = refundBillId(apt.appointmentId);
-    { // Finalize: the one step whose failure the caller must see.
-        // 1. FHIR & DYNAMODB CRASH FIX
-        const fhirResource = storedResource;
-        if (fhirResource) {
-            fhirResource.status = "cancelled"; 
-            if (Array.isArray(fhirResource.participant)) {
-                fhirResource.participant.forEach((p: any) => p.status = "declined"); 
-            }
-        }
-
-        const updateExpression = "set #s = :s, refundId = :r, lastUpdated = :now, #res = :resource REMOVE cancellationClaim, cancellationClaimedAt";
-        const expressionAttributeValues: any = {
-            ":s": newStatus,
-            ":r": refundId,
-            ":now": new Date().toISOString(),
-            ":resource": fhirResource || null,
-            ":claim": claim
-        };
-        const expressionAttributeNames: any = { "#s": "status", "#res": "resource" };
-
-        // Atomic appointment update + refund transaction (matches cancelBookingUser TransactWrite pattern)
-        const transactItems: any[] = [
-            {
-                Update: {
-                    TableName: TABLE_APPOINTMENTS, Key: { appointmentId: apt.appointmentId },
-                    UpdateExpression: updateExpression,
-                    ConditionExpression: "cancellationClaim = :claim",
-                    ExpressionAttributeNames: expressionAttributeNames,
-                    ExpressionAttributeValues: expressionAttributeValues
-                }
-            }
-        ];
-
-        if (txStatus) {
-            transactItems.push({
-                Put: {
-                    TableName: TABLE_TRANSACTIONS,
-                    ConditionExpression: "attribute_not_exists(billId)",
-                    Item: {
-                        billId: refundBill, referenceId: apt.appointmentId,
-                        patientId: apt.patientId, doctorId: apt.doctorId || "UNKNOWN",
-                        type: "REFUND", amount: -(apt.amountPaid || 0),
-                        currency: "USD", status: txStatus,
-                        createdAt: new Date().toISOString(),
-                        description: newStatus === "CANCELLED_NO_SHOW" ? "No-show cancellation" : "System cancellation"
-                    }
-                }
-            });
-        }
-
-        // Include lock release in the atomic transaction to prevent orphaned locks
-        if (apt.doctorId && apt.timeSlot) {
-            const lockKey = `${apt.doctorId}#${normalizeTimeSlot(apt.timeSlot)}`;
-            transactItems.push({
-                Delete: {
-                    TableName: TABLE_LOCKS,
-                    Key: { lockId: lockKey }
-                }
-            });
-        }
-
-        try {
-            await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
-        } catch (finalizeError) {
-            await releaseCancellationClaim(docClient, apt.appointmentId, claim);
-            throw finalizeError;
+    if (storedResource) {
+        storedResource.status = "cancelled";
+        if (Array.isArray(storedResource.participant)) {
+            storedResource.participant.forEach((p: any) => p.status = "declined");
         }
     }
+    // Finalize: the one step whose failure the caller must see.
+    await finalizeCancellation(docClient, apt, { status: newStatus, resource: storedResource, refund, claim,
+        ledgerDescription: newStatus === "CANCELLED_NO_SHOW" ? CANCELLATION_COPY.ledgerNoShow : CANCELLATION_COPY.ledgerSystem });
     try {
         // 2. Google Calendar Cleanup (If connected)
         if (apt.googleEventId && apt.doctorId) {
@@ -1130,10 +1162,9 @@ async function cancelAppointment(apt: any, newStatus: string, refund: RefundOutc
             billId: apt.paymentId || apt.appointmentId,
             patientName: apt.patientName,
             doctorName: apt.doctorName,
-            amount: apt.amountPaid || 0,
+            amount: apt.amountPaid ?? 0,
             date: new Date().toISOString(),
-            status: txStatus === "PROCESSED" ? "REFUNDED" : "CANCELLED",
-            type: "REFUND"
+            ...receiptFor({ status: newStatus, refundStatus })
         }, region).catch(e => logger.error("[BOOKING] Auto-system PDF generation failed", { error: e.message }));
 
         // 4. BIGQUERY TELEMETRY
@@ -1146,13 +1177,13 @@ async function cancelAppointment(apt: any, newStatus: string, refund: RefundOutc
         }, region).catch(e => logger.error("[BOOKING] BigQuery cancellation sync failed", { error: e.message }));
 
         // Push refund revenue to BigQuery analytics
-        if (txStatus) {
+        if (refund.recordLedger) {
             pushRevenueToBigQuery({
                 billId: refundBill,
                 patientId: apt.patientId,
                 doctorId: apt.doctorId || "UNKNOWN",
                 amount: -(apt.amountPaid || 0),
-                status: txStatus === "PROCESSED" ? "REFUNDED" : "REFUND_FAILED",
+                status: REVENUE_STATUS[refundStatus],
                 type: "REFUND",
             }, region).catch(e => logger.error("[BOOKING] BigQuery refund revenue sync failed", { error: e.message }));
         }
@@ -1224,8 +1255,8 @@ async function cancelAppointment(apt: any, newStatus: string, refund: RefundOutc
                     sendNotification({
                         region,
                         recipientEmail: patientRecord.Item.email,
-                        subject: 'Appointment Cancelled',
-                        message: `Your appointment (${apt.appointmentId}) has been cancelled. ${refundNotice(txStatus)}`.trim(),
+                        subject: CANCELLATION_COPY.noticeSubjectSystem,
+                        message: cancellationNotice(apt.appointmentId, newStatus, refundStatus),
                         type: 'BOOKING_CANCELLATION',
                         metadata: { appointmentId: apt.appointmentId }
                     }).catch(() => {});
@@ -1254,9 +1285,6 @@ export const getReceipt = catchAsync(async (req: Request, res: Response) => {
     // FIX #7: Decrypt PHI names for PDF receipt
     await decryptAppointmentNames(apt, region);
 
-    const statusStr = apt.status || "";
-    const isCancelled = statusStr.includes("CANCELLED");
-
     try {
         const generator = new BookingPDFGenerator();
         const url = await generator.generateReceipt({
@@ -1264,10 +1292,10 @@ export const getReceipt = catchAsync(async (req: Request, res: Response) => {
             billId: apt.paymentId || appointmentId, 
             patientName: apt.patientName || "Patient",
             doctorName: apt.doctorName || "Doctor", 
-            amount: apt.amountPaid || 50,
+            // Never invent an amount: a record without one shows what was actually paid, nothing.
+            amount: apt.amountPaid ?? 0,
             date: apt.timeSlot || new Date().toISOString(),
-            status: isCancelled ? "REFUNDED" : "PAID",
-            type: isCancelled ? "REFUND" : "BOOKING"
+            ...receiptFor(apt)
         }, region); 
 
         res.status(200).json({ downloadUrl: url });

@@ -12,7 +12,8 @@ interface ReceiptData {
     amount: number;
     date: string;
     status: string;
-    type: "BOOKING" | "REFUND";
+    // REFUND is a credit note for money returned; CANCELLATION records a cancellation without claiming a refund.
+    type: "BOOKING" | "REFUND" | "CANCELLATION";
 }
 
 export class BookingPDFGenerator {
@@ -46,9 +47,10 @@ export class BookingPDFGenerator {
     private createPDFBuffer(data: ReceiptData): Promise<Buffer> {
         return new Promise((resolve, reject) => {
             const isRefund = data.type === "REFUND";
-            const primaryColor = isRefund ? "#dc2626" : "#2563eb"; 
-            const statusColor = isRefund ? "#4b5563" : "#16a34a"; 
-            const docTitle = isRefund ? "CREDIT NOTE" : "TAX INVOICE";
+            const isCancellation = data.type === "CANCELLATION";
+            const primaryColor = isRefund ? "#dc2626" : isCancellation ? "#4b5563" : "#2563eb";
+            const statusColor = isRefund || isCancellation ? "#4b5563" : "#16a34a";
+            const docTitle = isRefund ? "CREDIT NOTE" : isCancellation ? "CANCELLATION NOTICE" : "TAX INVOICE";
 
             const doc = new PDFDocument({ size: 'A5', margin: 40 });
             const buffers: Buffer[] = [];
@@ -86,7 +88,9 @@ export class BookingPDFGenerator {
             const rowY = tableY + 30;
             const description = isRefund
                 ? `Refund for Appointment #${data.appointmentId.substring(0, 8)}`
-                : `General Consultation - Dr. ${data.doctorName}`;
+                : isCancellation
+                    ? `Cancelled Appointment #${data.appointmentId.substring(0, 8)} - Dr. ${data.doctorName}`
+                    : `General Consultation - Dr. ${data.doctorName}`;
 
             doc.fillColor("#000000").fontSize(10).text(description, 50, rowY);
 
@@ -103,7 +107,7 @@ export class BookingPDFGenerator {
             doc.fillColor(statusColor).fontSize(10).text(data.status.toUpperCase(), 300, doc.y, { align: 'right' });
 
             doc.moveDown(0.5);
-            doc.fillColor("#000000").fontSize(12).font('Helvetica-Bold').text("GRAND TOTAL:", 200);
+            doc.fillColor("#000000").fontSize(12).font('Helvetica-Bold').text(isCancellation ? "AMOUNT PAID:" : "GRAND TOTAL:", 200);
             doc.moveUp();
             doc.fillColor(primaryColor).text(displayAmount, 300, doc.y, { align: 'right' });
 
