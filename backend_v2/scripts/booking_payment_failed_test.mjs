@@ -143,6 +143,9 @@ test('a failed payment never changes a bill that is no longer payable', async ()
       assert.equal(h.effects.notify.mock.callCount(), 0, `${label}: patient not told a settled bill failed`);
       assert.equal(h.effects.revenue.mock.callCount(), 0, `${label}: no FAILED revenue row`);
       assert.ok(h.logged(/test-bill.*no longer payable/i), `${label}: skip logged`);
+      const audits = h.effects.audit.mock.calls.map(call => call.arguments);
+      assert.equal(audits.length, 1, `${label}: the ignored failure is audited`);
+      assert.match(String(audits[0][3]), /ignored/i, label);
     } finally { mock.restoreAll(); }
   }
 });

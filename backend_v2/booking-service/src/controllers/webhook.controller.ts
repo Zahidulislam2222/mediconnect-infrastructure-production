@@ -233,6 +233,13 @@ async function handlePaymentFailure(paymentIntent: Stripe.PaymentIntent, regiona
         } catch (err: any) {
             if (err?.name === 'TransactionCanceledException' && err.CancellationReasons?.[0]?.Code === 'ConditionalCheckFailed') {
                 safeLog(`[WEBHOOK] payment_failed ${paymentIntent.id} ignored: bill ${billId} is missing or no longer payable`);
+                try {
+                    await writeAuditLog(patientId || "SYSTEM", patientId || "UNKNOWN", "PAYMENT_FAILED",
+                        `Payment failure for ${type || 'unknown'} ignored: bill is missing or no longer payable`,
+                        { region, paymentIntentId: paymentIntent.id, billId, failureReason: failureMessage });
+                } catch (auditErr: unknown) {
+                    safeError(`Audit log failed for ignored payment failure: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`);
+                }
                 return;
             }
             safeError(`Atomic payment failure update failed: ${err.message}`);
