@@ -188,18 +188,23 @@ async function handlePaymentFailure(paymentIntent: Stripe.PaymentIntent, regiona
 
     // 1. Atomic update: transaction + appointment in single TransactWrite
     if (billId) {
+        // Only a bill /billing/pay may still charge can fail: a late or stale event never reopens a paid, refunded,
+        // disputed or under-review bill, and never creates a ledger row for an unknown billId.
+        const payable = Object.fromEntries(PAYABLE_BILL_STATUSES.map((status, i) => [`:payable${i}`, status]));
         const transactItems: any[] = [
             {
                 Update: {
                     TableName: TABLE_TRANSACTIONS,
                     Key: { billId },
                     UpdateExpression: "SET #s = :s, failureReason = :fr, failedAt = :now, paymentIntentId = :pid",
+                    ConditionExpression: `#s IN (${Object.keys(payable).join(', ')}) AND attribute_not_exists(reviewReason)`,
                     ExpressionAttributeNames: { "#s": "status" },
                     ExpressionAttributeValues: {
                         ":s": "FAILED",
                         ":fr": failureMessage,
                         ":now": now,
-                        ":pid": paymentIntent.id
+                        ":pid": paymentIntent.id,
+                        ...payable
                     }
                 }
             }
@@ -226,6 +231,10 @@ async function handlePaymentFailure(paymentIntent: Stripe.PaymentIntent, regiona
             await regionalDb.send(new TransactWriteCommand({ TransactItems: transactItems }));
             safeLog(`Transaction ${billId} marked as FAILED${referenceId ? `, appointment ${referenceId} marked as PAYMENT_FAILED` : ''}`);
         } catch (err: any) {
+            if (err?.name === 'TransactionCanceledException' && err.CancellationReasons?.[0]?.Code === 'ConditionalCheckFailed') {
+                safeLog(`[WEBHOOK] payment_failed ${paymentIntent.id} ignored: bill ${billId} is missing or no longer payable`);
+                return;
+            }
             safeError(`Atomic payment failure update failed: ${err.message}`);
         }
     } else if (type === 'BOOKING_FEE' && referenceId) {
