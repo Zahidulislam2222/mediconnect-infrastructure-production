@@ -145,7 +145,15 @@ export const handleStripeWebhook = async (req: Request, res: Response) => {
         }
     } else if (event.type === 'payment_intent.payment_failed') {
         const paymentIntent = event.data.object as Stripe.PaymentIntent;
-        await handlePaymentFailure(paymentIntent, regionalDb, region);
+        try {
+            await handlePaymentFailure(paymentIntent, regionalDb, region);
+        } catch {
+            // The ledger write did not happen; release the claim so Stripe's redelivery records the failure.
+            await regionalDb.send(new DeleteCommand({ TableName: TABLE_WEBHOOK_EVENTS, Key: { eventId: event.id } }))
+                .catch(() => safeError(`[WEBHOOK] Could not release event ${event.id}; manual reconciliation required`));
+            safeError(`[WEBHOOK] Payment failure sync failed for event ${event.id}; asking Stripe to retry`);
+            return res.status(500).json({ received: false });
+        }
     } else if (event.type === 'charge.refunded') {
         const charge = event.data.object as Stripe.Charge;
         await handleChargeRefunded(charge, regionalDb, region);
@@ -236,13 +244,17 @@ async function handlePaymentFailure(paymentIntent: Stripe.PaymentIntent, regiona
                 try {
                     await writeAuditLog(patientId || "SYSTEM", patientId || "UNKNOWN", "PAYMENT_FAILED",
                         `Payment failure for ${type || 'unknown'} ignored: bill is missing or no longer payable`,
-                        { region, paymentIntentId: paymentIntent.id, billId, failureReason: failureMessage });
+                        { region, paymentIntentId: paymentIntent.id, billId, appointmentId: referenceId || undefined, failureReason: failureMessage });
                 } catch (auditErr: unknown) {
                     safeError(`Audit log failed for ignored payment failure: ${auditErr instanceof Error ? auditErr.message : String(auditErr)}`);
                 }
                 return;
             }
-            safeError(`Atomic payment failure update failed: ${err.message}`);
+            // Not recorded (throttled, or a conflict on either item): telling the patient or recording FAILED revenue now
+            // would describe a ledger change that did not happen, so the caller asks Stripe to retry.
+            const reasons = err?.CancellationReasons?.map((r: { Code?: string }) => r.Code ?? 'None').join(',');
+            safeError(`Atomic payment failure update failed: ${err.message}${reasons ? ` (${reasons})` : ''}`);
+            throw err;
         }
     } else if (type === 'BOOKING_FEE' && referenceId) {
         // No billId but has appointment — update appointment alone

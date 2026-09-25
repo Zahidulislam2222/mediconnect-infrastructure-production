@@ -51,7 +51,7 @@ function apply(item, expression, names = {}, values = {}) {
 const cancelled = codes => Object.assign(new Error('Transaction cancelled'), {
   name: 'TransactionCanceledException', CancellationReasons: codes.map(Code => ({ Code })) });
 
-function harness({ bill = {}, withoutBill = false, failTransactions = 0 } = {}) {
+function harness({ bill = {}, withoutBill = false, failTransactions = 0, failCodes = ['ThrottlingError'] } = {}) {
   const rows = new Map();
   const key = (table, item) => `${table}|${KEYS[table].map(k => item[k]).join('|')}`;
   const put = (table, item) => rows.set(key(table, item), structuredClone(item));
@@ -73,8 +73,9 @@ function harness({ bill = {}, withoutBill = false, failTransactions = 0 } = {}) 
         throw Object.assign(new Error('conditional'), { name: 'ConditionalCheckFailedException' });
       put(input.TableName, input.Item); return {};
     }
+    if (kind === 'DeleteCommand') { rows.delete(key(input.TableName, input.Key)); return {}; }
     if (kind === 'TransactWriteCommand') {
-      if (transactionFailures > 0) { transactionFailures--; throw cancelled(input.TransactItems.map(() => 'ThrottlingError')); }
+      if (transactionFailures > 0) { transactionFailures--; throw cancelled(input.TransactItems.map((_, i) => failCodes[i] ?? 'None')); }
       const staged = input.TransactItems.map(entry => {
         const [op, spec] = Object.entries(entry)[0];
         assert.equal(op, 'Update', `Unexpected transaction operation ${op}`);
@@ -96,8 +97,8 @@ function harness({ bill = {}, withoutBill = false, failTransactions = 0 } = {}) 
   const { handleStripeWebhook } = require('./dist/booking-service/src/controllers/webhook.controller.js');
   const stripe = new Stripe('sk_test_key');
   let sequence = 0;
-  async function deliver() {
-    const payload = JSON.stringify({ id: `evt_test_${++sequence}`, object: 'event', type: 'payment_intent.payment_failed',
+  async function deliver(eventId = `evt_test_${++sequence}`) {
+    const payload = JSON.stringify({ id: eventId, object: 'event', type: 'payment_intent.payment_failed',
       data: { object: { id: 'pi_test_failed', object: 'payment_intent', amount: 5000, currency: 'usd', status: 'requires_payment_method',
         last_payment_error: { message: 'Your card was declined.' },
         metadata: { billId: 'test-bill', referenceId: 'test-apt', type: 'BOOKING_FEE', patientId: 'test-patient', region: 'us-east-1' } } } });
@@ -108,7 +109,8 @@ function harness({ bill = {}, withoutBill = false, failTransactions = 0 } = {}) 
     return result;
   }
   const logged = pattern => [...effects.logs.mock.calls, ...effects.errors.mock.calls].some(call => pattern.test(String(call.arguments[0])));
-  return { deliver, effects, logged, bill: () => get(BILLS, { billId: 'test-bill' }), apt: () => get(APPOINTMENTS, { appointmentId: 'test-apt' }) };
+  return { deliver, effects, logged, bill: () => get(BILLS, { billId: 'test-bill' }), apt: () => get(APPOINTMENTS, { appointmentId: 'test-apt' }),
+    claimed: eventId => get(EVENTS, { eventId }) !== undefined };
 }
 
 test('a failed payment of a still-payable bill marks the bill and its appointment failed', async () => {
@@ -146,6 +148,7 @@ test('a failed payment never changes a bill that is no longer payable', async ()
       const audits = h.effects.audit.mock.calls.map(call => call.arguments);
       assert.equal(audits.length, 1, `${label}: the ignored failure is audited`);
       assert.match(String(audits[0][3]), /ignored/i, label);
+      assert.equal(audits[0][4].appointmentId, 'test-apt', `${label}: the audit names the appointment`);
     } finally { mock.restoreAll(); }
   }
 });
@@ -158,4 +161,23 @@ test('a failed payment for an unknown bill creates no ledger row', async () => {
     assert.equal(h.apt().status, 'CONFIRMED');
     assert.ok(h.logged(/test-bill.*no longer payable/i));
   } finally { mock.restoreAll(); }
+});
+
+// S6c: a write that did not happen for another reason (throttling, or a conflict on the appointment item) must not
+// tell the patient or record FAILED revenue; the claim is released so Stripe's redelivery does the work.
+test('a payment failure whose ledger write is lost is retried by Stripe, not half-processed', async () => {
+  for (const [label, failCodes] of [['throttled', ['ThrottlingError', 'ThrottlingError']], ['appointment conflict', ['None', 'TransactionConflict']]]) {
+    try {
+      const h = harness({ failTransactions: 1, failCodes });
+      assert.equal((await h.deliver('evt_test_retry')).status, 500, `${label}: Stripe is asked to retry`);
+      assert.equal(h.claimed('evt_test_retry'), false, `${label}: the claim is released`);
+      assert.equal(h.bill().status, 'PENDING', label);
+      assert.equal(h.effects.notify.mock.callCount(), 0, `${label}: no notice for an unrecorded failure`);
+      assert.equal(h.effects.revenue.mock.callCount(), 0, `${label}: no FAILED revenue row`);
+      assert.equal((await h.deliver('evt_test_retry')).status, 200, `${label}: the redelivery is processed`);
+      assert.equal(h.bill().status, 'FAILED', label);
+      assert.equal(h.apt().status, 'PAYMENT_FAILED', label);
+      assert.equal(h.effects.notify.mock.callCount(), 1, `${label}: one notice`);
+    } finally { mock.restoreAll(); }
+  }
 });
