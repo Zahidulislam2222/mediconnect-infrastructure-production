@@ -14,7 +14,7 @@ import { getRegionalSSMClient } from '../../shared/aws-config'; // 🟢 REGIONAL
 import { createRateLimitStore } from '../../shared/rate-limit-store'; // 🟢 FIX #9: Redis distributed rate limiting
 import { safeLog, safeError } from '../../shared/logger';
 
-import { setting } from '../../shared/settings';
+import { getCancellationRefundSettings, getCancellationSettings, setting } from '../../shared/settings';
 
 dotenv.config();
 
@@ -175,9 +175,16 @@ async function loadSecrets() {
     } catch (e: any) { process.exit(1); }
 }
 
+/** Settings whose absence would otherwise surface only mid-request (a 500 on check-in, or refunds silently queued). */
+export function validateStartupSettings(): void {
+    getCancellationSettings();
+    getCancellationRefundSettings();
+}
+
 const startServer = async () => {
     try {
         await loadSecrets();
+        validateStartupSettings();
         app.listen(Number(PORT), '0.0.0.0', () => {
             isAppReady = true;
             safeLog(`Booking Service Production Ready on port ${PORT}`);
