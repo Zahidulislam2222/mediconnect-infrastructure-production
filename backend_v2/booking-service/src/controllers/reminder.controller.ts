@@ -1,8 +1,8 @@
 import { requestJurisdiction } from '../../../shared/region-context';
-// ─── FEATURE #18: Appointment Reminders (SNS) ──────────────────────────────
-// SMS/email reminders via AWS SNS for upcoming appointments.
-// Reminder scheduling: 24h before, 1h before.
-// Uses existing SNS pattern from breach detection.
+// ─── FEATURE #18: Appointment Reminders ────────────────────────────────────
+// SMS goes directly to the patient's phone and email through the shared notifier, both read from the patient's
+// KMS-encrypted profile. Nothing patient-specific is published to a shared topic. Only the appointment's doctor or
+// patient may send or read its reminders; 24h and 1h reminders are claimed once per appointment before sending.
 // ────────────────────────────────────────────────────────────────────────────
 
 import { Request, Response } from 'express';
@@ -11,106 +11,72 @@ import { PublishCommand } from '@aws-sdk/client-sns';
 import { QueryCommand, ScanCommand, UpdateCommand, PutCommand, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient, getRegionalSNSClient } from '../../../shared/aws-config';
 import { writeAuditLog } from '../../../shared/audit';
-import { safeLog, safeError } from '../../../shared/logger';
+import { safeError } from '../../../shared/logger';
 import { publishEvent, EventType } from '../../../shared/event-bus';
+import { decryptPHI } from '../../../shared/kms-crypto';
+import { sendNotification } from '../../../shared/notifications';
 import { setting } from '../../../shared/settings';
+import {
+    REMINDER_COPY, REMINDER_FALLBACKS, REMINDER_TEMPLATES, SMS_MAX_LENGTH, type ReminderChannel, type ReminderType
+} from '../content/reminders';
 
 const TABLE_APPOINTMENTS = setting("TABLE_APPOINTMENTS");
 const TABLE_REMINDERS = setting("TABLE_REMINDERS");
-const TABLE_PATIENTS = setting("DYNAMO_TABLE");
-const TABLE_DOCTORS = setting("DYNAMO_TABLE_DOCTORS");
+const TABLE_PATIENTS = setting("TABLE_PATIENTS");
+const TABLE_DOCTORS = setting("TABLE_DOCTORS");
+const PENDING_WINDOW_MS = 24 * 60 * 60 * 1000;
 
-const extractRegion = (req: Request): string => requestJurisdiction(req);
+type Db = ReturnType<typeof getRegionalClient>;
+/** submitted: handed to the mailer, which does not report delivery. */
+type Delivery = 'sent' | 'submitted' | 'failed' | 'no_contact';
+interface PatientContact { patientName?: string; phone?: string; email?: string }
 
-// ─── Reminder Templates ────────────────────────────────────────────────────
-
-interface ReminderTemplate {
-    type: '24h' | '1h' | 'custom';
-    channel: 'sms' | 'email' | 'both';
-    subject: string;
-    bodyTemplate: string;
-    smsTemplate: string;
-}
-
-const REMINDER_TEMPLATES: Record<string, ReminderTemplate> = {
-    '24h': {
-        type: '24h',
-        channel: 'both',
-        subject: 'Appointment Reminder - Tomorrow',
-        bodyTemplate: 'Dear {{patientName}},\n\nThis is a reminder that you have an appointment scheduled for {{appointmentDate}} at {{appointmentTime}} with Dr. {{doctorName}}.\n\nReason: {{reason}}\n\nPlease arrive 10 minutes early. If you need to reschedule, please do so at least 2 hours before your appointment.\n\nBest regards,\nMediConnect Healthcare',
-        smsTemplate: 'MediConnect: Reminder - Appt tomorrow at {{appointmentTime}} with Dr. {{doctorName}}. Reply HELP for info.',
-    },
-    '1h': {
-        type: '1h',
-        channel: 'sms',
-        subject: 'Appointment Starting Soon',
-        bodyTemplate: 'Dear {{patientName}},\n\nYour appointment with Dr. {{doctorName}} begins in approximately 1 hour at {{appointmentTime}}.\n\nPlease ensure you are ready.\n\nMediConnect Healthcare',
-        smsTemplate: 'MediConnect: Your appt with Dr. {{doctorName}} starts in 1 hour ({{appointmentTime}}). Please be ready.',
-    },
-    'custom': {
-        type: 'custom',
-        channel: 'both',
-        subject: 'Appointment Update',
-        bodyTemplate: '{{customMessage}}',
-        smsTemplate: 'MediConnect: {{customMessage}}',
-    }
-};
-
+/** Single pass, so a value containing `{{name}}` or `$&` is inserted as written. */
 function fillTemplate(template: string, vars: Record<string, string>): string {
-    let result = template;
-    for (const [key, value] of Object.entries(vars)) {
-        result = result.replace(new RegExp(`{{${key}}}`, 'g'), value || '');
-    }
-    return result;
+    return template.replace(/\{\{(\w+)\}\}/g, (_match, name: string) => vars[name] ?? '');
 }
 
-// ─── Send via SNS ──────────────────────────────────────────────────────────
+/** Plain text only: a missing value, or one still encrypted after decryption, counts as absent. */
+const plain = (value: unknown): string | undefined =>
+    typeof value === 'string' && value.trim() && !value.startsWith('phi:') ? value : undefined;
+const stored = (value: unknown): string => typeof value === 'string' ? value : '';
+const errorName = (err: unknown): string => err instanceof Error ? err.name : 'UnknownError';
 
-async function sendSNSNotification(
-    region: string,
-    topicArn: string | undefined,
-    subject: string,
-    message: string,
-    smsMessage?: string,
-    phoneNumber?: string,
-    email?: string
-): Promise<{ snsMessageId?: string; error?: string }> {
+/** The requester's role on this appointment, or undefined when they have none. */
+function participant(user: any, appointment: any): 'doctor' | 'patient' | undefined {
+    if (typeof user?.id !== 'string' || !user.id) return undefined;
+    if (user.isDoctor === true) return user.id === appointment.doctorId ? 'doctor' : undefined;
+    return user.id === appointment.patientId ? 'patient' : undefined;
+}
+
+/** The patient's decrypted name, phone and email. A read or decrypt failure is thrown for the caller to record. */
+async function patientContact(db: Db, patientId: unknown, region: string): Promise<PatientContact> {
+    if (typeof patientId !== 'string' || !patientId) return {};
+    const { Item } = await db.send(new GetCommand({
+        TableName: TABLE_PATIENTS, Key: { patientId },
+        ProjectionExpression: '#name, phone, email', ExpressionAttributeNames: { '#name': 'name' },
+    }));
+    const fields = await decryptPHI({ name: stored(Item?.name), phone: stored(Item?.phone), email: stored(Item?.email) }, region);
+    return { patientName: plain(fields.name), phone: plain(fields.phone), email: plain(fields.email) };
+}
+
+/** The doctor's decrypted name; a failure only loses the name, so it is logged and the generic word used. */
+async function doctorName(db: Db, doctorId: unknown, region: string): Promise<string | undefined> {
+    if (typeof doctorId !== 'string' || !doctorId) return undefined;
     try {
-        const sns = getRegionalSNSClient(region);
-
-        // Send to topic if available
-        if (topicArn) {
-            const result = await sns.send(new PublishCommand({
-                TopicArn: topicArn,
-                Subject: subject,
-                Message: JSON.stringify({
-                    default: message,
-                    email: message,
-                    sms: smsMessage || message.substring(0, 160),
-                }),
-                MessageStructure: 'json',
-            }));
-            return { snsMessageId: result.MessageId };
-        }
-
-        // Direct SMS if phone number provided
-        if (phoneNumber && smsMessage) {
-            const result = await sns.send(new PublishCommand({
-                PhoneNumber: phoneNumber,
-                Message: smsMessage.substring(0, 160),
-                MessageAttributes: {
-                    'AWS.SNS.SMS.SMSType': { DataType: 'String', StringValue: 'Transactional' },
-                    'AWS.SNS.SMS.SenderID': { DataType: 'String', StringValue: 'MediConnect' },
-                }
-            }));
-            return { snsMessageId: result.MessageId };
-        }
-
-        return { error: 'No topic ARN or phone number provided' };
-    } catch (error: any) {
-        safeError('SNS send error:', { error: error.message });
-        return { error: error.message };
+        const { Item } = await db.send(new GetCommand({
+            TableName: TABLE_DOCTORS, Key: { doctorId },
+            ProjectionExpression: '#name', ExpressionAttributeNames: { '#name': 'name' },
+        }));
+        return plain((await decryptPHI({ name: stored(Item?.name) }, region)).name);
+    } catch (err: unknown) {
+        safeError(`[REMINDER] Doctor name for ${doctorId} unavailable`, { error: errorName(err) });
+        return undefined;
     }
+}
+
+async function getAppointment(db: Db, appointmentId: string) {
+    return (await db.send(new GetCommand({ TableName: TABLE_APPOINTMENTS, Key: { appointmentId } }))).Item;
 }
 
 // ─── POST /appointments/:appointmentId/reminders ───────────────────────────
@@ -119,136 +85,128 @@ export const sendAppointmentReminder = async (req: Request, res: Response) => {
     try {
         const { appointmentId } = req.params;
         const user = (req as any).user;
-        const region = extractRegion(req);
-        const { type = '24h', customMessage, channel } = req.body;
-
+        const region = requestJurisdiction(req);
+        const type: ReminderType = req.body?.type ?? '24h';
+        const template = REMINDER_TEMPLATES[type];
+        if (!template) return res.status(400).json({ error: 'Unknown reminder type' });
         const db = getRegionalClient(region);
 
-        // Find appointment
-        const { Items: appts = [] } = await db.send(new ScanCommand({
-            TableName: TABLE_APPOINTMENTS,
-            FilterExpression: 'appointmentId = :aid',
-            ExpressionAttributeValues: { ':aid': appointmentId },
-            Limit: 1,
-        }));
+        const appointment = await getAppointment(db, appointmentId);
+        if (!appointment) return res.status(404).json({ error: REMINDER_COPY.notFound });
+        const role = participant(user, appointment);
+        if (!role) return res.status(403).json({ error: REMINDER_COPY.forbidden });
+        if (type === 'custom' && role !== 'doctor') return res.status(403).json({ error: REMINDER_COPY.customForbidden });
+        if (appointment.status !== 'CONFIRMED') return res.status(409).json({ error: REMINDER_COPY.notActive, appointmentId });
 
-        if (appts.length === 0) {
-            return res.status(404).json({ error: 'Appointment not found' });
-        }
-
-        const appointment = appts[0] as any;
-
-        // Get patient info
-        let patientName = appointment.patientName || 'Patient';
-        let patientPhone = '';
-        let patientEmail = '';
-        try {
-            const { Item: patient } = await db.send(new GetCommand({
-                TableName: TABLE_PATIENTS,
-                Key: { id: appointment.patientId }
-            }));
-            if (patient) {
-                patientName = patient.name || patientName;
-                patientPhone = patient.phone || '';
-                patientEmail = patient.email || '';
-            }
-        } catch { /* non-critical */ }
-
-        // Get doctor info
-        let doctorName = appointment.doctorName || 'your doctor';
-        try {
-            const { Item: doctor } = await db.send(new GetCommand({
-                TableName: TABLE_DOCTORS,
-                Key: { id: appointment.doctorId }
-            }));
-            if (doctor) doctorName = doctor.name || doctorName;
-        } catch { /* non-critical */ }
-
-        // Parse appointment time
-        const apptDate = new Date(appointment.timeSlot || appointment.date);
-        const appointmentDate = apptDate.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
-        const appointmentTime = apptDate.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-
-        const template = REMINDER_TEMPLATES[type] || REMINDER_TEMPLATES['custom'];
-        const vars = {
-            patientName,
-            doctorName,
-            appointmentDate,
-            appointmentTime,
-            reason: appointment.reason || 'General Checkup',
-            customMessage: customMessage || '',
-        };
-
-        const emailBody = fillTemplate(template.bodyTemplate, vars);
-        const smsBody = fillTemplate(template.smsTemplate, vars);
-        const subject = fillTemplate(template.subject, vars);
-
-        // Determine channel
-        const sendChannel = channel || template.channel;
-        const topicArn = process.env.SNS_REMINDER_TOPIC_ARN;
-
-        let snsResult: { snsMessageId?: string; error?: string } = {};
-
-        if (sendChannel === 'sms' || sendChannel === 'both') {
-            snsResult = await sendSNSNotification(region, topicArn, subject, emailBody, smsBody, patientPhone);
-        } else if (sendChannel === 'email') {
-            snsResult = await sendSNSNotification(region, topicArn, subject, emailBody);
-        }
-
-        // Store reminder record
-        const reminderId = uuidv4();
+        // One 24h and one 1h reminder per appointment: claimed before anything is sent. A failed one may be claimed again.
+        const channel: ReminderChannel = req.body?.channel ?? template.channel;
+        const reminderId = type === 'custom' ? uuidv4() : `${appointmentId}#${type}`;
         const now = new Date().toISOString();
-
-        // Idempotency: prevent duplicate reminders of same type for same appointment
         try {
             await db.send(new PutCommand({
                 TableName: TABLE_REMINDERS,
                 Item: {
-                    reminderId,
-                    appointmentId,
-                    patientId: appointment.patientId,
-                    doctorId: appointment.doctorId,
-                    type,
-                    channel: sendChannel,
-                    status: snsResult.error ? 'failed' : 'sent',
-                    snsMessageId: snsResult.snsMessageId,
-                    error: snsResult.error,
-                    sentAt: now,
-                    sentBy: user.id,
-                    createdAt: now,
-                    dedupKey: `${appointmentId}:${type}`
+                    reminderId, appointmentId, patientId: appointment.patientId, doctorId: appointment.doctorId,
+                    type, channel, status: 'sending', sentBy: user.id, createdAt: now,
                 },
-                ConditionExpression: "attribute_not_exists(reminderId)"
+                ConditionExpression: 'attribute_not_exists(reminderId) OR #status = :failed',
+                ExpressionAttributeNames: { '#status': 'status' },
+                ExpressionAttributeValues: { ':failed': 'failed' },
             }));
-        } catch (dedup: any) {
-            if (dedup.name === 'ConditionalCheckFailedException') {
-                return res.status(409).json({ error: 'Duplicate reminder', appointmentId, type });
+        } catch (err: any) {
+            if (err?.name === 'ConditionalCheckFailedException') {
+                return res.status(409).json({ error: REMINDER_COPY.duplicate, appointmentId, type });
             }
-            throw dedup;
+            throw err;
         }
 
-        await writeAuditLog(user.id, appointment.patientId, 'SEND_REMINDER',
-            `Appointment reminder sent: ${type} via ${sendChannel} for ${appointmentId}`,
-            { region, reminderId, appointmentId, type, channel: sendChannel }
-        );
+        let contact: PatientContact | undefined;
+        try {
+            contact = await patientContact(db, appointment.patientId, region);
+        } catch (err: unknown) {
+            safeError(`[REMINDER] Contact for appointment ${appointmentId} unavailable: patient not reminded`, { error: errorName(err) });
+        }
+        const when = new Date(appointment.timeSlot || appointment.date);
+        const vars = {
+            patientName: contact?.patientName ?? REMINDER_FALLBACKS.patientName,
+            doctorName: (await doctorName(db, appointment.doctorId, region)) ?? REMINDER_FALLBACKS.doctorName,
+            appointmentDate: when.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }),
+            appointmentTime: when.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }),
+            reason: plain(appointment.reason) ?? REMINDER_FALLBACKS.reason,
+            customMessage: typeof req.body?.customMessage === 'string' ? req.body.customMessage : '',
+        };
 
-        // Event bus: appointment reminder sent
-        publishEvent(EventType.APPOINTMENT_REMINDER, { appointmentId, patientId: appointment.patientId, type, channel: sendChannel, reminderId }, region).catch(() => {});
+        // A channel is "failed" when the contact could not be read, and "no_contact" when the profile has none.
+        const deliveries: Partial<Record<'sms' | 'email', Delivery>> = {};
+        let snsMessageId: string | undefined;
+        if (channel === 'sms' || channel === 'both') {
+            if (!contact?.phone) {
+                deliveries.sms = contact ? 'no_contact' : 'failed';
+            } else {
+                try {
+                    const result = await getRegionalSNSClient(region).send(new PublishCommand({
+                        PhoneNumber: contact.phone,
+                        Message: fillTemplate(template.smsTemplate, vars).substring(0, SMS_MAX_LENGTH),
+                        MessageAttributes: {
+                            'AWS.SNS.SMS.SMSType': { DataType: 'String', StringValue: 'Transactional' },
+                            'AWS.SNS.SMS.SenderID': { DataType: 'String', StringValue: 'MediConnect' },
+                        },
+                    }));
+                    snsMessageId = result.MessageId;
+                    deliveries.sms = result.MessageId ? 'sent' : 'failed';
+                } catch (err: unknown) {
+                    safeError(`[REMINDER] SMS for appointment ${appointmentId} failed`, { error: errorName(err) });
+                    deliveries.sms = 'failed';
+                }
+            }
+        }
+        if (channel === 'email' || channel === 'both') {
+            if (!contact?.email) {
+                deliveries.email = contact ? 'no_contact' : 'failed';
+            } else {
+                sendNotification({
+                    region, recipientEmail: contact.email, type: 'GENERAL', metadata: { appointmentId },
+                    subject: fillTemplate(template.subject, vars), message: fillTemplate(template.bodyTemplate, vars),
+                }).catch(() => {});
+                deliveries.email = 'submitted';
+            }
+        }
+        const attempted = Object.values(deliveries).some(d => d === 'sent' || d === 'submitted');
+        const status = deliveries.sms === 'failed' || !attempted ? 'failed' : 'sent';
+
+        // The claim is finished only by its own request; if this write fails the claim stays and blocks a duplicate.
+        try {
+            await db.send(new UpdateCommand({
+                TableName: TABLE_REMINDERS, Key: { reminderId, appointmentId },
+                UpdateExpression: `SET #status = :status, deliveries = :deliveries, sentAt = :sentAt${snsMessageId ? ', snsMessageId = :mid' : ''}`,
+                ConditionExpression: '#status = :sending',
+                ExpressionAttributeNames: { '#status': 'status' },
+                ExpressionAttributeValues: {
+                    ':status': status, ':deliveries': deliveries, ':sentAt': new Date().toISOString(), ':sending': 'sending',
+                    ...(snsMessageId ? { ':mid': snsMessageId } : {}),
+                },
+            }));
+        } catch (err: unknown) {
+            safeError(`[REMINDER] Outcome of reminder ${reminderId} not recorded`, { error: errorName(err) });
+        }
+
+        try {
+            await writeAuditLog(user.id, appointment.patientId, 'SEND_REMINDER',
+                `Appointment reminder ${status}: ${type} via ${channel} for ${appointmentId}`,
+                { region, reminderId, appointmentId, type, channel }
+            );
+        } catch (err: unknown) {
+            safeError(`[REMINDER] Audit of reminder ${reminderId} failed`, { error: errorName(err) });
+        }
+        publishEvent(EventType.APPOINTMENT_REMINDER, { appointmentId, patientId: appointment.patientId, type, channel, reminderId }, region).catch(() => {});
 
         res.json({
-            reminderId,
-            status: snsResult.error ? 'failed' : 'sent',
-            type,
-            channel: sendChannel,
-            appointmentId,
-            message: snsResult.error
-                ? `Reminder queued but delivery failed: ${snsResult.error}`
-                : `Reminder sent successfully via ${sendChannel}`,
-            snsMessageId: snsResult.snsMessageId,
+            reminderId, status, type, channel, appointmentId, deliveries, snsMessageId,
+            message: status === 'sent' ? REMINDER_COPY.sent : REMINDER_COPY.failed,
         });
-    } catch (error: any) {
-        safeError('Send reminder error:', { error: error.message });
-        res.status(500).json({ error: 'Failed to send appointment reminder' });
+    } catch (error: unknown) {
+        safeError('Send reminder error:', { error: errorName(error) });
+        res.status(500).json({ error: REMINDER_COPY.sendError });
     }
 };
 
@@ -257,63 +215,53 @@ export const sendAppointmentReminder = async (req: Request, res: Response) => {
 export const getPendingReminders = async (req: Request, res: Response) => {
     try {
         const user = (req as any).user;
-        const region = extractRegion(req);
-
+        const region = requestJurisdiction(req);
+        if (user?.isDoctor !== true || typeof user.id !== 'string' || !user.id) {
+            return res.status(403).json({ error: REMINDER_COPY.pendingForbidden });
+        }
         const db = getRegionalClient(region);
 
-        // Find appointments in the next 24 hours
-        const now = new Date();
-        const tomorrow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
+        // Only the requesting doctor's appointments, every page.
+        const appointments: any[] = [];
+        let startKey: Record<string, any> | undefined;
+        do {
+            const page = await db.send(new QueryCommand({
+                TableName: TABLE_APPOINTMENTS, IndexName: 'DoctorIndex',
+                KeyConditionExpression: 'doctorId = :did', ExpressionAttributeValues: { ':did': user.id },
+                ExclusiveStartKey: startKey,
+            }));
+            appointments.push(...(page.Items ?? []));
+            startKey = page.LastEvaluatedKey;
+        } while (startKey);
 
-        // Scan for upcoming appointments (in production, use GSI on timeSlot)
-        const { Items: appointments = [] } = await db.send(new ScanCommand({
-            TableName: TABLE_APPOINTMENTS,
-            FilterExpression: '#st = :confirmed',
-            ExpressionAttributeNames: { '#st': 'status' },
-            ExpressionAttributeValues: { ':confirmed': 'CONFIRMED' },
-            Limit: 100,
-        }));
-
-        // Filter to next 24h
-        const upcoming = appointments.filter((appt: any) => {
-            const apptTime = new Date(appt.timeSlot || appt.date);
-            return apptTime >= now && apptTime <= tomorrow;
+        const now = Date.now();
+        const upcoming = appointments.filter(appt => {
+            const at = new Date(appt.timeSlot || appt.date).getTime();
+            return appt.status === 'CONFIRMED' && at >= now && at <= now + PENDING_WINDOW_MS;
         });
 
-        // Check which ones already have reminders sent
+        // A 24h reminder that is sent or being sent is not pending; a failed one is.
         const needsReminder: any[] = [];
         for (const appt of upcoming) {
-            const { Items: reminders = [] } = await db.send(new ScanCommand({
-                TableName: TABLE_REMINDERS,
-                FilterExpression: 'appointmentId = :aid AND #t = :type',
-                ExpressionAttributeNames: { '#t': 'type' },
-                ExpressionAttributeValues: {
-                    ':aid': (appt as any).appointmentId,
-                    ':type': '24h'
-                },
-                Limit: 1,
+            const { Item: reminder } = await db.send(new GetCommand({
+                TableName: TABLE_REMINDERS, Key: { reminderId: `${appt.appointmentId}#24h`, appointmentId: appt.appointmentId },
             }));
-
-            if (reminders.length === 0) {
+            if (!reminder || reminder.status === 'failed') {
                 needsReminder.push({
-                    appointmentId: (appt as any).appointmentId,
-                    patientId: (appt as any).patientId,
-                    doctorId: (appt as any).doctorId,
-                    timeSlot: (appt as any).timeSlot || (appt as any).date,
-                    reason: (appt as any).reason,
+                    appointmentId: appt.appointmentId,
+                    patientId: appt.patientId,
+                    doctorId: appt.doctorId,
+                    timeSlot: appt.timeSlot || appt.date,
+                    reason: plain(appt.reason),
                     reminderSent: false,
                 });
             }
         }
 
-        res.json({
-            total: needsReminder.length,
-            upcomingInNext24h: upcoming.length,
-            pendingReminders: needsReminder,
-        });
-    } catch (error: any) {
-        safeError('Get pending reminders error:', { error: error.message });
-        res.status(500).json({ error: 'Failed to get pending reminders' });
+        res.json({ total: needsReminder.length, upcomingInNext24h: upcoming.length, pendingReminders: needsReminder });
+    } catch (error: unknown) {
+        safeError('Get pending reminders error:', { error: errorName(error) });
+        res.status(500).json({ error: REMINDER_COPY.pendingError });
     }
 };
 
@@ -322,19 +270,29 @@ export const getPendingReminders = async (req: Request, res: Response) => {
 export const getAppointmentReminders = async (req: Request, res: Response) => {
     try {
         const { appointmentId } = req.params;
-        const region = extractRegion(req);
-
+        const region = requestJurisdiction(req);
         const db = getRegionalClient(region);
-        const { Items = [] } = await db.send(new ScanCommand({
-            TableName: TABLE_REMINDERS,
-            FilterExpression: 'appointmentId = :aid',
-            ExpressionAttributeValues: { ':aid': appointmentId },
-        }));
 
-        const sorted = Items.sort((a: any, b: any) =>
-            new Date(b.sentAt).getTime() - new Date(a.sentAt).getTime()
-        );
+        const appointment = await getAppointment(db, appointmentId);
+        if (!appointment) return res.status(404).json({ error: REMINDER_COPY.notFound });
+        if (!participant((req as any).user, appointment)) return res.status(403).json({ error: REMINDER_COPY.forbidden });
 
+        // The reminders table is keyed by reminderId, so an appointment's reminders need a scan; every page is read.
+        const items: any[] = [];
+        let startKey: Record<string, any> | undefined;
+        do {
+            const page = await db.send(new ScanCommand({
+                TableName: TABLE_REMINDERS,
+                FilterExpression: 'appointmentId = :aid',
+                ExpressionAttributeValues: { ':aid': appointmentId },
+                ExclusiveStartKey: startKey,
+            }));
+            items.push(...(page.Items ?? []));
+            startKey = page.LastEvaluatedKey;
+        } while (startKey);
+
+        const at = (r: any) => new Date(r.sentAt || r.createdAt).getTime() || 0;
+        const sorted = items.sort((a, b) => at(b) - at(a));
         res.json({
             appointmentId,
             total: sorted.length,
@@ -343,11 +301,12 @@ export const getAppointmentReminders = async (req: Request, res: Response) => {
                 type: r.type,
                 channel: r.channel,
                 status: r.status,
+                deliveries: r.deliveries,
                 sentAt: r.sentAt,
-            }))
+            })),
         });
-    } catch (error: any) {
-        safeError('Get appointment reminders error:', { error: error.message });
-        res.status(500).json({ error: 'Failed to get reminders' });
+    } catch (error: unknown) {
+        safeError('Get appointment reminders error:', { error: errorName(error) });
+        res.status(500).json({ error: REMINDER_COPY.listError });
     }
 };
