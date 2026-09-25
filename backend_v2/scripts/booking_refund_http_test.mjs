@@ -89,6 +89,8 @@ const conditional = () => Object.assign(new Error('conditional'), { name: 'Condi
 const cancelled = codes => Object.assign(new Error('Transaction cancelled'), {
   name: 'TransactionCanceledException', CancellationReasons: codes.map(Code => ({ Code })) });
 
+/** Assigning undefined to process.env stores the string "undefined", so an absent value is deleted instead. */
+const restoreSetting = (name, value) => { if (value === undefined) delete process.env[name]; else process.env[name] = value; };
 const HOUR = 3600_000;
 const slot = offsetMs => new Date(Date.now() + offsetMs).toISOString().split('.')[0] + 'Z';
 const appointment = (overrides = {}) => ({
@@ -666,7 +668,7 @@ test('a refund list longer than the configured page bound goes to manual review 
     assert.equal(result.body.refundStatus, 'REQUIRES_MANUAL_REFUND');
     assert.equal(h.stripe.refundCalls.length, 0, 'no refund created from an incomplete list');
     assert.ok(h.stripe.listCalls <= 2, `listed ${h.stripe.listCalls} pages`);
-  } finally { process.env.CANCELLATION_REFUND_MAX_PAGES = previous; mock.restoreAll(); }
+  } finally { restoreSetting('CANCELLATION_REFUND_MAX_PAGES', previous); mock.restoreAll(); }
 });
 
 // C27 (review #3 F2): the refund page bound is only needed to refund; a missing value never breaks check-in or status.
@@ -682,5 +684,5 @@ test('a missing refund page bound breaks neither check-in nor a doctor status ch
     assert.equal(cancelled.status, 200);
     assert.equal(cancelled.body.refundStatus, 'REQUIRES_MANUAL_REFUND');
     assert.equal(h.stripe.refundCalls.length, 0);
-  } finally { process.env.CANCELLATION_REFUND_MAX_PAGES = previous; mock.restoreAll(); }
+  } finally { restoreSetting('CANCELLATION_REFUND_MAX_PAGES', previous); mock.restoreAll(); }
 });
