@@ -474,6 +474,7 @@ test('a paid bill already under refund review is flagged again, never settled as
     assert.equal((await h.deliver()).status, 200);
     assert.equal(h.bill().reviewReason, 'PRESCRIPTION_NOT_PAYABLE');
     assert.equal(h.effects.revenue.mock.callCount(), 0, 'not recorded as a settled debt');
+    assert.equal(h.bill().status, 'PAID', 'captured money recorded'); assert.equal(h.bill().paymentIntentId, 'pi_test', 'this payment recorded for review');
     assert.equal(h.effects.notify.mock.callCount(), 0, 'patient not told the debt is settled');
   } finally { mock.restoreAll(); }
 });
@@ -485,5 +486,6 @@ test('a bill flagged for refund review after it was read is never settled as a d
     assert.equal((await h.deliver()).status, 200);
     assert.equal(h.bill().reviewReason, 'PRESCRIPTION_NOT_PAYABLE');
     assert.equal(h.effects.revenue.mock.callCount(), 0, 'not recorded as a settled debt');
+    assert.equal(h.bill().status, 'PAID', 'captured money recorded'); assert.equal(h.bill().paymentIntentId, 'pi_test', 'this payment recorded for review');
   } finally { mock.restoreAll(); }
 });

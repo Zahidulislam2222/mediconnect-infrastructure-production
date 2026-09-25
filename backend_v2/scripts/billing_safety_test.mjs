@@ -91,3 +91,14 @@ for (const failure of ['createFails', 'persistFails']) {
     } finally { mock.restoreAll(); }
   });
 }
+
+// A42: a bill under refund review (a payment was captured and flagged) is never charged again, even when a later
+// payment_failed event made its status look payable.
+test('a bill under refund review is refused before any provider call', async () => {
+  try {
+    const h = harness({ bill: { status: 'FAILED', reviewReason: 'PRESCRIPTION_NOT_PAYABLE', paymentIntentId: 'pi_test' } });
+    const result = await h.request();
+    assert.equal(result.status, 409); assert.equal(result.body.code, 'BILL_NOT_PAYABLE');
+    assert.deepEqual(h.calls, { create: 0, confirm: 0, retrieve: 0, reserve: 0 });
+  } finally { mock.restoreAll(); }
+});

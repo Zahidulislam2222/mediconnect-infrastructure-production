@@ -102,7 +102,8 @@ export const payBill = async (req: Request, res: Response) => {
         }));
         if (!bill || bill.patientId !== patientId) return res.status(404).json({ error: "Bill not found." });
         if (bill.status === 'PAID') return res.status(409).json({ code: "BILL_ALREADY_PAID" });
-        if (!PAYABLE_BILL_STATUSES.includes(bill.status)) {
+        // A bill under refund review already had money captured; a later payment_failed event can make it look payable.
+        if (!PAYABLE_BILL_STATUSES.includes(bill.status) || bill.reviewReason !== undefined) {
             return res.status(409).json({ code: "BILL_NOT_PAYABLE" });
         }
         const amount = Math.round(Number(bill.amount) * config.minorUnitScale);
