@@ -440,10 +440,17 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         // ORIGINAL: Cancelled the payment hold (which hadn't been captured yet).
         // FIX: Now that capture happens first, we must REFUND (not cancel).
         logger.error("[BOOKING] CRITICAL: DB transaction failed after payment capture. Issuing refund.", { error: dbError.message });
+        let refundIssued = false;
         if (stripeInstance && paymentIntentId) {
             try {
-                await stripeInstance.refunds.create({ payment_intent: paymentIntentId });
-                logger.info(`Refund issued for failed booking: ${paymentIntentId}`);
+                // A retried compensation must never refund twice; Stripe replays the first result for this key.
+                const refund = await stripeInstance.refunds.create(
+                    { payment_intent: paymentIntentId },
+                    { idempotencyKey: `booking-compensation-refund:${paymentIntentId}` }
+                );
+                refundIssued = ISSUED_REFUND_STATUSES.has(refund.status ?? '');
+                if (!refundIssued) logger.error("CRITICAL ESCALATION: Booking compensation refund was not issued. Manual intervention required.", { appointmentId, paymentIntentId, refundStatus: refund.status });
+                else logger.info(`Refund issued for failed booking: ${paymentIntentId}`);
             } catch (refundError) {
                 // CRITICAL: Money taken but DB and refund both failed
                 // This requires manual intervention
@@ -455,7 +462,10 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
         if (lockKey) {
             try { await docClient.send(new DeleteCommand({ TableName: TABLE_LOCKS, Key: { lockId: lockKey } })); } catch { logger.warn('BOOKING_COMPENSATION_FAILED'); }
         }
-        res.status(500).json({ error: "System Error. Your payment has been refunded." });
+        const outcome = !paymentIntentId ? "Your booking was not completed."
+            : refundIssued ? "Your payment has been refunded."
+            : "Your booking was not completed and the automatic refund did not go through. Support will refund your payment.";
+        res.status(500).json({ error: `System Error. ${outcome}` });
     }
 });
 
@@ -606,8 +616,6 @@ export const cleanupAppointments = catchAsync(async (req: Request, res: Response
     }
 
     const now = new Date();
-    const stripeKey = await getSSMParameter(STRIPE_SECRET_NAME, region, true);
-    const stripe = stripeKey ? new Stripe(stripeKey) : null;
     let processed = 0;
     let exclusiveStartKey: any = undefined;
 
@@ -630,23 +638,23 @@ export const cleanupAppointments = catchAsync(async (req: Request, res: Response
             if (!apt.timeSlot) continue;
             const aptTime = new Date(apt.timeSlot);
             const diffMinutes = Math.floor((now.getTime() - aptTime.getTime()) / 60000);
+            const isNoShow = diffMinutes >= 10 && !apt.patientArrived;
+            const isDoctorFault = diffMinutes >= 30 && apt.patientArrived;
+            if (!isNoShow && !isDoctorFault) continue;
 
-            if (diffMinutes >= 10 && !apt.patientArrived) {
-                await cancelAppointment(apt, "CANCELLED_NO_SHOW", "FAILED", region);
-                processed++;
-                continue;
-            }
-
-            if (diffMinutes >= 30 && apt.patientArrived) {
-                let refundId = "REFUND_FAILED";
-                if (stripe && apt.paymentId && apt.paymentId !== "TEST_MODE") {
-                    try {
-                        const refund = await stripe.refunds.create({ payment_intent: apt.paymentId });
-                        refundId = refund.id;
-                    } catch (e: any) { logger.error("[BOOKING] Refund failed during cleanup", { error: e.message }); }
+            // Each appointment stands alone: one that fails is logged and retried by the next run.
+            try {
+                const claim = await claimCancellation(docClient, apt.appointmentId, CLEANUP_CANCELLABLE);
+                if (!claim) continue; // cancelled or claimed by someone else meanwhile
+                if (isNoShow) {
+                    // Existing policy: a patient no-show is not refunded automatically; paid ones are queued for review.
+                    await cancelAppointment(apt, "CANCELLED_NO_SHOW", { refundId: "FAILED", ledgerStatus: apt.amountPaid > 0 ? MANUAL_REFUND : null }, region, claim);
+                } else {
+                    await cancelAppointment(apt, "CANCELLED_DOCTOR_FAULT", await refundAppointmentPayment(apt.appointmentId, apt, region), region, claim);
                 }
-                await cancelAppointment(apt, "CANCELLED_DOCTOR_FAULT", refundId, region);
                 processed++;
+            } catch (e: any) {
+                logger.error("[BOOKING] Cleanup could not cancel appointment", { appointmentId: apt.appointmentId, error: e.message });
             }
         }
     } while (exclusiveStartKey);
@@ -680,6 +688,9 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
     if (!apt) return res.status(404).json({ message: "Appointment not found" });
     if (apt.patientId !== patientId) return res.status(403).json({ message: "Identity mismatch." });
 
+    // Decryption below works in place; the stored resource must keep its encrypted participant names.
+    const storedResource = apt.resource ? structuredClone(apt.resource) : null;
+
     // FIX #7: Decrypt PHI names for downstream use (PDF receipt, etc.)
     await decryptAppointmentNames(apt, region);
 
@@ -701,24 +712,16 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
         return res.status(400).json({ message: "Policy Block: Cancellations are not permitted less than 24 hours before the appointment time. Please contact support." });
     }
 
-    // 1. Refund Logic
-    let refundId = "NOT_APPLICABLE";
-    if (apt.paymentId && apt.paymentId !== "TEST_MODE") {
-        try {
-            const stripeKey = await getSSMParameter(STRIPE_SECRET_NAME, region, true);
-            if (stripeKey) {
-                const stripe = new Stripe(stripeKey);
-                const refund = await stripe.refunds.create({ payment_intent: apt.paymentId });
-                refundId = refund.id;
-            }
-        } catch (e: any) {
-            logger.error("[BOOKING] Stripe refund failed for user cancellation", { error: e.message });
-            refundId = "REFUND_FAILED_MANUAL_REQUIRED";
-        }
-    }
+    // 1. Claim the cancellation so repeated or concurrent requests cannot refund twice.
+    const claim = await claimCancellation(docClient, appointmentId, PATIENT_CANCELLABLE);
+    if (!claim) return res.status(409).json({ message: "This appointment is already cancelled or can no longer be cancelled." });
 
-    // 2. Update Appointment Status
-    const fhirResource = apt.resource;
+    // 2. Refund Logic
+    const refund = await refundAppointmentPayment(appointmentId, apt, region);
+    const txStatus = refund.ledgerStatus;
+
+    // 3. Update Appointment Status
+    const fhirResource = storedResource;
     if (fhirResource) {
         fhirResource.status = "cancelled";
         fhirResource.cancelationReason = { coding: [{ system: "http://terminology.hl7.org/CodeSystem/appointment-cancellation-reason", code: "pat", display: "Patient" }], text: "Cancelled by patient" };
@@ -727,25 +730,26 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
         }
     }
 
-    // 2b. Atomic: Update appointment status + create refund transaction (if amount > 0)
-    const transactionId = randomUUID();
-    const txStatus = refundId === "REFUND_FAILED_MANUAL_REQUIRED" ? "FAILED_REQUIRES_MANUAL_REFUND" : "PROCESSED";
+    // 3b. Atomic: Update appointment status + create refund transaction (only when a payment was taken)
+    const transactionId = refundBillId(appointmentId);
 
     const transactItems: any[] = [
         {
             Update: {
                 TableName: TABLE_APPOINTMENTS, Key: { appointmentId },
-                UpdateExpression: "set #s = :s, #res = :resource",
+                UpdateExpression: "set #s = :s, #res = :resource, refundId = :r REMOVE cancellationClaim, cancellationClaimedAt",
+                ConditionExpression: "cancellationClaim = :claim",
                 ExpressionAttributeNames: { "#s": "status", "#res": "resource" },
-                ExpressionAttributeValues: { ":s": "CANCELLED", ":resource": fhirResource || null }
+                ExpressionAttributeValues: { ":s": "CANCELLED", ":resource": fhirResource || null, ":r": refund.refundId, ":claim": claim }
             }
         }
     ];
 
-    if (apt.amountPaid > 0) {
+    if (txStatus) {
         transactItems.push({
             Put: {
                 TableName: TABLE_TRANSACTIONS,
+                ConditionExpression: "attribute_not_exists(billId)",
                 Item: {
                     billId: transactionId, referenceId: appointmentId,
                     patientId, doctorId: apt.doctorId || "UNKNOWN",
@@ -769,7 +773,12 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
         });
     }
 
-    await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
+    try {
+        await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
+    } catch (finalizeError) {
+        await releaseCancellationClaim(docClient, appointmentId, claim);
+        throw finalizeError;
+    }
 
     if (apt.googleEventId && apt.doctorId) {
         deleteFromGoogleCalendar(apt.doctorId, apt.googleEventId, region).catch(e => logger.error("[BOOKING] Calendar delete failed on user cancel", { error: e.message }));
@@ -828,7 +837,7 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
             doctorName: apt.doctorName,
             amount: apt.amountPaid || 0,
             date: new Date().toISOString(),
-            status: "REFUNDED",
+            status: txStatus === "PROCESSED" ? "REFUNDED" : "CANCELLED",
             type: "REFUND"
         }, region).catch(e => logger.error("[BOOKING] Auto-refund PDF generation failed", { error: e.message }));
     } catch (e) { logger.error("[BOOKING] Audit log failed for user cancellation"); }
@@ -845,7 +854,7 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
     }, region).catch(e => logger.error("[BOOKING] BigQuery cancellation sync failed", { error: e.message }));
 
     // Push refund revenue to BigQuery analytics
-    if (apt.amountPaid > 0) {
+    if (txStatus) {
         pushRevenueToBigQuery({
             billId: transactionId,
             patientId: apt.patientId,
@@ -861,7 +870,7 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
         region,
         recipientEmail: (req as any).user?.email,
         subject: 'Booking Cancelled',
-        message: `Your appointment (${appointmentId}) has been cancelled and a refund has been initiated.`,
+        message: `Your appointment (${appointmentId}) has been cancelled. ${refundNotice(txStatus)}`.trim(),
         type: 'BOOKING_CANCELLATION',
         metadata: { appointmentId }
     }).catch(() => {});
@@ -869,7 +878,7 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
     // Event bus: appointment cancelled
     publishEvent(EventType.APPOINTMENT_CANCELLED, { appointmentId, patientId: apt.patientId, doctorId: apt.doctorId, reason: "Patient cancellation" }, region).catch(() => {});
 
-    res.status(200).json({ message: "Appointment cancelled and refunded" });
+    res.status(200).json({ message: `Appointment cancelled. ${refundNotice(txStatus)}`.trim(), refundStatus: refundStatusOf(txStatus) });
 });
 
 export const updateAppointment = catchAsync(async (req: Request, res: Response) => {
@@ -897,26 +906,15 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
     }
 
     if (status === 'CANCELLED' || status === 'CANCELLED_NO_SHOW') {
-        let refundId = "REFUND_FAILED";
+        const claim = await claimCancellation(docClient, appointmentId, DOCTOR_CANCELLABLE);
+        if (!claim) return res.status(409).json({ message: "This appointment is already cancelled or can no longer be cancelled." });
 
-        if (existing.Item.paymentId && existing.Item.paymentId !== "TEST_MODE") {
-            try {
-                const stripeKey = await getSSMParameter(STRIPE_SECRET_NAME, region, true);
-                if (stripeKey) {
-                    const stripe = new Stripe(stripeKey);
-                    const refund = await stripe.refunds.create({ payment_intent: existing.Item.paymentId });
-                    refundId = refund.id;
-                }
-            } catch (e: any) {
-                logger.error("[BOOKING] Stripe refund failed during doctor cancellation", { error: e.message });
-            }
-        }
-
-        await cancelAppointment(existing.Item, status, refundId, region);
+        const refund = await refundAppointmentPayment(appointmentId, existing.Item, region);
+        await cancelAppointment(existing.Item, status, refund, region, claim);
 
         await writeAuditLog(requesterId || "SYSTEM", existing.Item.patientId, "CANCEL_APPOINTMENT_DOCTOR", `Doctor cancelled appointment ${appointmentId}`, { region, ipAddress: req.ip });
-        
-        return res.status(200).json({ message: "Appointment cancelled, refunded, and schedule unlocked." });
+
+        return res.status(200).json({ message: `Appointment cancelled and schedule unlocked. ${refundNotice(refund.ledgerStatus)}`.trim(), refundStatus: refundStatusOf(refund.ledgerStatus) });
     }
 
     let updateExpression = "set lastUpdated = :now";
@@ -964,14 +962,93 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
 
     res.status(200).json({ message: "Appointment updated successfully" });
 });
-// Helper Function
-async function cancelAppointment(apt: any, newStatus: string, refundId: string, region: string) {
+// ─── Cancellation and refund helpers ─────────────────────────────────────────
+// Every cancellation path claims the appointment first, so only one caller ever talks to the payment provider,
+// and records exactly one refund row under a deterministic id. A refund counts as issued only when Stripe reports
+// it succeeded or pending; anything else is queued for a manual refund and never described as refunded.
+const PATIENT_CANCELLABLE = ["CONFIRMED"];
+const DOCTOR_CANCELLABLE = ["CONFIRMED", "IN_PROGRESS"];
+const CLEANUP_CANCELLABLE = ["CONFIRMED"];
+const ISSUED_REFUND_STATUSES = new Set(["succeeded", "pending"]);
+const MANUAL_REFUND = "FAILED_REQUIRES_MANUAL_REFUND";
+type LedgerStatus = "PROCESSED" | typeof MANUAL_REFUND | null;
+type RefundOutcome = { refundId: string; ledgerStatus: LedgerStatus };
+
+const refundBillId = (appointmentId: string) => `refund-${appointmentId}`;
+type DocClient = ReturnType<typeof getRegionalClient>;
+type PaymentRecord = { paymentId?: string; amountPaid?: number };
+const errorMessage = (e: unknown) => e instanceof Error ? e.message : String(e);
+
+function refundNotice(ledgerStatus: LedgerStatus): string {
+    if (ledgerStatus === "PROCESSED") return "A refund has been issued.";
+    if (ledgerStatus === MANUAL_REFUND) return "Your refund could not be completed automatically; our support team will process it.";
+    return "";
+}
+
+function refundStatusOf(ledgerStatus: LedgerStatus): string {
+    return ledgerStatus === "PROCESSED" ? "ISSUED" : ledgerStatus === MANUAL_REFUND ? "REQUIRES_MANUAL_REFUND" : "NOT_APPLICABLE";
+}
+
+async function claimCancellation(docClient: DocClient, appointmentId: string, allowedStatuses: string[]): Promise<string | null> {
+    const claim = randomUUID();
+    const statusValues = Object.fromEntries(allowedStatuses.map((status, i) => [`:allowed${i}`, status]));
+    try {
+        await docClient.send(new UpdateCommand({
+            TableName: TABLE_APPOINTMENTS, Key: { appointmentId },
+            UpdateExpression: "SET cancellationClaim = :claim, cancellationClaimedAt = :now",
+            ConditionExpression: `#s IN (${Object.keys(statusValues).join(", ")}) AND attribute_not_exists(cancellationClaim)`,
+            ExpressionAttributeNames: { "#s": "status" },
+            ExpressionAttributeValues: { ":claim": claim, ":now": new Date().toISOString(), ...statusValues }
+        }));
+        return claim;
+    } catch (e) {
+        if ((e as { name?: string })?.name === "ConditionalCheckFailedException") return null;
+        throw e;
+    }
+}
+
+/** Lets a retry proceed after a failed save; the refund's idempotency key makes that retry safe. */
+async function releaseCancellationClaim(docClient: DocClient, appointmentId: string, claim: string) {
+    await docClient.send(new UpdateCommand({
+        TableName: TABLE_APPOINTMENTS, Key: { appointmentId },
+        UpdateExpression: "REMOVE cancellationClaim, cancellationClaimedAt",
+        ConditionExpression: "cancellationClaim = :claim",
+        ExpressionAttributeValues: { ":claim": claim }
+    })).catch(() => logger.error("[BOOKING] Cancellation claim could not be released; operator review required", { appointmentId }));
+}
+
+async function refundAppointmentPayment(appointmentId: string, apt: PaymentRecord, region: string): Promise<RefundOutcome> {
+    if (!apt.paymentId || apt.paymentId === "TEST_MODE" || !((apt.amountPaid ?? 0) > 0)) {
+        return { refundId: "NOT_APPLICABLE", ledgerStatus: null };
+    }
+    try {
+        const stripeKey = await getSSMParameter(STRIPE_SECRET_NAME, region, true);
+        if (!stripeKey) throw new Error("Payment provider key unavailable");
+        const refund = await new Stripe(stripeKey).refunds.create(
+            { payment_intent: apt.paymentId },
+            { idempotencyKey: `appointment-refund:${appointmentId}` }
+        );
+        const issued = ISSUED_REFUND_STATUSES.has(refund.status ?? "");
+        if (!issued) logger.error("[BOOKING] Refund not issued; manual refund required", { appointmentId, refundStatus: refund.status });
+        return { refundId: refund.id, ledgerStatus: issued ? "PROCESSED" : MANUAL_REFUND };
+    } catch (e) {
+        logger.error("[BOOKING] Refund failed; manual refund required", { appointmentId, error: errorMessage(e) });
+        return { refundId: "REFUND_FAILED", ledgerStatus: MANUAL_REFUND };
+    }
+}
+
+/** Finalizes a claimed cancellation. A failed save releases the claim and propagates; side effects stay best-effort. */
+async function cancelAppointment(apt: any, newStatus: string, refund: RefundOutcome, region: string, claim: string) {
     const docClient = getRegionalClient(region);
+    const { refundId, ledgerStatus: txStatus } = refund;
+    // Decryption below works in place; the stored resource must keep its encrypted participant names.
+    const storedResource = apt.resource ? structuredClone(apt.resource) : null;
     // FIX #7: Decrypt PHI names for downstream use (PDF receipt)
     await decryptAppointmentNames(apt, region);
-    try {
+    const refundBill = refundBillId(apt.appointmentId);
+    { // Finalize: the one step whose failure the caller must see.
         // 1. FHIR & DYNAMODB CRASH FIX
-        const fhirResource = apt.resource;
+        const fhirResource = storedResource;
         if (fhirResource) {
             fhirResource.status = "cancelled"; 
             if (Array.isArray(fhirResource.participant)) {
@@ -979,38 +1056,36 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
             }
         }
 
-        const updateExpression = "set #s = :s, refundId = :r, lastUpdated = :now, #res = :resource";
-        const expressionAttributeValues: any = { 
-            ":s": newStatus, 
-            ":r": refundId, 
+        const updateExpression = "set #s = :s, refundId = :r, lastUpdated = :now, #res = :resource REMOVE cancellationClaim, cancellationClaimedAt";
+        const expressionAttributeValues: any = {
+            ":s": newStatus,
+            ":r": refundId,
             ":now": new Date().toISOString(),
-            ":resource": fhirResource || null
+            ":resource": fhirResource || null,
+            ":claim": claim
         };
         const expressionAttributeNames: any = { "#s": "status", "#res": "resource" };
 
         // Atomic appointment update + refund transaction (matches cancelBookingUser TransactWrite pattern)
-        const refundBillId = randomUUID();
-        const txStatus = (apt.amountPaid > 0)
-            ? (refundId === "FAILED" || refundId === "REFUND_FAILED" ? "FAILED_REQUIRES_MANUAL_REFUND" : "PROCESSED")
-            : null;
-
         const transactItems: any[] = [
             {
                 Update: {
                     TableName: TABLE_APPOINTMENTS, Key: { appointmentId: apt.appointmentId },
                     UpdateExpression: updateExpression,
+                    ConditionExpression: "cancellationClaim = :claim",
                     ExpressionAttributeNames: expressionAttributeNames,
                     ExpressionAttributeValues: expressionAttributeValues
                 }
             }
         ];
 
-        if (apt.amountPaid > 0 && txStatus) {
+        if (txStatus) {
             transactItems.push({
                 Put: {
                     TableName: TABLE_TRANSACTIONS,
+                    ConditionExpression: "attribute_not_exists(billId)",
                     Item: {
-                        billId: refundBillId, referenceId: apt.appointmentId,
+                        billId: refundBill, referenceId: apt.appointmentId,
                         patientId: apt.patientId, doctorId: apt.doctorId || "UNKNOWN",
                         type: "REFUND", amount: -(apt.amountPaid || 0),
                         currency: "USD", status: txStatus,
@@ -1032,8 +1107,14 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
             });
         }
 
-        await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
-
+        try {
+            await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
+        } catch (finalizeError) {
+            await releaseCancellationClaim(docClient, apt.appointmentId, claim);
+            throw finalizeError;
+        }
+    }
+    try {
         // 2. Google Calendar Cleanup (If connected)
         if (apt.googleEventId && apt.doctorId) {
             await deleteFromGoogleCalendar(apt.doctorId, apt.googleEventId, region).catch(e =>
@@ -1051,7 +1132,7 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
             doctorName: apt.doctorName,
             amount: apt.amountPaid || 0,
             date: new Date().toISOString(),
-            status: refundId.includes("REFUND") || refundId !== "FAILED" ? "REFUNDED" : "CANCELLED",
+            status: txStatus === "PROCESSED" ? "REFUNDED" : "CANCELLED",
             type: "REFUND"
         }, region).catch(e => logger.error("[BOOKING] Auto-system PDF generation failed", { error: e.message }));
 
@@ -1065,9 +1146,9 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
         }, region).catch(e => logger.error("[BOOKING] BigQuery cancellation sync failed", { error: e.message }));
 
         // Push refund revenue to BigQuery analytics
-        if (apt.amountPaid > 0) {
+        if (txStatus) {
             pushRevenueToBigQuery({
-                billId: refundBillId,
+                billId: refundBill,
                 patientId: apt.patientId,
                 doctorId: apt.doctorId || "UNKNOWN",
                 amount: -(apt.amountPaid || 0),
@@ -1144,7 +1225,7 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
                         region,
                         recipientEmail: patientRecord.Item.email,
                         subject: 'Appointment Cancelled',
-                        message: `Your appointment (${apt.appointmentId}) has been cancelled. ${refundId !== 'FAILED' ? 'A refund has been initiated.' : 'Please contact support for refund.'}`,
+                        message: `Your appointment (${apt.appointmentId}) has been cancelled. ${refundNotice(txStatus)}`.trim(),
                         type: 'BOOKING_CANCELLATION',
                         metadata: { appointmentId: apt.appointmentId }
                     }).catch(() => {});
@@ -1152,7 +1233,7 @@ async function cancelAppointment(apt: any, newStatus: string, refundId: string, 
             } catch { /* Non-blocking */ }
         }
 
-    } catch (e: any) { logger.error("[BOOKING] Cancel appointment update failed", { error: e.message }); }
+    } catch (e: any) { logger.error("[BOOKING] Post-cancellation side effect failed", { error: e.message }); }
 }
 
 export const getReceipt = catchAsync(async (req: Request, res: Response) => {
