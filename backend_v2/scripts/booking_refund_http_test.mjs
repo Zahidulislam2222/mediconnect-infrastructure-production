@@ -622,14 +622,14 @@ test('a finished cancellation later marked refunded is never cancelled again and
       const h = harness();
       assert.equal((await h[cancel]()).status, 200, cancel);
       h.apt().status = 'REFUNDED'; // what handleChargeRefunded writes when our refund lands
-      assert.equal(h.lock(), undefined, `${cancel}: first cancellation freed the slot`);
-      h.put(LOCKS, { lockId: `test-doctor#${appointment().timeSlot}`, status: 'BOOKED', appointmentId: 'test-other-apt' }); // another patient rebooks
+      assert.equal(h.lock(h.apt()), undefined, `${cancel}: first cancellation freed the slot`);
+      h.put(LOCKS, { lockId: `test-doctor#${h.apt().timeSlot}`, status: 'BOOKED', appointmentId: 'test-other-apt' }); // another patient rebooks
       const [notices, receipts] = [h.notices.length, h.receipts.length];
       const again = await h[cancel]();
       assert.equal(again.status, 409, `${cancel}: second cancellation refused`);
       assert.equal(h.notices.length, notices, `${cancel}: no second notice`);
       assert.equal(h.receipts.length, receipts, `${cancel}: no second receipt`);
-      assert.equal(h.lock()?.appointmentId, 'test-other-apt', `${cancel}: rebooked lock kept`);
+      assert.equal(h.lock(h.apt())?.appointmentId, 'test-other-apt', `${cancel}: rebooked lock kept`);
       assert.equal(h.stripe.created.length, 1);
     } finally { mock.restoreAll(); }
   }
@@ -666,5 +666,21 @@ test('a refund list longer than the configured page bound goes to manual review 
     assert.equal(result.body.refundStatus, 'REQUIRES_MANUAL_REFUND');
     assert.equal(h.stripe.refundCalls.length, 0, 'no refund created from an incomplete list');
     assert.ok(h.stripe.listCalls <= 2, `listed ${h.stripe.listCalls} pages`);
+  } finally { process.env.CANCELLATION_REFUND_MAX_PAGES = previous; mock.restoreAll(); }
+});
+
+// C27 (review #3 F2): the refund page bound is only needed to refund; a missing value never breaks check-in or status.
+test('a missing refund page bound breaks neither check-in nor a doctor status change, and a refund goes to review', async () => {
+  const previous = process.env.CANCELLATION_REFUND_MAX_PAGES;
+  delete process.env.CANCELLATION_REFUND_MAX_PAGES;
+  try {
+    let h = harness();
+    assert.equal((await h.patientCheckIn()).status, 200, 'check-in');
+    assert.equal((await h.doctorUpdate({ status: 'IN_PROGRESS' })).status, 200, 'status change');
+    mock.restoreAll(); h = harness();
+    const cancelled = await h.doctorCancel();
+    assert.equal(cancelled.status, 200);
+    assert.equal(cancelled.body.refundStatus, 'REQUIRES_MANUAL_REFUND');
+    assert.equal(h.stripe.refundCalls.length, 0);
   } finally { process.env.CANCELLATION_REFUND_MAX_PAGES = previous; mock.restoreAll(); }
 });

@@ -82,8 +82,14 @@ export function getApiBrowserSettings() {
 
 /** A cancellation claim older than this belongs to a request that died; another cancellation may take it over. */
 export function getCancellationSettings() {
-    return z.object({ claimTtlSeconds: z.coerce.number().int().positive(), refundMaxPages: z.coerce.number().int().positive() })
-        .parse({ claimTtlSeconds: setting('CANCELLATION_CLAIM_TTL_SECONDS'), refundMaxPages: setting('CANCELLATION_REFUND_MAX_PAGES') });
+    return z.object({ claimTtlSeconds: z.coerce.number().int().positive() })
+        .parse({ claimTtlSeconds: setting('CANCELLATION_CLAIM_TTL_SECONDS') });
+}
+
+/** Refund-list pages read before a cancellation refund goes to manual review; only the refund path needs it. */
+export function getCancellationRefundSettings() {
+    return z.object({ refundMaxPages: z.coerce.number().int().positive() })
+        .parse({ refundMaxPages: setting('CANCELLATION_REFUND_MAX_PAGES') });
 }
 
 export function getVitalsSettings() {

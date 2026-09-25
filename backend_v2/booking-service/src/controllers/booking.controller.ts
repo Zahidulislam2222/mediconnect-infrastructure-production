@@ -14,7 +14,7 @@ import { pushAppointmentToBigQuery, pushRevenueToBigQuery } from './billing.cont
 import { sendNotification } from '../../../shared/notifications';
 import { publishEvent, EventType } from '../../../shared/event-bus';
 
-import { getCancellationSettings, setting } from '../../../shared/settings';
+import { getCancellationRefundSettings, getCancellationSettings, setting } from '../../../shared/settings';
 import { ERASED_MARKER } from '../../../shared/erasure';
 import { CANCELLATION_COPY, RECEIPT_STATUS, REFUND_NOTICES, type RefundStatus } from '../content/cancellation';
 import { CLEANUP_CANCELLABLE, DOCTOR_CANCELLABLE, FHIR_CANCELLED, PATIENT_CANCELLABLE, REFUNDED_STATUS } from '../cancellation-policy';
@@ -726,7 +726,7 @@ export const cancelBookingUser = catchAsync(async (req: Request, res: Response) 
     // 3. Update Appointment Status
     const fhirResource = storedResource;
     if (fhirResource) {
-        fhirResource.status = "cancelled";
+        fhirResource.status = FHIR_CANCELLED;
         fhirResource.cancelationReason = { coding: [{ system: "http://terminology.hl7.org/CodeSystem/appointment-cancellation-reason", code: "pat", display: "Patient" }], text: "Cancelled by patient" };
         if (Array.isArray(fhirResource.participant)) {
             fhirResource.participant.forEach((p: any) => p.status = "declined");
@@ -986,11 +986,11 @@ async function claimCancellation(docClient: DocClient, appointmentId: string, al
     const claim = randomUUID();
     const statusValues = Object.fromEntries(allowedStatuses.filter(s => s !== REFUNDED_STATUS).map((status, i) => [`:allowed${i}`, status]));
     const refundedClaimable = allowedStatuses.includes(REFUNDED_STATUS);
-    const statusCondition = `#s IN (${Object.keys(statusValues).join(", ")})`;
+    const refundedCondition = "(#s = :refunded AND NOT (attribute_exists(cancellationId) OR attribute_exists(refundId) OR #res.#fhirStatus = :fhirCancelled))";
+    // DynamoDB rejects an empty IN (), so a list without other statuses keeps only the REFUNDED branch.
+    const statusConditions = [...(Object.keys(statusValues).length ? [`#s IN (${Object.keys(statusValues).join(", ")})`] : []), ...(refundedClaimable ? [refundedCondition] : [])];
     const conditions = [
-        refundedClaimable
-            ? `(${statusCondition} OR (#s = :refunded AND NOT (attribute_exists(cancellationId) OR attribute_exists(refundId) OR #res.#fhirStatus = :fhirCancelled)))`
-            : statusCondition,
+        `(${statusConditions.join(" OR ")})`,
         CLAIM_FREE, ...(fact ? [`(${fact.expression})`] : [])];
     try {
         await docClient.send(new UpdateCommand({
@@ -1055,7 +1055,7 @@ async function refundAppointmentPayment(appointmentId: string, apt: PaymentRecor
 
 /** Every refund on a payment. Stripe's idempotency cache can expire, so our own refund is found by its metadata. */
 async function listPaymentRefunds(stripe: Stripe, paymentIntent: string): Promise<Stripe.Refund[]> {
-    const { refundMaxPages } = getCancellationSettings();
+    const { refundMaxPages } = getCancellationRefundSettings();
     const refunds: Stripe.Refund[] = [];
     let cursor: string | undefined;
     let pages = 0;
@@ -1151,7 +1151,7 @@ async function cancelAppointment(apt: any, newStatus: string, refund: RefundOutc
     await decryptAppointmentNames(apt, region);
     const refundBill = refundBillId(apt.appointmentId);
     if (storedResource) {
-        storedResource.status = "cancelled";
+        storedResource.status = FHIR_CANCELLED;
         if (Array.isArray(storedResource.participant)) {
             storedResource.participant.forEach((p: any) => p.status = "declined");
         }

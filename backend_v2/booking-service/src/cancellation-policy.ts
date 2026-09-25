@@ -5,8 +5,9 @@
 export const REFUNDED_STATUS = "REFUNDED";
 /**
  * charge.refunded also marks a FINISHED cancellation REFUNDED, so REFUNDED is claimable only while no cancellation has
- * finished: every cancellation writer (legacy and current) records a refundId or cancellationId or sets the FHIR
- * resource status to "cancelled", and the webhook changes none of them.
+ * finished: cancellation writers record a refundId or cancellationId or set the FHIR resource status to "cancelled",
+ * and the webhook changes none of them. Known gap: a legacy patient cancel of a row with no resource left no marker;
+ * count such rows (REFUNDED, no refundId, cancellationId or resource.status) before deploying.
  */
 export const FHIR_CANCELLED = "cancelled";
 export const PATIENT_CANCELLABLE: readonly string[] = ["CONFIRMED", "REFUNDED"];
