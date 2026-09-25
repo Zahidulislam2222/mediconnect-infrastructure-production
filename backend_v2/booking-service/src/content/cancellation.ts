@@ -33,3 +33,14 @@ export const RECEIPT_STATUS = {
     noShow: "NO-SHOW",
     paid: "PAID",
 };
+
+/**
+ * Stripe refund webhooks. charge.refunded can arrive while a card refund is still pending, and a refund can later fail
+ * (docs.stripe.com/refunds), so the notice says only that a refund was requested.
+ */
+export const REFUND_WEBHOOK_COPY = {
+    requestedSubject: "Refund Requested",
+    requested: (amount: string) =>
+        `A refund of $${amount} to your original payment method has been requested. Your bank may take several business days to show it.`,
+    manualSubject: "Refund Needs Attention",
+};

@@ -8,7 +8,7 @@
         "build": "tsc",
         "dev": "nodemon src/index.ts",
         "lint": "eslint src/**/*.ts",
-        "test": "npm run build && node ../scripts/service_health_test.mjs booking-service && node ../scripts/billing_safety_test.mjs && node ../scripts/booking_refund_http_test.mjs && node ../scripts/booking_startup_settings_test.mjs",
+        "test": "npm run build && node ../scripts/service_health_test.mjs booking-service && node ../scripts/billing_safety_test.mjs && node ../scripts/booking_refund_http_test.mjs && node ../scripts/booking_startup_settings_test.mjs && node ../scripts/booking_refund_webhook_test.mjs",
         "typecheck": "tsc --noEmit"
     },
     "dependencies": {

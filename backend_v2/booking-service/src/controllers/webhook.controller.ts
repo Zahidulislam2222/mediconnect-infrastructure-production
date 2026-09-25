@@ -14,6 +14,8 @@ import {
     TABLE_SUBSCRIPTIONS,
 } from '../../../shared/subscription';
 import { TABLE_NAMES, setting } from '../../../shared/settings';
+import { REFUND_NOTICES, REFUND_WEBHOOK_COPY, type RefundStatus } from '../content/cancellation';
+import { MANUAL_REFUND_LEDGER_STATUS, refundBillId } from '../cancellation-policy';
 
 const STRIPE_SECRET_NAME = "/mediconnect/stripe/keys";
 const STRIPE_WEBHOOK_SECRET_NAME = "/mediconnect/stripe/webhook_secret";
@@ -138,6 +140,9 @@ export const handleStripeWebhook = async (req: Request, res: Response) => {
     } else if (event.type === 'charge.refunded') {
         const charge = event.data.object as Stripe.Charge;
         await handleChargeRefunded(charge, regionalDb, region);
+    } else if ((event.type as string) === 'refund.failed') {
+        // The pinned SDK types predate refund.failed (added to Event.type in API 2024-10-28.acacia).
+        await handleRefundFailed((event as Stripe.Event).data.object as Stripe.Refund, regionalDb, region);
     } else if (event.type === 'charge.dispute.created') {
         const dispute = event.data.object as Stripe.Dispute;
         await handleDisputeCreated(dispute, regionalDb, region);
@@ -527,12 +532,66 @@ async function handleChargeRefunded(charge: Stripe.Charge, regionalDb: any, regi
             sendNotification({
                 region,
                 recipientEmail: patientRecord.Item?.patientEmail || charge.metadata?.patientEmail,
-                subject: 'Refund Processed',
-                message: `Your refund of $${((charge.amount_refunded || 0) / 100).toFixed(2)} has been processed successfully.`,
+                subject: REFUND_WEBHOOK_COPY.requestedSubject,
+                message: REFUND_WEBHOOK_COPY.requested(((charge.amount_refunded || 0) / 100).toFixed(2)),
                 type: 'GENERAL',
                 metadata: { billId: billId || '', refundId: charge.id }
             }).catch(() => {});
         } catch { /* Non-blocking */ }
+    }
+}
+
+/**
+ * A failed refund's money goes back to the Stripe balance and must be returned another way (docs.stripe.com/refunds).
+ * Only the refund our cancellation recorded is changed, on the appointment and its refund row together; anything else
+ * is logged for a person. The event is already claimed, so this never throws.
+ */
+async function handleRefundFailed(refund: Stripe.Refund, regionalDb: ReturnType<typeof getRegionalClient>, region: string) {
+    const appointmentId = refund.metadata?.appointmentRefund;
+    if (!appointmentId) {
+        safeError(`Refund ${refund.id} failed and is not an appointment refund; manual refund follow-up required`);
+        return;
+    }
+    const now = new Date().toISOString();
+    const manual: RefundStatus = "REQUIRES_MANUAL_REFUND";
+    try {
+        await regionalDb.send(new TransactWriteCommand({
+            TransactItems: [{
+                Update: {
+                    TableName: TABLE_APPOINTMENTS, Key: { appointmentId },
+                    UpdateExpression: 'SET refundStatus = :manual, lastUpdated = :now',
+                    ConditionExpression: 'refundId = :rid',
+                    ExpressionAttributeValues: { ':manual': manual, ':now': now, ':rid': refund.id }
+                }
+            }, {
+                Update: {
+                    TableName: TABLE_TRANSACTIONS, Key: { billId: refundBillId(appointmentId) },
+                    UpdateExpression: 'SET #s = :failed, refundStatus = :manual, refundFailedAt = :now',
+                    ConditionExpression: 'refundId = :rid',
+                    ExpressionAttributeNames: { '#s': 'status' },
+                    ExpressionAttributeValues: { ':failed': MANUAL_REFUND_LEDGER_STATUS, ':manual': manual, ':now': now, ':rid': refund.id }
+                }
+            }]
+        }));
+    } catch (err: unknown) {
+        safeError(`Refund ${refund.id} failed but was not recorded for appointment ${appointmentId} (${err instanceof Error ? err.name : 'unknown error'}); manual refund follow-up required`);
+        return;
+    }
+    safeError(`Refund ${refund.id} failed (${refund.failure_reason ?? 'unknown'}); appointment ${appointmentId} marked for manual refund`);
+    try {
+        const appointment = (await regionalDb.send(new GetCommand({ TableName: TABLE_APPOINTMENTS, Key: { appointmentId } }))).Item;
+        await writeAuditLog(appointment?.patientId || "SYSTEM", appointment?.patientId || "UNKNOWN", "REFUND_FAILED",
+            `Stripe refund ${refund.id} failed; manual refund required`, { region, refundId: refund.id, appointmentId });
+        sendNotification({
+            region,
+            recipientEmail: appointment?.patientEmail,
+            subject: REFUND_WEBHOOK_COPY.manualSubject,
+            message: REFUND_NOTICES.REQUIRES_MANUAL_REFUND,
+            type: 'GENERAL',
+            metadata: { appointmentId, refundId: refund.id }
+        }).catch(() => {});
+    } catch (err: unknown) {
+        safeError(`Refund failure follow-up (audit/notice) failed for appointment ${appointmentId}: ${err instanceof Error ? err.message : String(err)}`);
     }
 }
 

@@ -17,7 +17,9 @@ import { publishEvent, EventType } from '../../../shared/event-bus';
 import { getCancellationRefundSettings, getCancellationSettings, setting } from '../../../shared/settings';
 import { ERASED_MARKER } from '../../../shared/erasure';
 import { CANCELLATION_COPY, RECEIPT_STATUS, REFUND_NOTICES, type RefundStatus } from '../content/cancellation';
-import { CLEANUP_CANCELLABLE, DOCTOR_CANCELLABLE, FHIR_CANCELLED, PATIENT_CANCELLABLE, REFUNDED_STATUS } from '../cancellation-policy';
+import {
+    CLEANUP_CANCELLABLE, DOCTOR_CANCELLABLE, FHIR_CANCELLED, MANUAL_REFUND_LEDGER_STATUS, PATIENT_CANCELLABLE, REFUNDED_STATUS, refundBillId
+} from '../cancellation-policy';
 import {
     PlanId,
     SubscriptionStatus,
@@ -937,7 +939,6 @@ export const updateAppointment = catchAsync(async (req: Request, res: Response) 
 // succeeded and as requested while it is pending; anything else is queued for a manual refund and never described as
 // refunded. A claim whose request died expires after the configured TTL and may be taken over; the refund keeps its
 // idempotency key and metadata, so the taker finds the refund already made instead of making another.
-const MANUAL_REFUND = "FAILED_REQUIRES_MANUAL_REFUND";
 type RefundOutcome = { refundId: string; refundStatus: RefundStatus; recordLedger: boolean };
 const PROVIDER_REFUND_STATUS: Record<string, RefundStatus> = { succeeded: "ISSUED", pending: "PENDING" };
 const RECORDED_REFUND_STATUSES: readonly string[] = ["ISSUED", "PENDING", "REQUIRES_MANUAL_REFUND"];
@@ -945,9 +946,8 @@ const REVENUE_STATUS: Record<RefundStatus, string> = {
     ISSUED: "REFUNDED", PENDING: "REFUND_PENDING", REQUIRES_MANUAL_REFUND: "REFUND_FAILED", NOT_APPLICABLE: "NOT_APPLICABLE"
 };
 const ledgerStatusOf = (refundStatus: RefundStatus) =>
-    refundStatus === "ISSUED" || refundStatus === "PENDING" ? "PROCESSED" : MANUAL_REFUND;
+    refundStatus === "ISSUED" || refundStatus === "PENDING" ? "PROCESSED" : MANUAL_REFUND_LEDGER_STATUS;
 
-const refundBillId = (appointmentId: string) => `refund-${appointmentId}`;
 type DocClient = ReturnType<typeof getRegionalClient>;
 type PaymentRecord = { paymentId?: string; amountPaid?: number };
 const errorMessage = (e: unknown) => e instanceof Error ? e.message : String(e);
@@ -968,6 +968,8 @@ function cancellationNotice(appointmentId: string, status: string, refundStatus:
 function receiptFor(apt: { status?: string; refundStatus?: string }): { type: "BOOKING" | "REFUND" | "CANCELLATION"; status: string } {
     // A pending refund is never shown as refunded, even when charge.refunded has already marked the appointment.
     if (apt.refundStatus === "PENDING" && (apt.status === "REFUNDED" || String(apt.status ?? "").includes("CANCELLED"))) return { type: "REFUND", status: RECEIPT_STATUS.refundPending };
+    // refund.failed keeps the REFUNDED status charge.refunded wrote, but the money never went back.
+    if (apt.refundStatus === "REQUIRES_MANUAL_REFUND" && apt.status === "REFUNDED") return { type: "CANCELLATION", status: RECEIPT_STATUS.underReview };
     if (apt.status === "REFUNDED") return { type: "REFUND", status: RECEIPT_STATUS.refunded };
     if (!String(apt.status ?? "").includes("CANCELLED")) return { type: "BOOKING", status: RECEIPT_STATUS.paid };
     if (apt.refundStatus === "ISSUED") return { type: "REFUND", status: RECEIPT_STATUS.refunded };
@@ -1043,7 +1045,7 @@ async function refundAppointmentPayment(appointmentId: string, apt: PaymentRecor
         if (!stripeKey || !apt.paymentId) throw new Error("Payment provider key unavailable");
         const stripe = new Stripe(stripeKey);
         const refund = (await listPaymentRefunds(stripe, apt.paymentId)).find(r => r.metadata?.appointmentRefund === appointmentId)
-            ?? await createAppointmentRefund(stripe, apt.paymentId, appointmentId);
+            ?? await createAppointmentRefund(stripe, apt.paymentId, appointmentId, region);
         const refundStatus = PROVIDER_REFUND_STATUS[refund.status ?? ""] ?? "REQUIRES_MANUAL_REFUND";
         if (refundStatus === "REQUIRES_MANUAL_REFUND") logger.error("[BOOKING] Refund not issued; manual refund required", { appointmentId, refundStatus: refund.status });
         return { refundId: refund.id, refundStatus };
@@ -1071,10 +1073,12 @@ async function listPaymentRefunds(stripe: Stripe, paymentIntent: string): Promis
     return refunds;
 }
 
-async function createAppointmentRefund(stripe: Stripe, paymentIntent: string, appointmentId: string): Promise<Stripe.Refund> {
+async function createAppointmentRefund(stripe: Stripe, paymentIntent: string, appointmentId: string, region: string): Promise<Stripe.Refund> {
     try {
+        // The metadata routes refund.failed to this appointment's region. Stripe replays a key only for identical
+        // parameters, so a retry of a request sent before region was added fails and goes to a person.
         return await stripe.refunds.create(
-            { payment_intent: paymentIntent, metadata: { appointmentRefund: appointmentId } },
+            { payment_intent: paymentIntent, metadata: { appointmentRefund: appointmentId, region } },
             { idempotencyKey: `appointment-refund:${appointmentId}` }
         );
     } catch (e) {

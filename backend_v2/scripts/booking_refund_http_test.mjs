@@ -249,7 +249,7 @@ for (const region of ['US', 'EU']) {
       const result = await h.patientCancel();
       assert.equal(result.status, 200);
       assert.ok(claimsRefund(result.body.message), result.body.message);
-      assert.deepEqual(h.stripe.refundCalls, [{ params: { payment_intent: 'pi_test', metadata: { appointmentRefund: 'test-apt' } }, idempotencyKey: 'appointment-refund:test-apt' }]);
+      assert.deepEqual(h.stripe.refundCalls, [{ params: { payment_intent: 'pi_test', metadata: { appointmentRefund: 'test-apt', region } }, idempotencyKey: 'appointment-refund:test-apt' }]);
       assert.equal(result.body.refundStatus, 'ISSUED'); assert.equal(h.apt().refundStatus, 'ISSUED');
       assert.equal(h.apt().status, 'CANCELLED'); assert.equal(h.apt().cancellationClaim, undefined);
       assert.deepEqual(h.refundRows().map(r => [r.billId, r.status, r.amount]), [['refund-test-apt', 'PROCESSED', -50]]);
@@ -464,6 +464,8 @@ test('a receipt for a cancelled appointment is a credit note only when the refun
     ['legacy cancellation', { status: 'CANCELLED' }, ['CANCELLATION', 'CANCELLED', 50]],
     // C26: charge.refunded can mark the appointment REFUNDED while the refund itself is still pending.
     ['pending refund marked refunded', { status: 'REFUNDED', refundStatus: 'PENDING' }, ['REFUND', 'REFUND PENDING', 50]],
+    // S7c: refund.failed can leave a REFUNDED appointment whose money was never returned.
+    ['failed refund marked refunded', { status: 'REFUNDED', refundStatus: 'REQUIRES_MANUAL_REFUND' }, ['CANCELLATION', 'REFUND UNDER REVIEW', 50]],
     ['legacy no-show without an amount', { status: 'CANCELLED_NO_SHOW', amountPaid: undefined }, ['CANCELLATION', 'CANCELLED', 0]],
     ['booking without an amount', { amountPaid: undefined }, ['BOOKING', 'PAID', 0]],
   ]) {

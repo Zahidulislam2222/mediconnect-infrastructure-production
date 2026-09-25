@@ -13,3 +13,8 @@ export const FHIR_CANCELLED = "cancelled";
 export const PATIENT_CANCELLABLE: readonly string[] = ["CONFIRMED", "REFUNDED"];
 export const DOCTOR_CANCELLABLE: readonly string[] = ["CONFIRMED", "IN_PROGRESS", "REFUNDED"];
 export const CLEANUP_CANCELLABLE: readonly string[] = ["CONFIRMED"];
+
+/** The one refund ledger row a cancellation may write; the refund.failed webhook finds it by the same id. */
+export const refundBillId = (appointmentId: string) => `refund-${appointmentId}`;
+/** Ledger status of a refund row whose money a person must return. */
+export const MANUAL_REFUND_LEDGER_STATUS = "FAILED_REQUIRES_MANUAL_REFUND";
