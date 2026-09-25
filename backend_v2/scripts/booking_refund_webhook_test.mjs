@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
 for (const line of (await readFile(new URL('../.env.example', import.meta.url), 'utf8')).split(/\r?\n/)) {
   const match = line.match(/^([A-Z][A-Z0-9_]*)=(.*)$/);
-  if (match) process.env[match[1]] = /^TABLE_/.test(match[1])
+  if (match) process.env[match[1]] = /^(TABLE_|DYNAMO_TABLE)/.test(match[1])
     ? `test-${match[1].toLowerCase().replaceAll('_', '-')}` : match[2] || `test-${match[1].toLowerCase()}`;
 }
 process.env.AWS_EC2_METADATA_DISABLED = 'true';
@@ -22,7 +22,9 @@ const { REFUND_NOTICES } = require('./dist/booking-service/src/content/cancellat
 
 const WEBHOOK_SECRET = 'whsec_test_secret';
 const APPOINTMENTS = process.env.TABLE_APPOINTMENTS, BILLS = process.env.TABLE_TRANSACTIONS, EVENTS = process.env.TABLE_WEBHOOK_EVENTS;
-const KEYS = { [APPOINTMENTS]: ['appointmentId'], [BILLS]: ['billId'], [EVENTS]: ['eventId'] };
+// The patient's contact email lives only on the patient profile (DYNAMO_TABLE), as the cancellation path reads it.
+const PATIENT_EMAILS = process.env.DYNAMO_TABLE;
+const KEYS = { [APPOINTMENTS]: ['appointmentId'], [BILLS]: ['billId'], [EVENTS]: ['eventId'], [PATIENT_EMAILS]: ['patientId'] };
 
 // Evaluates only the expression forms these handlers use; anything else throws so it cannot silently pass.
 const resolve = (path, names = {}) => path.startsWith('#') ? names[path] : path;
@@ -51,12 +53,13 @@ function apply(item, expression, names = {}, values = {}) {
 const cancelled = codes => Object.assign(new Error('Transaction cancelled'), {
   name: 'TransactionCanceledException', CancellationReasons: codes.map(Code => ({ Code })) });
 
-function harness({ appointment = {}, refundRow = {}, withoutRefundRow = false, failTransactions = 0 } = {}) {
+function harness({ appointment = {}, refundRow = {}, withoutRefundRow = false, failTransactions = 0, withoutPatientEmail = false } = {}) {
   const rows = new Map();
   const key = (table, item) => `${table}|${KEYS[table].map(k => item[k]).join('|')}`;
   const put = (table, item) => rows.set(key(table, item), structuredClone(item));
   const get = (table, k) => rows.get(key(table, k));
-  put(APPOINTMENTS, { appointmentId: 'test-apt', patientId: 'test-patient', patientEmail: 'patient@example.test', status: 'REFUNDED',
+  if (!withoutPatientEmail) put(PATIENT_EMAILS, { patientId: 'test-patient', email: 'patient@example.test' });
+  put(APPOINTMENTS, { appointmentId: 'test-apt', patientId: 'test-patient', status: 'REFUNDED',
     refundId: 're_test_1', refundStatus: 'ISSUED', ...appointment });
   if (!withoutRefundRow) put(BILLS, { billId: 'refund-test-apt', referenceId: 'test-apt', type: 'REFUND', amount: -50, status: 'PROCESSED',
     refundId: 're_test_1', refundStatus: 'ISSUED', ...refundRow });
@@ -122,6 +125,7 @@ test('a charge.refunded notice says a refund was requested, never that it was pr
       metadata: { appointmentId: 'test-apt', patientId: 'test-patient', billId: 'test-bill', region: 'EU' } };
     assert.equal((await h.deliver('charge.refunded', charge)).status, 200);
     assert.equal(h.notices.length, 1);
+    assert.equal(h.notices[0].recipientEmail, 'patient@example.test', 'sent to the email on the patient profile');
     const text = `${h.notices[0].subject} ${h.notices[0].message}`;
     assert.doesNotMatch(text, /processed|succeeded|completed|successful/i, text);
     assert.match(h.notices[0].message, /requested/i);
@@ -163,4 +167,22 @@ test('refund.failed that does not match the recorded appointment refund changes 
       assert.ok(h.effects.errors.mock.calls.some(call => /manual/i.test(String(call.arguments[0]))), `${label}: logged for manual follow-up`);
     } finally { mock.restoreAll(); }
   }
+});
+
+test('refund.failed without a patient email still records the manual refund and logs the missed notice', async () => {
+  try {
+    const h = harness({ withoutPatientEmail: true });
+    assert.equal((await h.deliver('refund.failed', failedRefund())).status, 200);
+    assert.equal(h.apt().refundStatus, 'REQUIRES_MANUAL_REFUND');
+    assert.equal(h.notices.length, 0);
+    assert.ok(h.effects.errors.mock.calls.some(call => /test-apt.*not notified/i.test(String(call.arguments[0]))), 'missed notice logged');
+  } finally { mock.restoreAll(); }
+});
+
+test('a refund.failed write that DynamoDB cancels logs the cancellation reasons', async () => {
+  try {
+    const h = harness({ failTransactions: 1 });
+    assert.equal((await h.deliver('refund.failed', failedRefund())).status, 200);
+    assert.ok(h.effects.errors.mock.calls.some(call => /ThrottlingError/.test(String(call.arguments[0]))), 'reason codes logged');
+  } finally { mock.restoreAll(); }
 });

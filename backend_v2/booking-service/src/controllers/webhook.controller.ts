@@ -23,6 +23,8 @@ const STRIPE_WEBHOOK_SECRET_NAME = "/mediconnect/stripe/webhook_secret";
 const TABLE_TRANSACTIONS = setting("TABLE_TRANSACTIONS");
 const TABLE_PRESCRIPTIONS = setting("TABLE_PRESCRIPTIONS");
 const TABLE_APPOINTMENTS = setting("TABLE_APPOINTMENTS");
+// Patient profiles, where the contact email lives (appointments and bills do not carry it).
+const TABLE_PATIENT_PROFILES = setting("DYNAMO_TABLE");
 const TABLE_INVENTORY = TABLE_NAMES.inventory;
 
 // ─── IDEMPOTENCY FIX ───────────────────────────────────────────────────────
@@ -525,13 +527,14 @@ async function handleChargeRefunded(charge: Stripe.Charge, regionalDb: any, regi
     // Notify patient of refund
     if (patientId) {
         try {
-            const patientRecord = await regionalDb.send(new GetCommand({
-                TableName: TABLE_APPOINTMENTS,
-                Key: { appointmentId: charge.metadata?.appointmentId || charge.metadata?.referenceId }
-            }));
+            const recipientEmail = await patientEmail(regionalDb, patientId);
+            if (!recipientEmail) {
+                safeError(`Refund notice for charge ${charge.id} not sent: patient not notified (no email on profile)`);
+                return;
+            }
             sendNotification({
                 region,
-                recipientEmail: patientRecord.Item?.patientEmail || charge.metadata?.patientEmail,
+                recipientEmail,
                 subject: REFUND_WEBHOOK_COPY.requestedSubject,
                 message: REFUND_WEBHOOK_COPY.requested(((charge.amount_refunded || 0) / 100).toFixed(2)),
                 type: 'GENERAL',
@@ -539,6 +542,15 @@ async function handleChargeRefunded(charge: Stripe.Charge, regionalDb: any, regi
             }).catch(() => {});
         } catch { /* Non-blocking */ }
     }
+}
+
+/** The patient's contact email from their profile, as the cancellation notice reads it; undefined when there is none. */
+async function patientEmail(regionalDb: ReturnType<typeof getRegionalClient>, patientId: unknown): Promise<string | undefined> {
+    if (typeof patientId !== 'string' || !patientId) return undefined;
+    const item = (await regionalDb.send(new GetCommand({
+        TableName: TABLE_PATIENT_PROFILES, Key: { patientId }, ProjectionExpression: 'email'
+    }))).Item;
+    return typeof item?.email === 'string' && item.email ? item.email : undefined;
 }
 
 /**
@@ -574,7 +586,8 @@ async function handleRefundFailed(refund: Stripe.Refund, regionalDb: ReturnType<
             }]
         }));
     } catch (err: unknown) {
-        safeError(`Refund ${refund.id} failed but was not recorded for appointment ${appointmentId} (${err instanceof Error ? err.name : 'unknown error'}); manual refund follow-up required`);
+        const reasons = (err as { CancellationReasons?: { Code?: string }[] })?.CancellationReasons?.map(r => r.Code ?? 'None').join(',');
+        safeError(`Refund ${refund.id} failed but was not recorded for appointment ${appointmentId} (${err instanceof Error ? err.name : 'unknown error'}${reasons ? `: ${reasons}` : ''}); manual refund follow-up required`);
         return;
     }
     safeError(`Refund ${refund.id} failed (${refund.failure_reason ?? 'unknown'}); appointment ${appointmentId} marked for manual refund`);
@@ -582,9 +595,14 @@ async function handleRefundFailed(refund: Stripe.Refund, regionalDb: ReturnType<
         const appointment = (await regionalDb.send(new GetCommand({ TableName: TABLE_APPOINTMENTS, Key: { appointmentId } }))).Item;
         await writeAuditLog(appointment?.patientId || "SYSTEM", appointment?.patientId || "UNKNOWN", "REFUND_FAILED",
             `Stripe refund ${refund.id} failed; manual refund required`, { region, refundId: refund.id, appointmentId });
+        const recipientEmail = await patientEmail(regionalDb, appointment?.patientId);
+        if (!recipientEmail) {
+            safeError(`Refund ${refund.id} failure for appointment ${appointmentId}: patient not notified (no email on profile)`);
+            return;
+        }
         sendNotification({
             region,
-            recipientEmail: appointment?.patientEmail,
+            recipientEmail,
             subject: REFUND_WEBHOOK_COPY.manualSubject,
             message: REFUND_NOTICES.REQUIRES_MANUAL_REFUND,
             type: 'GENERAL',
