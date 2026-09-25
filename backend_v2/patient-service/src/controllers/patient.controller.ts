@@ -1119,7 +1119,16 @@ await workflow.stage('transactions', async () => {
         for (const tx of (txScan.Items || [])) {
             await deleteS3ObjectVersions(regionalS3, receiptBucket, `receipts/${tx.billId}.pdf`);
         }
-        safeLog(`[GDPR] Deleted ${(txScan.Items || []).length} receipt PDFs (all versions) for patient ${userId}`);
+        // Cancellation and on-demand receipts are keyed by paymentId (or appointmentId when unpaid), not by ledger billId.
+        // TEST_MODE is a shared legacy key that no single subject owns, so it is never deleted on a subject's behalf.
+        const appointmentReceipts = await dynamicDb.send(new QueryCommand({ TableName: setting('TABLE_APPOINTMENTS'), IndexName: 'PatientIndex', KeyConditionExpression: 'patientId = :id', ExpressionAttributeValues: { ':id': userId } }));
+        const receiptIds = new Set<string>();
+        for (const apt of appointmentReceipts.Items || []) {
+            receiptIds.add(apt.appointmentId);
+            if (apt.paymentId && apt.paymentId !== 'TEST_MODE') receiptIds.add(apt.paymentId);
+        }
+        for (const id of receiptIds) await deleteS3ObjectVersions(regionalS3, receiptBucket, `receipts/${id}.pdf`);
+        safeLog(`[GDPR] Deleted ${(txScan.Items || []).length + receiptIds.size} receipt PDFs (all versions) for patient ${userId}`);
     }
     for (const tx of (txScan.Items || [])) {
         await dynamicDb.send(new UpdateCommand({
