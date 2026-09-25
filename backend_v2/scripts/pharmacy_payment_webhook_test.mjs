@@ -464,3 +464,26 @@ test('a bill whose own record names another patient is flagged even while the in
     assert.equal(h.bill().reviewReason, 'PRESCRIPTION_NOT_PAYABLE');
   } finally { mock.restoreAll(); }
 });
+
+// A41 (tenth review F2): a bill already under refund review is never settled as a collected-fill debt, even when a
+// later payment_failed event has made it look payable again.
+test('a paid bill already under refund review is flagged again, never settled as a debt', async () => {
+  try {
+    const h = harness({ rx: { status: 'DISPENSED', dispensedAt: '2026-01-05T00:00:00Z' },
+      bill: { status: 'FAILED', reviewReason: 'PRESCRIPTION_NOT_PAYABLE', createdAt: '2026-01-03T00:00:00Z' } });
+    assert.equal((await h.deliver()).status, 200);
+    assert.equal(h.bill().reviewReason, 'PRESCRIPTION_NOT_PAYABLE');
+    assert.equal(h.effects.revenue.mock.callCount(), 0, 'not recorded as a settled debt');
+    assert.equal(h.effects.notify.mock.callCount(), 0, 'patient not told the debt is settled');
+  } finally { mock.restoreAll(); }
+});
+
+test('a bill flagged for refund review after it was read is never settled as a debt', async () => {
+  try {
+    const h = harness({ rx: { status: 'DISPENSED', dispensedAt: '2026-01-05T00:00:00Z' }, bill: { createdAt: '2026-01-03T00:00:00Z' },
+      beforeConditionCheck: (_rx, bill) => { bill.reviewReason = 'PRESCRIPTION_NOT_PAYABLE'; } });
+    assert.equal((await h.deliver()).status, 200);
+    assert.equal(h.bill().reviewReason, 'PRESCRIPTION_NOT_PAYABLE');
+    assert.equal(h.effects.revenue.mock.callCount(), 0, 'not recorded as a settled debt');
+  } finally { mock.restoreAll(); }
+});

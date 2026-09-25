@@ -530,7 +530,8 @@ async function settleCollectedFillDebt(regionalDb: ReturnType<typeof getRegional
             { Update: {
                 TableName: TABLE_TRANSACTIONS, Key: { billId },
                 UpdateExpression: "SET #s = :s, paymentIntentId = :pid, paidAt = :now",
-                ConditionExpression: PAYABLE_BILL_CONDITION,
+                // A bill already under refund review stays a refund case even if a later event made it look payable again.
+                ConditionExpression: `${PAYABLE_BILL_CONDITION} AND attribute_not_exists(reviewReason)`,
                 ExpressionAttributeNames: { "#s": "status" },
                 ExpressionAttributeValues: { ":s": "PAID", ":pid": paymentIntentId, ":now": timestamp, ...PAYABLE_BILL_VALUES },
             } },
