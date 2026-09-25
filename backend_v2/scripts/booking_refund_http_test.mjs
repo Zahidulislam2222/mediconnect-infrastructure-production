@@ -28,6 +28,8 @@ const CLEANUP_SECRET = 'test-cleanup-secret';
 
 // Evaluates only the expression forms the controller uses; anything else throws so it cannot silently pass.
 const resolve = (path, names = {}) => path.startsWith('#') ? names[path] : path;
+/** Reads a possibly nested document path such as `#res.#fs`; a missing step reads as undefined, like DynamoDB. */
+const read = (item, path, names = {}) => path.split('.').reduce((node, step) => node?.[resolve(step, names)], item);
 /** Splits on a keyword outside parentheses, so `a AND (b OR c)` keeps its group. */
 function splitTop(expression, word) {
   const parts = []; let depth = 0, last = 0;
@@ -53,13 +55,14 @@ function holds(item, expression, names = {}, values = {}) {
   const ands = splitTop(e, 'AND');
   if (ands.length > 1) return ands.every(part => holds(item, part, names, values));
   if (wrapped(e)) return holds(item, e.slice(1, -1), names, values);
+  if (e.startsWith('NOT ')) return !holds(item, e.slice(4), names, values);
   return [e].every(clause => {
     let m;
-    if ((m = clause.match(/^attribute_not_exists\((\S+)\)$/))) return item?.[resolve(m[1], names)] === undefined;
-    if ((m = clause.match(/^attribute_exists\((\S+)\)$/))) return item?.[resolve(m[1], names)] !== undefined;
-    if ((m = clause.match(/^(\S+)\s+IN\s+\(([^)]*)\)$/))) return m[2].split(',').map(v => values[v.trim()]).includes(item?.[resolve(m[1], names)]);
+    if ((m = clause.match(/^attribute_not_exists\((\S+)\)$/))) return read(item, m[1], names) === undefined;
+    if ((m = clause.match(/^attribute_exists\((\S+)\)$/))) return read(item, m[1], names) !== undefined;
+    if ((m = clause.match(/^(\S+)\s+IN\s+\(([^)]*)\)$/))) return m[2].split(',').map(v => values[v.trim()]).includes(read(item, m[1], names));
     if ((m = clause.match(/^(\S+)\s*(=|<>|>|<)\s*(:\w+)$/))) {
-      const left = item?.[resolve(m[1], names)], right = values[m[3]];
+      const left = read(item, m[1], names), right = values[m[3]];
       if (m[2] === '=') return left === right;
       if (m[2] === '<>') return left !== undefined && left !== right;
       return left !== undefined && (m[2] === '>' ? left > right : left < right);
@@ -221,6 +224,7 @@ function harness({ region = 'US', appointments = [appointment()], refund = 'succ
   const user = (sub, extra = {}) => ({ sub, region, email: `${sub}@example.test`, ...extra });
   return {
     stripe, notices, receipts, regions,
+    put: (tableName, item) => put(tableName, item),
     apt: (id = 'test-apt') => get(APPOINTMENTS, { appointmentId: id }),
     refundRows: () => table(BILLS).filter(b => b.type === 'REFUND'),
     lock: (apt = appointment()) => get(LOCKS, { lockId: `${apt.doctorId}#${apt.timeSlot}` }),
@@ -456,6 +460,8 @@ test('a receipt for a cancelled appointment is a credit note only when the refun
     ['issued refund', { status: 'CANCELLED', refundStatus: 'ISSUED' }, ['REFUND', 'REFUNDED', 50]],
     ['manual refund', { status: 'CANCELLED', refundStatus: 'REQUIRES_MANUAL_REFUND' }, ['CANCELLATION', 'REFUND UNDER REVIEW', 50]],
     ['legacy cancellation', { status: 'CANCELLED' }, ['CANCELLATION', 'CANCELLED', 50]],
+    // C26: charge.refunded can mark the appointment REFUNDED while the refund itself is still pending.
+    ['pending refund marked refunded', { status: 'REFUNDED', refundStatus: 'PENDING' }, ['REFUND', 'REFUND PENDING', 50]],
     ['legacy no-show without an amount', { status: 'CANCELLED_NO_SHOW', amountPaid: undefined }, ['CANCELLATION', 'CANCELLED', 0]],
     ['booking without an amount', { amountPaid: undefined }, ['BOOKING', 'PAID', 0]],
   ]) {
@@ -606,4 +612,59 @@ test('a cancellation whose save committed but timed out reports success', async 
       assert.equal(h.refundRows().length, 1);
     } finally { mock.restoreAll(); }
   }
+});
+
+// C24 (review #2 B1): charge.refunded marks a FINISHED cancellation REFUNDED too; it must never be cancelled again,
+// or the second finalize deletes the slot lock of a patient who has since rebooked that slot.
+test('a finished cancellation later marked refunded is never cancelled again and keeps the rebooked slot lock', async () => {
+  for (const cancel of ['patientCancel', 'doctorCancel']) {
+    try {
+      const h = harness();
+      assert.equal((await h[cancel]()).status, 200, cancel);
+      h.apt().status = 'REFUNDED'; // what handleChargeRefunded writes when our refund lands
+      assert.equal(h.lock(), undefined, `${cancel}: first cancellation freed the slot`);
+      h.put(LOCKS, { lockId: `test-doctor#${appointment().timeSlot}`, status: 'BOOKED', appointmentId: 'test-other-apt' }); // another patient rebooks
+      const [notices, receipts] = [h.notices.length, h.receipts.length];
+      const again = await h[cancel]();
+      assert.equal(again.status, 409, `${cancel}: second cancellation refused`);
+      assert.equal(h.notices.length, notices, `${cancel}: no second notice`);
+      assert.equal(h.receipts.length, receipts, `${cancel}: no second receipt`);
+      assert.equal(h.lock()?.appointmentId, 'test-other-apt', `${cancel}: rebooked lock kept`);
+      assert.equal(h.stripe.created.length, 1);
+    } finally { mock.restoreAll(); }
+  }
+});
+
+test('an earlier cancellation of any writer, later marked refunded, is never cancelled again', async () => {
+  const booked = appointment().resource;
+  for (const [label, marker] of [
+    ['legacy patient cancel (FHIR status only)', { resource: { ...booked, status: 'cancelled' } }],
+    ['legacy doctor cancel without a resource (refundId only)', { resource: null, refundId: 'NOT_APPLICABLE' }],
+    ['cancellation without a resource (cancellationId only)', { resource: null, cancellationId: 'test-claim' }],
+  ]) {
+    for (const cancel of ['patientCancel', 'doctorCancel']) {
+      try {
+        const h = harness({ appointments: [appointment({ status: 'REFUNDED', paymentStatus: 'refunded', ...marker })] });
+        const again = await h[cancel]();
+        assert.equal(again.status, 409, `${label}: ${cancel}`);
+        assert.equal(h.notices.length, 0); assert.equal(h.stripe.refundCalls.length, 0);
+        assert.ok(h.lock(), `${label}: ${cancel}: slot lock untouched`);
+      } finally { mock.restoreAll(); }
+    }
+  }
+});
+
+// C25 (review #2 M4): the refund list is bounded by configuration; past the bound the refund goes to a person.
+test('a refund list longer than the configured page bound goes to manual review instead of refunding', async () => {
+  const previous = process.env.CANCELLATION_REFUND_MAX_PAGES;
+  process.env.CANCELLATION_REFUND_MAX_PAGES = '2';
+  try {
+    const others = [1, 2, 3, 4].map(n => ({ id: `re_test_other_${n}`, object: 'refund', status: 'succeeded', payment_intent: 'pi_test', metadata: {} }));
+    const h = harness({ providerRefunds: others });
+    const result = await h.doctorCancel();
+    assert.equal(result.status, 200);
+    assert.equal(result.body.refundStatus, 'REQUIRES_MANUAL_REFUND');
+    assert.equal(h.stripe.refundCalls.length, 0, 'no refund created from an incomplete list');
+    assert.ok(h.stripe.listCalls <= 2, `listed ${h.stripe.listCalls} pages`);
+  } finally { process.env.CANCELLATION_REFUND_MAX_PAGES = previous; mock.restoreAll(); }
 });

@@ -17,7 +17,7 @@ import { publishEvent, EventType } from '../../../shared/event-bus';
 import { getCancellationSettings, setting } from '../../../shared/settings';
 import { ERASED_MARKER } from '../../../shared/erasure';
 import { CANCELLATION_COPY, RECEIPT_STATUS, REFUND_NOTICES, type RefundStatus } from '../content/cancellation';
-import { CLEANUP_CANCELLABLE, DOCTOR_CANCELLABLE, PATIENT_CANCELLABLE } from '../cancellation-policy';
+import { CLEANUP_CANCELLABLE, DOCTOR_CANCELLABLE, FHIR_CANCELLED, PATIENT_CANCELLABLE, REFUNDED_STATUS } from '../cancellation-policy';
 import {
     PlanId,
     SubscriptionStatus,
@@ -966,6 +966,8 @@ function cancellationNotice(appointmentId: string, status: string, refundStatus:
 
 /** What a receipt may say about an appointment: a credit note only for money actually returned or on its way back. */
 function receiptFor(apt: { status?: string; refundStatus?: string }): { type: "BOOKING" | "REFUND" | "CANCELLATION"; status: string } {
+    // A pending refund is never shown as refunded, even when charge.refunded has already marked the appointment.
+    if (apt.refundStatus === "PENDING" && (apt.status === "REFUNDED" || String(apt.status ?? "").includes("CANCELLED"))) return { type: "REFUND", status: RECEIPT_STATUS.refundPending };
     if (apt.status === "REFUNDED") return { type: "REFUND", status: RECEIPT_STATUS.refunded };
     if (!String(apt.status ?? "").includes("CANCELLED")) return { type: "BOOKING", status: RECEIPT_STATUS.paid };
     if (apt.refundStatus === "ISSUED") return { type: "REFUND", status: RECEIPT_STATUS.refunded };
@@ -982,15 +984,22 @@ type ClaimFact = { expression: string; values: Record<string, unknown> };
 
 async function claimCancellation(docClient: DocClient, appointmentId: string, allowedStatuses: readonly string[], fact?: ClaimFact): Promise<string | null> {
     const claim = randomUUID();
-    const statusValues = Object.fromEntries(allowedStatuses.map((status, i) => [`:allowed${i}`, status]));
-    const conditions = [`#s IN (${Object.keys(statusValues).join(", ")})`, CLAIM_FREE, ...(fact ? [`(${fact.expression})`] : [])];
+    const statusValues = Object.fromEntries(allowedStatuses.filter(s => s !== REFUNDED_STATUS).map((status, i) => [`:allowed${i}`, status]));
+    const refundedClaimable = allowedStatuses.includes(REFUNDED_STATUS);
+    const statusCondition = `#s IN (${Object.keys(statusValues).join(", ")})`;
+    const conditions = [
+        refundedClaimable
+            ? `(${statusCondition} OR (#s = :refunded AND NOT (attribute_exists(cancellationId) OR attribute_exists(refundId) OR #res.#fhirStatus = :fhirCancelled)))`
+            : statusCondition,
+        CLAIM_FREE, ...(fact ? [`(${fact.expression})`] : [])];
     try {
         await docClient.send(new UpdateCommand({
             TableName: TABLE_APPOINTMENTS, Key: { appointmentId },
             UpdateExpression: "SET cancellationClaim = :claim, cancellationClaimedAt = :now",
             ConditionExpression: conditions.join(" AND "),
-            ExpressionAttributeNames: { "#s": "status" },
-            ExpressionAttributeValues: { ":claim": claim, ":now": new Date().toISOString(), ":staleClaim": staleClaimCutoff(), ...statusValues, ...fact?.values }
+            ExpressionAttributeNames: { "#s": "status", ...(refundedClaimable ? { "#res": "resource", "#fhirStatus": "status" } : {}) },
+            ExpressionAttributeValues: { ":claim": claim, ":now": new Date().toISOString(), ":staleClaim": staleClaimCutoff(), ...statusValues,
+                ...(refundedClaimable ? { ":refunded": REFUNDED_STATUS, ":fhirCancelled": FHIR_CANCELLED } : {}), ...fact?.values }
         }));
         return claim;
     } catch (e) {
@@ -1046,9 +1055,13 @@ async function refundAppointmentPayment(appointmentId: string, apt: PaymentRecor
 
 /** Every refund on a payment. Stripe's idempotency cache can expire, so our own refund is found by its metadata. */
 async function listPaymentRefunds(stripe: Stripe, paymentIntent: string): Promise<Stripe.Refund[]> {
+    const { refundMaxPages } = getCancellationSettings();
     const refunds: Stripe.Refund[] = [];
     let cursor: string | undefined;
+    let pages = 0;
     do {
+        // An incomplete list could hide our own refund, so past the bound the refund goes to a person instead.
+        if (++pages > refundMaxPages) throw new Error("Refund list exceeds the configured page bound");
         const page = await stripe.refunds.list({ payment_intent: paymentIntent, starting_after: cursor });
         refunds.push(...page.data);
         const next = page.has_more ? page.data.at(-1)?.id : undefined;

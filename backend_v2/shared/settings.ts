@@ -82,8 +82,8 @@ export function getApiBrowserSettings() {
 
 /** A cancellation claim older than this belongs to a request that died; another cancellation may take it over. */
 export function getCancellationSettings() {
-    return z.object({ claimTtlSeconds: z.coerce.number().int().positive() })
-        .parse({ claimTtlSeconds: setting('CANCELLATION_CLAIM_TTL_SECONDS') });
+    return z.object({ claimTtlSeconds: z.coerce.number().int().positive(), refundMaxPages: z.coerce.number().int().positive() })
+        .parse({ claimTtlSeconds: setting('CANCELLATION_CLAIM_TTL_SECONDS'), refundMaxPages: setting('CANCELLATION_REFUND_MAX_PAGES') });
 }
 
 export function getVitalsSettings() {
