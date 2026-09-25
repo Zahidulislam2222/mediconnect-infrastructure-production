@@ -17,11 +17,13 @@ const audit = require('./dist/shared/audit.js');
 const notifications = require('./dist/shared/notifications.js');
 const billing = require('./dist/booking-service/src/controllers/billing.controller.js');
 const logger = require('./dist/shared/logger.js');
+const kms = require('./dist/shared/kms-crypto.js');
 const { PAYABLE_BILL_STATUSES } = require('./dist/shared/billing-status.js');
 
 const WEBHOOK_SECRET = 'whsec_test_secret';
 const APPOINTMENTS = process.env.TABLE_APPOINTMENTS, BILLS = process.env.TABLE_TRANSACTIONS, EVENTS = process.env.TABLE_WEBHOOK_EVENTS;
-const KEYS = { [APPOINTMENTS]: ['appointmentId'], [BILLS]: ['billId'], [EVENTS]: ['eventId'] };
+const PATIENTS = process.env.TABLE_PATIENTS, PATIENT_EMAIL = 'patient@example.test';
+const KEYS = { [APPOINTMENTS]: ['appointmentId'], [BILLS]: ['billId'], [EVENTS]: ['eventId'], [PATIENTS]: ['patientId'] };
 
 // Evaluates only the expression forms these handlers use; anything else throws so it cannot silently pass.
 const resolve = (path, names = {}) => path.startsWith('#') ? names[path] : path;
@@ -56,11 +58,14 @@ function harness({ bill = {}, withoutBill = false, failTransactions = 0, failCod
   const key = (table, item) => `${table}|${KEYS[table].map(k => item[k]).join('|')}`;
   const put = (table, item) => rows.set(key(table, item), structuredClone(item));
   const get = (table, k) => rows.get(key(table, k));
-  put(APPOINTMENTS, { appointmentId: 'test-apt', patientId: 'test-patient', patientEmail: 'patient@example.test', status: 'CONFIRMED', paymentStatus: 'paid' });
+  // The notice address is the KMS-encrypted email on the patient profile (F3b); appointments carry no email.
+  put(PATIENTS, { patientId: 'test-patient', email: `phi:kms:${PATIENT_EMAIL}` });
+  put(APPOINTMENTS, { appointmentId: 'test-apt', patientId: 'test-patient', status: 'CONFIRMED', paymentStatus: 'paid' });
   if (!withoutBill) put(BILLS, { billId: 'test-bill', referenceId: 'test-apt', patientId: 'test-patient', amount: 50, type: 'BOOKING_FEE',
     status: 'PENDING', ...bill });
   let transactionFailures = failTransactions;
   mock.method(aws, 'getSSMParameter', async name => name.includes('webhook') ? WEBHOOK_SECRET : 'sk_test_key');
+  mock.method(kms, 'decryptPHI', async fields => Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, String(v).replace(/^phi:kms:/, '')])));
   const effects = { audit: mock.method(audit, 'writeAuditLog', async () => {}), notify: mock.method(notifications, 'sendNotification', async () => {}),
     revenue: mock.method(billing, 'pushRevenueToBigQuery', async () => {}), appointments: mock.method(billing, 'pushAppointmentToBigQuery', async () => {}),
     logs: mock.method(logger, 'safeLog', () => {}), errors: mock.method(logger, 'safeError', () => {}) };
@@ -123,7 +128,7 @@ test('a failed payment of a still-payable bill marks the bill and its appointmen
       assert.equal(h.bill().paymentIntentId, 'pi_test_failed', status);
       assert.equal(h.bill().failureReason, 'Your card was declined.', status);
       assert.equal(h.apt().status, 'PAYMENT_FAILED', status);
-      assert.equal(h.effects.notify.mock.callCount(), 1, `${status}: patient told the payment failed`);
+      assert.deepEqual(h.effects.notify.mock.calls.map(call => call.arguments[0].recipientEmail), [PATIENT_EMAIL], `${status}: patient told the payment failed`);
     } finally { mock.restoreAll(); }
   }
 });

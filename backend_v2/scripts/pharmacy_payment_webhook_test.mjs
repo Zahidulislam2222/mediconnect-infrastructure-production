@@ -19,11 +19,13 @@ const notifications = require('./dist/shared/notifications.js');
 const billing = require('./dist/booking-service/src/controllers/billing.controller.js');
 const logger = require('./dist/shared/logger.js');
 const { TABLE_NAMES } = require('./dist/shared/settings.js');
+const kms = require('./dist/shared/kms-crypto.js');
 
 const WEBHOOK_SECRET = 'whsec_test_secret';
 const BILLS = process.env.TABLE_TRANSACTIONS, RX = process.env.TABLE_PRESCRIPTIONS;
 const EVENTS = process.env.TABLE_WEBHOOK_EVENTS, INVENTORY = TABLE_NAMES.inventory;
-const KEYS = { [BILLS]: ['billId'], [RX]: ['prescriptionId'], [EVENTS]: ['eventId'], [INVENTORY]: ['pharmacyId', 'drugId'] };
+const PATIENTS = process.env.TABLE_PATIENTS, PATIENT_EMAIL = 'patient@example.test';
+const KEYS = { [BILLS]: ['billId'], [RX]: ['prescriptionId'], [EVENTS]: ['eventId'], [INVENTORY]: ['pharmacyId', 'drugId'], [PATIENTS]: ['patientId'] };
 
 // Evaluates only the expression forms the webhook uses; anything else throws so it cannot silently pass.
 const resolve = (path, names = {}) => path.startsWith('#') ? names[path] : path;
@@ -64,6 +66,9 @@ function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, 
   if (!withoutRx) put(RX, { prescriptionId: 'test-rx', patientId: 'test-patient', medication: 'test-med', status: 'ISSUED', paymentStatus: 'UNPAID', ...rx });
   for (const other of otherBills) put(BILLS, { referenceId: 'test-rx', patientId: 'test-patient', amount: 12, type: 'PHARMACY', ...other });
   put(INVENTORY, { pharmacyId: 'test-pharmacy', drugId: 'test-med', stock: 5 });
+  // Payment notices go to the KMS-encrypted email on the patient profile (F3b).
+  put(PATIENTS, { patientId: 'test-patient', email: `phi:kms:${PATIENT_EMAIL}` });
+  mock.method(kms, 'decryptPHI', async fields => Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, String(v).replace(/^phi:kms:/, '')])));
   let transactionFailures = failTransactions, billReadFailures = failBillReads, billPutFailures = failBillPuts;
   mock.method(aws, 'getSSMParameter', async name => name.includes('webhook') ? WEBHOOK_SECRET : 'sk_test_key');
   const effects = { audit: mock.method(audit, 'writeAuditLog', async () => {}), notify: mock.method(notifications, 'sendNotification', async () => {}),
@@ -418,7 +423,7 @@ test('a settled debt gets the same audit, revenue and notification as any paymen
     assert.equal(h.bill().reviewReason, undefined);
     assert.equal(h.effects.revenue.mock.callCount(), 1, 'revenue recorded');
     assert.ok(h.effects.audit.mock.calls.some(call => call.arguments[2] === 'PAYMENT_SUCCESS'), 'payment audited');
-    assert.equal(h.effects.notify.mock.callCount(), 1, 'patient notified');
+    assert.deepEqual(h.effects.notify.mock.calls.map(call => call.arguments[0].recipientEmail), [PATIENT_EMAIL], 'patient notified');
     assert.equal(h.stock(), 5, 'nothing dispensed');
   } finally { mock.restoreAll(); }
 });

@@ -17,6 +17,7 @@ import { TABLE_NAMES, setting } from '../../../shared/settings';
 import { PAYABLE_BILL_STATUSES } from '../../../shared/billing-status';
 import { DISPENSED_STATUSES, DISPENSE_EVIDENCE, lastHandover, observedPrescriptionCondition } from '../../../shared/prescription-handover';
 import { findPrescriptionBills } from '../../../shared/prescription-ledger';
+import { notifyPatient } from '../patient-contact';
 
 const STRIPE_SECRET_NAME = "/mediconnect/stripe/keys";
 const STRIPE_WEBHOOK_SECRET_NAME = "/mediconnect/stripe/webhook_secret";
@@ -318,24 +319,14 @@ async function handlePaymentFailure(paymentIntent: Stripe.PaymentIntent, regiona
         }, region).catch(e => safeError("BigQuery appointment sync failed on payment failure"));
     }
 
-    // 4. Fire-and-forget payment failure notification
+    // 4. Payment failure notice to the patient's profile email; never throws.
     if (patientId) {
-        try {
-            const patientRecord = await regionalDb.send(new GetCommand({
-                TableName: TABLE_APPOINTMENTS,
-                Key: { appointmentId: referenceId }
-            }));
-            sendNotification({
-                region,
-                recipientEmail: patientRecord.Item?.patientEmail,
-                subject: 'Payment Failed',
-                message: `Your payment for ${type || 'a service'} could not be processed: ${failureMessage}. Please update your payment method or try again.`,
-                type: 'PAYMENT_FAILED',
-                metadata: { billId: billId || '', appointmentId: referenceId || '' }
-            }).catch(() => {});
-        } catch {
-            // Non-critical: notification lookup failed
-        }
+        await notifyPatient(regionalDb, patientId, region, `Payment failure notice for bill ${billId}`, {
+            subject: 'Payment Failed',
+            message: `Your payment for ${type || 'a service'} could not be processed: ${failureMessage}. Please update your payment method or try again.`,
+            type: 'PAYMENT_FAILED',
+            metadata: { billId: billId || '', appointmentId: referenceId || '' }
+        });
     }
 }
 
@@ -512,15 +503,14 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
             safeError(`Audit log failed for payment success: ${auditErr.message}`);
         }
 
-        // Fire-and-forget payment success notification
-        sendNotification({
-            region,
-            recipientEmail: existingTxItem?.patientEmail,
-            subject: 'Payment Successful',
-            message: `Your payment of $${existingTxItem?.amount || (paymentIntent.amount / 100)} for ${type || 'a service'} has been successfully processed. Transaction ID: ${billId}.`,
-            type: 'PAYMENT_SUCCESS',
-            metadata: { billId, appointmentId: referenceId || '' }
-        }).catch(() => {});
+        // Payment success notice to the patient's profile email; the bill's own patient comes first. Never throws.
+        await notifyPatient(regionalDb, existingTxItem?.patientId || paymentIntent.metadata?.patientId, region,
+            `Payment success notice for bill ${billId}`, {
+                subject: 'Payment Successful',
+                message: `Your payment of $${existingTxItem?.amount || (paymentIntent.amount / 100)} for ${type || 'a service'} has been successfully processed. Transaction ID: ${billId}.`,
+                type: 'PAYMENT_SUCCESS',
+                metadata: { billId, appointmentId: referenceId || '' }
+            });
     } catch (error) {
         safeError("CRITICAL DB ERROR: Webhook failed to write to Regional DynamoDB");
     }
@@ -1038,17 +1028,13 @@ async function handleSubscriptionInvoiceFailed(invoice: Stripe.Invoice, regional
         { region }
     );
 
-    // Notify patient to update payment method
-    try {
-        sendNotification({
-            region,
-            recipientEmail: '',
-            subject: 'Payment Failed — Update Your Card',
-            message: 'Your MediConnect subscription payment failed. Please update your payment method to continue receiving discounts.',
-            type: 'PAYMENT_FAILED',
-            metadata: { subscriptionId: subscriptionId || '', invoiceId: invoice.id },
-        }).catch(() => {});
-    } catch { /* Non-blocking */ }
+    // Ask the patient to update their payment method; never throws.
+    await notifyPatient(regionalDb, patientId, region, `Subscription payment failure notice for invoice ${invoice.id}`, {
+        subject: 'Payment Failed — Update Your Card',
+        message: 'Your MediConnect subscription payment failed. Please update your payment method to continue receiving discounts.',
+        type: 'PAYMENT_FAILED',
+        metadata: { subscriptionId: subscriptionId || '', invoiceId: invoice.id },
+    });
 
     safeLog(`Subscription payment failed: ${subscriptionId}, patient: ${patientId}, attempt: ${invoice.attempt_count}`);
 }
