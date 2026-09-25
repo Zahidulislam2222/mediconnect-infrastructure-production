@@ -285,16 +285,18 @@ for (const refund of ['throw', 'failed', 'canceled', 'requires_action']) {
 
 // R5: when someone else cancels, the patient's notice goes to the decrypted email on their profile, never to the
 // stored ciphertext.
-test('a doctor cancellation notifies the patient at the decrypted profile email', async () => {
-  try {
-    const h = harness({ refund: 'pending' });
-    assert.equal((await h.doctorCancel()).status, 200);
-    for (let i = 0; i < 5; i++) await new Promise(done => setImmediate(done));
-    const recipients = h.notices.filter(n => n.type === 'BOOKING_CANCELLATION').map(n => n.recipientEmail);
-    assert.deepEqual(recipients, ['plain-patient@example.test']);
-    assert.ok(h.decryptRegions.length > 0 && h.decryptRegions.every(r => r === 'US'), `decrypted with the request region: ${h.decryptRegions}`);
-  } finally { mock.restoreAll(); }
-});
+for (const region of ['US', 'EU']) {
+  test(`a ${region} doctor cancellation notifies the patient at the decrypted profile email`, async () => {
+    try {
+      const h = harness({ refund: 'pending', region });
+      assert.equal((await h.doctorCancel()).status, 200);
+      for (let i = 0; i < 5; i++) await new Promise(done => setImmediate(done));
+      const recipients = h.notices.filter(n => n.type === 'BOOKING_CANCELLATION').map(n => n.recipientEmail);
+      assert.deepEqual(recipients, ['plain-patient@example.test']);
+      assert.ok(h.decryptRegions.length > 0 && h.decryptRegions.every(r => r === region), `decrypted with the request region: ${h.decryptRegions}`);
+    } finally { mock.restoreAll(); }
+  });
+}
 
 test('a cancellation notice that cannot be addressed is logged, not swallowed', async () => {
   try {
