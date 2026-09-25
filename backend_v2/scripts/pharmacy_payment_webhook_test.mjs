@@ -82,7 +82,9 @@ function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, 
       assert.equal(input.KeyConditionExpression, 'patientId = :pid'); assert.equal(input.FilterExpression, 'referenceId = :rid');
       // DynamoDB rejects a key condition without a value, so a query for a missing patient id would fail the delivery.
       if (typeof input.ExpressionAttributeValues[':pid'] !== 'string') throw Object.assign(new Error('invalid key'), { name: 'ValidationException' });
-      const matches = [...rows.entries()].filter(([k, item]) => k.startsWith(`${BILLS}|`) && item.patientId === input.ExpressionAttributeValues[':pid'])
+      // The index is eventually consistent: indexedPatientId is where it still lists a bill, hiddenFromIndex one it has not seen.
+      const matches = [...rows.entries()].filter(([k, item]) => k.startsWith(`${BILLS}|`) && !item.hiddenFromIndex
+        && (item.indexedPatientId ?? item.patientId) === input.ExpressionAttributeValues[':pid'])
         .sort(([a], [b]) => a.localeCompare(b));
       const start = input.ExclusiveStartKey?.offset ?? 0, end = Math.min(start + billPageSize, matches.length);
       return { Items: matches.slice(start, end).map(([, item]) => item).filter(item => item.referenceId === input.ExpressionAttributeValues[':rid'])
@@ -430,5 +432,35 @@ test('a flag write that finds the bill already settled is skipped without a refu
     assert.equal(h.bill().paymentIntentId, 'pi_other');
     assert.equal(h.bill().reviewReason, undefined);
     assert.ok(!h.effects.errors.mock.calls.some(call => /refund review required/.test(String(call.arguments[0]))), 'no false alarm');
+  } finally { mock.restoreAll(); }
+});
+
+// Ninth review. A31: a bill already flagged for review is still a bill from before the hand-over, so paying another one
+// is not the fill's single debt. A40: the guards that tell the paid bill from another debt are exercised.
+test('a flagged, cancelled or unindexed bill from before the hand-over still blocks settlement', async () => {
+  const collected = { status: 'DISPENSED', dispensedAt: '2026-01-05T00:00:00Z' };
+  const debt = { createdAt: '2026-01-03T00:00:00Z' };
+  for (const [label, options] of [
+    ['a bill already flagged for refund review', { otherBills: [{ billId: 'test-bill-2', status: 'PAID', reviewReason: 'PRESCRIPTION_NOT_PAYABLE', createdAt: '2026-01-02T00:00:00Z' }] }],
+    ['a cancelled bill', { otherBills: [{ billId: 'test-bill-2', status: 'CANCELLED', createdAt: '2026-01-02T00:00:00Z' }] }],
+    ['the paid bill missing from the index while another debt is listed', { bill: { ...debt, hiddenFromIndex: true },
+      otherBills: [{ billId: 'test-bill-2', status: 'UNPAID', createdAt: '2026-01-02T00:00:00Z' }] }],
+  ]) {
+    try {
+      const h = harness({ rx: collected, bill: debt, ...options });
+      assert.equal((await h.deliver()).status, 200, label);
+      assert.equal(h.bill().status, 'PAID', `${label}: captured money is still recorded`);
+      assert.equal(h.bill().reviewReason, 'PRESCRIPTION_NOT_PAYABLE', label);
+    } finally { mock.restoreAll(); }
+  }
+});
+
+// A39: the patient match is read from the bill itself, never inferred from an index that may still list an erased bill.
+test('a bill whose own record names another patient is flagged even while the index still lists it', async () => {
+  try {
+    const h = harness({ rx: { status: 'DISPENSED', dispensedAt: '2026-01-05T00:00:00Z' },
+      bill: { createdAt: '2026-01-03T00:00:00Z', patientId: 'test-erased-patient', indexedPatientId: 'test-patient' } });
+    assert.equal((await h.deliver()).status, 200);
+    assert.equal(h.bill().reviewReason, 'PRESCRIPTION_NOT_PAYABLE');
   } finally { mock.restoreAll(); }
 });

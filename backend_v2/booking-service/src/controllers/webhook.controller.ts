@@ -499,15 +499,16 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
 }
 
 // Ledger statuses a pharmacy payment may settle: every status /billing/pay charges, plus CANCELLED (see above).
-const PAYABLE_BILL_VALUES = Object.fromEntries([...PAYABLE_BILL_STATUSES, 'CANCELLED'].map((status, i) => [`:payable${i}`, status]));
+const SETTLEABLE_BILL_STATUSES: readonly string[] = [...PAYABLE_BILL_STATUSES, 'CANCELLED'];
+const PAYABLE_BILL_VALUES = Object.fromEntries(SETTLEABLE_BILL_STATUSES.map((status, i) => [`:payable${i}`, status]));
 const PAYABLE_BILL_CONDITION = `#s IN (${Object.keys(PAYABLE_BILL_VALUES).join(', ')})`;
 
 /**
  * The retired pharmacy service issued pickup codes without checking payment, so a collected fill can still carry its
- * unpaid bill. That debt is the prescription's ONLY payable bill created at or before its last hand-over; paying it
- * marks the bill PAID and leaves the prescription alone. Two such bills cannot be told apart from a double bill, so
- * they, like any other payment or a bill or prescription that changed after it was read, return false and the caller
- * keeps flagging the payment for refund review.
+ * unpaid bill. That debt is the prescription's ONLY bill created at or before its last hand-over that is payable or
+ * already under refund review; paying it marks the bill PAID and leaves the prescription alone. Two such bills cannot
+ * be told apart from a double bill, so they, like any other payment or a bill or prescription that changed after it
+ * was read, return false and the caller keeps flagging the payment for refund review.
  */
 async function settleCollectedFillDebt(regionalDb: ReturnType<typeof getRegionalClient>, billId: string,
     bill: Record<string, unknown> | undefined, prescriptionId: string, paymentIntentId: string, timestamp: string): Promise<boolean> {
@@ -516,11 +517,12 @@ async function settleCollectedFillDebt(regionalDb: ReturnType<typeof getRegional
     const rx = (await regionalDb.send(new GetCommand({ TableName: TABLE_PRESCRIPTIONS, Key: { prescriptionId }, ConsistentRead: true }))).Item;
     const handover = rx && lastHandover(rx);
     if (!rx || !DISPENSED_STATUSES.includes(rx.status) || handover === undefined || createdAt > handover) return false;
-    // The ledger read is scoped to the prescription's patient, so another patient's bill is never counted as its debt.
-    if (typeof rx.patientId !== 'string') return false;
-    const payableBills = new Set<unknown>([...PAYABLE_BILL_STATUSES, 'CANCELLED']);
+    // Both records were read consistently; the patient index is not, and may still list a bill that has since changed.
+    if (typeof rx.patientId !== 'string' || bill?.patientId !== rx.patientId) return false;
+    // A bill already flagged for review is PAID but still one of the bills this payment could be doubling.
     const debts = (await findPrescriptionBills(regionalDb, TABLE_TRANSACTIONS, rx.patientId, prescriptionId))
-        .filter(row => payableBills.has(row.status) && !(typeof row.createdAt === 'string' && row.createdAt > handover));
+        .filter(row => (SETTLEABLE_BILL_STATUSES.includes(row.status) || row.reviewReason !== undefined)
+            && !(typeof row.createdAt === 'string' && row.createdAt > handover));
     if (debts.length !== 1 || debts[0].billId !== billId) return false;
     const pinned = observedPrescriptionCondition(rx, ['status', ...DISPENSE_EVIDENCE]);
     try {

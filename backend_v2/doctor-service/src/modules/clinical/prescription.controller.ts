@@ -3,7 +3,7 @@ import { Router, Request, Response } from "express";
 import { PDFGenerator } from "../../utils/pdf-generator";
 import { getRegionalClient, getRegionalS3Client } from '../../../../shared/aws-config';
 import { PutCommand, QueryCommand, GetCommand, UpdateCommand, DeleteCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
-import type { QueryCommandOutput, TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
+import type { TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import { DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { v4 as uuidv4 } from "uuid";
 import { safeLog, safeError } from '../../../../shared/logger';
@@ -16,7 +16,7 @@ import { TABLE_NAMES, setting } from '../../../../shared/settings';
 import { PAYABLE_BILL_STATUSES } from '../../../../shared/billing-status';
 import { ERASED_MARKER } from '../../../../shared/erasure';
 import { DISPENSED_STATUSES, DISPENSE_EVIDENCE, lastHandover, observedPrescriptionCondition } from '../../../../shared/prescription-handover';
-import { findPrescriptionBills } from '../../../../shared/prescription-ledger';
+import { findPrescriptionBills, type LedgerRow as Row } from '../../../../shared/prescription-ledger';
 import { canListPrescriptions, isApprovedClinician, isApprovedPrescriber, isConditionalFailure, isPrescriptionPatient } from './prescription-access';
 
 const router = Router();
@@ -372,8 +372,6 @@ const REFILLABLE_FROM: readonly string[] = [...DISPENSED_STATUSES, RX_STATUS.REF
 const refillBillId = (prescriptionId: string, remainingBeforeRefill: number) => `refill-${prescriptionId}-${remainingBeforeRefill}`;
 
 type DocClient = ReturnType<typeof getRegionalClient>;
-/** A DynamoDB item as the document client returns it. */
-type Row = NonNullable<QueryCommandOutput["Items"]>[number];
 
 /**
  * Pins a refill write to what its decision read: the hand-over evidence, the cancellation state and the patient not
