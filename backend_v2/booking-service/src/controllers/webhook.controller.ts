@@ -349,17 +349,23 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
     const paymentType = existingTxItem?.type ?? type;
     const prescriptionId = paymentType === 'PHARMACY' ? (existingTxItem?.referenceId ?? referenceId) : undefined;
     if (paymentType === 'PHARMACY' && !existingTxItem) {
-        // /billing/pay only charges existing bills, so the row was removed after charging (e.g. by erasure). Record the
-        // captured money for reconciliation rather than failing until Stripe gives up; nothing is released to pickup.
-        await regionalDb.send(new PutCommand({
-            TableName: TABLE_TRANSACTIONS,
-            Item: {
-                billId, type: 'PHARMACY', status: 'PAID', reviewReason: 'LEDGER_ROW_MISSING',
-                patientId: paymentIntent.metadata?.patientId, paymentIntentId: paymentIntent.id,
-                amountMinor: paymentIntent.amount, currency: paymentIntent.currency, paidAt: timestamp
-            },
-            ConditionExpression: "attribute_not_exists(billId)"
-        }));
+        // /billing/pay only charges existing bills, so the row was removed after charging (erasure anonymises ledger rows
+        // but does not delete them). Record the captured money for reconciliation rather than failing until Stripe gives
+        // up; nothing is released to pickup. The payment intent identifies the payer, so no patient identifier is copied
+        // from metadata onto a row that erasure may already have processed.
+        try {
+            await regionalDb.send(new PutCommand({
+                TableName: TABLE_TRANSACTIONS,
+                Item: {
+                    billId, type: 'PHARMACY', status: 'PAID', reviewReason: 'LEDGER_ROW_MISSING', paymentIntentId: paymentIntent.id,
+                    amountMinor: paymentIntent.amount, currency: paymentIntent.currency, paidAt: timestamp
+                },
+                ConditionExpression: "attribute_not_exists(billId)"
+            }));
+        } catch (recordErr) {
+            // A concurrent delivery for the same bill already recorded it.
+            if ((recordErr as { name?: string })?.name !== 'ConditionalCheckFailedException') throw recordErr;
+        }
         safeError(`[WEBHOOK] Payment ${billId} has no ledger row; recorded for reconciliation`);
         return;
     }

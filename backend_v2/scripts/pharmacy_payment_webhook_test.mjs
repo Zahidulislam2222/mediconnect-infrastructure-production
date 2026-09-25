@@ -265,3 +265,15 @@ test('a payment whose bill row is gone is recorded for reconciliation instead of
     assert.equal(h.rx().status, 'ISSUED');
   } finally { mock.restoreAll(); }
 });
+
+test('concurrent deliveries for a missing bill row record it once and both succeed, without re-storing the patient', async () => {
+  try {
+    const h = harness({ withoutBill: true });
+    const results = await Promise.all([h.deliver(BILLING_PAY_METADATA), h.deliver(BILLING_PAY_METADATA)]);
+    assert.deepEqual(results.map(r => r.status), [200, 200], 'R4-3: the losing reconciliation write is not a failure');
+    assert.equal(h.bill().reviewReason, 'LEDGER_ROW_MISSING');
+    // Erasure anonymises ledger rows; a reconciliation row must not re-attach an identifier from payment metadata.
+    assert.equal(h.bill().patientId, undefined, 'R4-4: reconciliation row carries the payment reference only');
+    assert.equal(h.rx().status, 'ISSUED');
+  } finally { mock.restoreAll(); }
+});

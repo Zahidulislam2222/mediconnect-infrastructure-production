@@ -363,8 +363,23 @@ export const getPrescriptions = async (req: Request, res: Response) => {
 };
 
 const REFILLABLE_FROM: string[] = [RX_STATUS.DISPENSED, RX_STATUS.PICKED_UP, RX_STATUS.REFILL_REQUESTED];
-/** A refill bill is named after the refill count it consumes, so a replayed or concurrent request cannot bill twice. */
-const refillBillId = (prescriptionId: string, consumedCount: number) => `refill-${prescriptionId}-${consumedCount}`;
+/** A refill bill is named after the refills remaining before it, so a replayed or concurrent request cannot bill twice. */
+const refillBillId = (prescriptionId: string, remainingBeforeRefill: number) => `refill-${prescriptionId}-${remainingBeforeRefill}`;
+// Evidence that a fill was handed over: this service records dispensedAt, the retired pharmacy Lambda fulfilledAt.
+const DISPENSE_EVIDENCE = ["dispensedAt", "fulfilledAt"] as const;
+
+/**
+ * Restores a legacy refill request whose previous fill was never collected. The retired Lambda set REFILL_REQUESTED
+ * without checking the status, so an undispensed fill could be overwritten. That fill keeps its own payment state and
+ * bill: nothing is billed or decremented, and a concurrent dispense or cancellation makes the write fail.
+ */
+const restoreUncollectedFill = (docClient: ReturnType<typeof getRegionalClient>, prescriptionId: string) => docClient.send(new UpdateCommand({
+    TableName: TABLE_RX, Key: { prescriptionId },
+    UpdateExpression: "SET #s = :issued, updatedAt = :now",
+    ConditionExpression: "#s = :refillRequested AND attribute_not_exists(dispensedAt) AND attribute_not_exists(fulfilledAt) AND attribute_not_exists(cancelledAt)",
+    ExpressionAttributeNames: { "#s": "status" },
+    ExpressionAttributeValues: { ":issued": RX_STATUS.ISSUED, ":refillRequested": RX_STATUS.REFILL_REQUESTED, ":now": new Date().toISOString() },
+}));
 
 export const requestRefill = async (req: Request, res: Response) => {
     const region = extractRegion(req);
@@ -380,12 +395,24 @@ export const requestRefill = async (req: Request, res: Response) => {
             return res.status(403).json({ error: "Only the patient or the prescribing clinician can request this refill." });
         }
 
-        const remaining = Number(rx.refillsRemaining);
-        if (!Number.isInteger(remaining) || remaining <= 0) return res.status(400).json({ error: "No refills remaining" });
-        // REFILL_REQUESTED rows come from the retired pharmacy service, which neither billed nor counted the refill.
         if (!REFILLABLE_FROM.includes(rx.status)) {
             return res.status(409).json({ error: "A refill can be requested after the current fill has been dispensed." });
         }
+        // REFILL_REQUESTED rows come from the retired pharmacy service, which neither billed nor counted the refill
+        // and did not check that the previous fill had been handed over.
+        const legacyRequest = rx.status === RX_STATUS.REFILL_REQUESTED;
+        const wasDispensed = DISPENSE_EVIDENCE.some(field => rx[field] !== undefined);
+        if (legacyRequest && rx.cancelledAt !== undefined) {
+            return res.status(409).json({ error: "This prescription was cancelled. Issue a new prescription instead." });
+        }
+        if (legacyRequest && !wasDispensed) {
+            await restoreUncollectedFill(docClient, prescriptionId);
+            await writeAuditLog(authUser.sub, rx.patientId, "RESTORE_UNCOLLECTED_FILL", `Uncollected fill for ${prescriptionId} restored`, { region, ipAddress: req.ip });
+            return res.json({ message: "Previous fill restored", status: RX_STATUS.ISSUED });
+        }
+
+        const remaining = Number(rx.refillsRemaining);
+        if (!Number.isInteger(remaining) || remaining <= 0) return res.status(400).json({ error: "No refills remaining" });
 
         // One refill per observed count: the condition rejects replays and concurrent duplicates, and the
         // bill id is derived from that count so a duplicate can never create a second charge.
@@ -395,11 +422,10 @@ export const requestRefill = async (req: Request, res: Response) => {
                 { Update: {
                     TableName: TABLE_RX, Key: { prescriptionId },
                     UpdateExpression: "SET #s = :pending, paymentStatus = :unpaid, refillsRemaining = refillsRemaining - :one, updatedAt = :now",
-                    ConditionExpression: "refillsRemaining = :expected AND #s IN (:dispensed, :pickedUp, :refillRequested)",
+                    ConditionExpression: "refillsRemaining = :expected AND #s = :observed AND attribute_not_exists(cancelledAt)",
                     ExpressionAttributeNames: { "#s": "status" },
                     ExpressionAttributeValues: {
-                        ":pending": RX_STATUS.PENDING, ":unpaid": "UNPAID", ":one": 1, ":now": now, ":expected": remaining,
-                        ":dispensed": RX_STATUS.DISPENSED, ":pickedUp": RX_STATUS.PICKED_UP, ":refillRequested": RX_STATUS.REFILL_REQUESTED,
+                        ":pending": RX_STATUS.PENDING, ":unpaid": "UNPAID", ":one": 1, ":now": now, ":expected": remaining, ":observed": rx.status,
                     },
                 } },
                 { Put: {
@@ -410,7 +436,7 @@ export const requestRefill = async (req: Request, res: Response) => {
             ]
         }));
         await writeAuditLog(authUser.sub, rx.patientId, "REQUEST_REFILL", `Refill for ${prescriptionId} processed`, { region, ipAddress: req.ip });
-        return res.json({ message: "Refill authorized" });
+        return res.json({ message: "Refill authorized", status: RX_STATUS.PENDING });
     } catch (e: any) {
         if (isConditionalFailure(e)) {
             return res.status(409).json({ error: "This refill was already processed or the prescription changed. Refresh before trying again." });
