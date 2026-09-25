@@ -14,6 +14,7 @@ import { encryptPHI, decryptPHI } from '../../../../shared/kms-crypto';
 import { publishEvent, EventType } from '../../../../shared/event-bus';
 import { TABLE_NAMES, setting } from '../../../../shared/settings';
 import { PAYABLE_BILL_STATUSES } from '../../../../shared/billing-status';
+import { ERASED_MARKER } from '../../../../shared/erasure';
 import { canListPrescriptions, isApprovedClinician, isApprovedPrescriber, isConditionalFailure, isPrescriptionPatient } from './prescription-access';
 
 const router = Router();
@@ -404,34 +405,46 @@ const observedHandoverCondition = (rx: Row) => {
     return { expression: clauses.join(" AND "), values };
 };
 
-type LegacyRefillPlan =
+type RefillPlan =
     | { kind: "bill" }
-    | { kind: "restore"; paymentStatus: "PAID" | "UNPAID"; openBill?: Row }
+    | { kind: "restore"; paymentStatus: "PAID" | "UNPAID"; openBill: Row }
     | { kind: "review"; error: string };
 
+const BILLING_REVIEW = "This prescription's billing needs review before a refill can be approved.";
+
 /**
- * The retired pharmacy Lambda, and the old unguarded status update, set REFILL_REQUESTED without a bill, a count or a
- * status check, so the flag can sit on a fill that was billed but never collected. A bill created after the last
- * hand-over is that fill: it is restored with its own payment state instead of being billed again. Only a hand-over
- * with no later bill is a genuine refill request.
+ * Decides what a refill request means from the prescription and its ledger, and refuses anything it cannot prove.
+ *
+ * A dispensed prescription may be refilled only while no bill is outstanding, so it never carries two payable bills.
+ *
+ * REFILL_REQUESTED rows were written by the retired pharmacy Lambda and the old unguarded status update, without a
+ * bill, a count or a status check, so the flag can sit on a fill that was billed but never collected. Dispense
+ * timestamps are never cleared, so they date only the LAST hand-over. A single bill created after it is the
+ * uncollected fill and is restored with that bill's payment state; a hand-over with no later bill is a genuine refill.
+ * Refunded, disputed, cancelled, review-flagged or undated bills, several open bills, an unpaid bill from before the
+ * hand-over, or no bill at all (pre-ledger rows) go to a person: none of them proves a payment for this fill.
  */
-const planLegacyRefill = (rx: Row, bills: Row[]): LegacyRefillPlan => {
-    const live = bills.filter(bill => bill.status === "PAID" || PAYABLE_BILL_STATUSES.includes(bill.status));
-    if (live.some(bill => typeof bill.createdAt !== "string")) {
-        return { kind: "review", error: "This prescription's billing needs review before the refill can be approved." };
+const planRefill = (rx: Row, bills: Row[]): RefillPlan => {
+    const payable = bills.filter(bill => PAYABLE_BILL_STATUSES.includes(bill.status));
+    if (rx.status !== RX_STATUS.REFILL_REQUESTED) {
+        return payable.length > 0
+            ? { kind: "review", error: "Settle the outstanding bill for this prescription before requesting a refill." }
+            : { kind: "bill" };
     }
+    const clean = bills.length > 0 && bills.every(bill =>
+        (bill.status === "PAID" || PAYABLE_BILL_STATUSES.includes(bill.status)) &&
+        bill.reviewReason === undefined && typeof bill.createdAt === "string");
+    if (!clean) return { kind: "review", error: BILLING_REVIEW };
     const lastHandover = DISPENSE_EVIDENCE.map(field => rx[field]).filter((value): value is string => typeof value === "string").sort().at(-1);
-    const open = live.filter(bill => lastHandover === undefined || bill.createdAt > lastHandover);
-    if (open.length > 1) return { kind: "review", error: "This prescription's billing needs review before the refill can be approved." };
+    if (lastHandover !== undefined && payable.some(bill => bill.createdAt <= lastHandover)) return { kind: "review", error: BILLING_REVIEW };
+    const open = bills.filter(bill => lastHandover === undefined || bill.createdAt > lastHandover);
     if (open.length === 1) return { kind: "restore", paymentStatus: open[0].status === "PAID" ? "PAID" : "UNPAID", openBill: open[0] };
-    if (lastHandover !== undefined) return { kind: "bill" };
-    // Neither handed over nor billed: a PAID flag is then the only record of this fill's payment.
-    if (rx.paymentStatus === "PAID") return { kind: "restore", paymentStatus: "PAID" };
-    return { kind: "review", error: "This fill has no bill and was never paid. Issue a new prescription instead." };
+    if (open.length === 0 && lastHandover !== undefined) return { kind: "bill" };
+    return { kind: "review", error: BILLING_REVIEW };
 };
 
 /** Restores the uncollected fill in one transaction; its bill must still be in the state it was classified by. */
-const restoreUncollectedFill = (docClient: DocClient, rx: Row, plan: Extract<LegacyRefillPlan, { kind: "restore" }>) => {
+const restoreUncollectedFill = (docClient: DocClient, rx: Row, plan: Extract<RefillPlan, { kind: "restore" }>) => {
     const pinned = observedHandoverCondition(rx);
     const transactItems: NonNullable<TransactWriteCommandInput["TransactItems"]> = [{ Update: {
         TableName: TABLE_RX, Key: { prescriptionId: rx.prescriptionId },
@@ -443,14 +456,12 @@ const restoreUncollectedFill = (docClient: DocClient, rx: Row, plan: Extract<Leg
             ":now": new Date().toISOString(), ...pinned.values,
         },
     } }];
-    if (plan.openBill) {
-        transactItems.push({ ConditionCheck: {
-            TableName: TABLE_TRANSACTION, Key: { billId: plan.openBill.billId },
-            ConditionExpression: "#s = :observedBill",
-            ExpressionAttributeNames: { "#s": "status" },
-            ExpressionAttributeValues: { ":observedBill": plan.openBill.status },
-        } });
-    }
+    transactItems.push({ ConditionCheck: {
+        TableName: TABLE_TRANSACTION, Key: { billId: plan.openBill.billId },
+        ConditionExpression: "#s = :observedBill",
+        ExpressionAttributeNames: { "#s": "status" },
+        ExpressionAttributeValues: { ":observedBill": plan.openBill.status },
+    } });
     return docClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
 };
 
@@ -473,17 +484,19 @@ export const requestRefill = async (req: Request, res: Response) => {
         }
         // REFILL_REQUESTED rows come from the retired pharmacy service, which neither billed nor counted the refill
         // and did not check that the previous fill had been handed over.
-        if (rx.status === RX_STATUS.REFILL_REQUESTED) {
-            if (rx.cancelledAt !== undefined) {
-                return res.status(409).json({ error: "This prescription was cancelled. Issue a new prescription instead." });
-            }
-            const plan = planLegacyRefill(rx, await findPrescriptionBills(docClient, rx.patientId, prescriptionId));
-            if (plan.kind === "review") return res.status(409).json({ error: plan.error });
-            if (plan.kind === "restore") {
-                await restoreUncollectedFill(docClient, rx, plan);
-                await writeAuditLog(authUser.sub, rx.patientId, "RESTORE_UNCOLLECTED_FILL", `Uncollected fill for ${prescriptionId} restored`, { region, ipAddress: req.ip });
-                return res.json({ message: "Previous fill restored", status: RX_STATUS.ISSUED });
-            }
+        if (rx.cancelledAt !== undefined) {
+            return res.status(409).json({ error: "This prescription was cancelled. Issue a new prescription instead." });
+        }
+        // Erasure anonymises the prescription and its bills, so the ledger can no longer be read for this patient.
+        if (rx.patientName === ERASED_MARKER) {
+            return res.status(409).json({ error: "This patient's records were anonymised by an erasure request. Issue a new prescription if care continues." });
+        }
+        const plan = planRefill(rx, await findPrescriptionBills(docClient, rx.patientId, prescriptionId));
+        if (plan.kind === "review") return res.status(409).json({ error: plan.error });
+        if (plan.kind === "restore") {
+            await restoreUncollectedFill(docClient, rx, plan);
+            await writeAuditLog(authUser.sub, rx.patientId, "RESTORE_UNCOLLECTED_FILL", `Uncollected fill for ${prescriptionId} restored`, { region, ipAddress: req.ip });
+            return res.json({ message: "Previous fill restored", status: RX_STATUS.ISSUED, paymentStatus: plan.paymentStatus });
         }
 
         const remaining = Number(rx.refillsRemaining);
