@@ -402,7 +402,7 @@ for (const region of ['US', 'EU']) {
       }
       // A20: a normal dispensed prescription with an outstanding bill is not billed again.
       seed(); bill('old-debt', { status: 'PENDING', createdAt: '2026-01-03T00:00:00Z' });
-      await refusedUnchanged('pat-1', 'A20: outstanding bill before a new refill', /outstanding bill/);
+      await refusedUnchanged('pat-1', 'A20: outstanding bill before a new refill', /outstanding bill.*Billing/);
       // A21 (V6-4): an erased patient's prescription is never refilled and never writes their id into a new bill.
       for (const shape of [() => seed({ patientName: 'ANONYMIZED_GDPR' }), () => legacy({ patientName: 'ANONYMIZED_GDPR', dispensedAt: DISPENSED_AT })]) {
         shape();
@@ -414,7 +414,8 @@ for (const region of ['US', 'EU']) {
       assert.equal((await refillAs('doc-2')).status, 403);
       assert.equal(rx1().status, 'REFILL_REQUESTED');
       // A3/A22: a cancelled prescription is refused with the reason, whatever its status says.
-      for (const overrides of [{ status: 'REFILL_REQUESTED' }, { status: 'REFILL_REQUESTED', dispensedAt: DISPENSED_AT }, { status: 'DISPENSED' }]) {
+      for (const overrides of [{ status: 'REFILL_REQUESTED' }, { status: 'REFILL_REQUESTED', dispensedAt: DISPENSED_AT }, { status: 'DISPENSED' },
+        { status: 'CANCELLED' }, { status: 'ISSUED' }]) {
         seed({ paymentStatus: 'PAID', cancelledAt: '2026-01-02T00:00:00Z', ...overrides });
         await refusedUnchanged('doc-1', `A22: cancelled ${overrides.status}`, /cancelled/);
       }
@@ -424,6 +425,7 @@ for (const region of ['US', 'EU']) {
         'concurrent status change': rx => Object.assign(rx, { status: 'READY_FOR_PICKUP' }),
         'concurrent dispense (dispensedAt)': rx => Object.assign(rx, { dispensedAt: '2026-03-01T00:00:00Z' }),
         'concurrent pickup (fulfilledAt)': rx => Object.assign(rx, { fulfilledAt: '2026-03-01T00:00:00Z' }),
+        'concurrent erasure': rx => Object.assign(rx, { patientName: 'ANONYMIZED_GDPR' }),
       };
       for (const [name, change] of Object.entries(competing)) {
         for (const [shape, setup] of [

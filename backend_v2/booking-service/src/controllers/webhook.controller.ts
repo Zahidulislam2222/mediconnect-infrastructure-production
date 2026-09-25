@@ -15,6 +15,7 @@ import {
 } from '../../../shared/subscription';
 import { TABLE_NAMES, setting } from '../../../shared/settings';
 import { PAYABLE_BILL_STATUSES } from '../../../shared/billing-status';
+import { DISPENSED_STATUSES, DISPENSE_EVIDENCE, lastHandover, observedPrescriptionCondition } from '../../../shared/prescription-handover';
 
 const STRIPE_SECRET_NAME = "/mediconnect/stripe/keys";
 const STRIPE_WEBHOOK_SECRET_NAME = "/mediconnect/stripe/webhook_secret";
@@ -410,6 +411,10 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
                 return;
             }
             if (ledger !== 'None' || prescription !== 'ConditionalCheckFailed') throw error;
+            if (await settleCollectedFillDebt(regionalDb, billId, existingTxItem, prescriptionId, paymentIntent.id, timestamp)) {
+                safeLog(`[WEBHOOK] Payment ${billId} settled the unpaid bill of an already-collected fill`);
+                return;
+            }
             // Money was captured for a fill that can no longer be collected: record it and flag it for refund review.
             await regionalDb.send(new UpdateCommand({
                 TableName: TABLE_TRANSACTIONS,
@@ -493,6 +498,43 @@ const PAYABLE_BILL_VALUES = Object.fromEntries([...PAYABLE_BILL_STATUSES, 'CANCE
 const PAYABLE_BILL_CONDITION = `#s IN (${Object.keys(PAYABLE_BILL_VALUES).join(', ')})`;
 
 /** DynamoDB lists one cancellation reason per transaction item, in request order. */
+/**
+ * The retired pharmacy service issued pickup codes without checking payment, so a collected fill can still carry its
+ * unpaid bill. A payable bill created at or before the prescription's last hand-over is that debt: paying it marks the
+ * bill PAID and leaves the prescription alone. Returns false for any other payment, or when the bill or prescription
+ * changed after it was read, so the caller keeps flagging it for refund review.
+ */
+async function settleCollectedFillDebt(regionalDb: ReturnType<typeof getRegionalClient>, billId: string,
+    bill: Record<string, unknown> | undefined, prescriptionId: string, paymentIntentId: string, timestamp: string): Promise<boolean> {
+    const createdAt = bill?.createdAt;
+    if (typeof createdAt !== 'string') return false;
+    const rx = (await regionalDb.send(new GetCommand({ TableName: TABLE_PRESCRIPTIONS, Key: { prescriptionId }, ConsistentRead: true }))).Item;
+    const handover = rx && lastHandover(rx);
+    if (!rx || !DISPENSED_STATUSES.includes(rx.status) || handover === undefined || createdAt > handover) return false;
+    const pinned = observedPrescriptionCondition(rx, ['status', ...DISPENSE_EVIDENCE]);
+    try {
+        await regionalDb.send(new TransactWriteCommand({ TransactItems: [
+            { Update: {
+                TableName: TABLE_TRANSACTIONS, Key: { billId },
+                UpdateExpression: "SET #s = :s, paymentIntentId = :pid, paidAt = :now",
+                ConditionExpression: PAYABLE_BILL_CONDITION,
+                ExpressionAttributeNames: { "#s": "status" },
+                ExpressionAttributeValues: { ":s": "PAID", ":pid": paymentIntentId, ":now": timestamp, ...PAYABLE_BILL_VALUES },
+            } },
+            { ConditionCheck: {
+                TableName: TABLE_PRESCRIPTIONS, Key: { prescriptionId },
+                ConditionExpression: pinned.expression,
+                ExpressionAttributeNames: pinned.names,
+                ExpressionAttributeValues: pinned.values,
+            } },
+        ] }));
+        return true;
+    } catch (error) {
+        if (cancellationCodes(error).includes('ConditionalCheckFailed')) return false;
+        throw error;
+    }
+}
+
 function cancellationCodes(error: unknown): string[] {
     const { name, CancellationReasons } = (error ?? {}) as { name?: string; CancellationReasons?: { Code?: string }[] };
     return name === 'TransactionCanceledException' && Array.isArray(CancellationReasons)

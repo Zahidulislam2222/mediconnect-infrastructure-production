@@ -53,7 +53,8 @@ function apply(item, expression, names = {}, values = {}) {
 const cancelled = codes => Object.assign(new Error('Transaction cancelled'), {
   name: 'TransactionCanceledException', CancellationReasons: codes.map(Code => ({ Code })) });
 
-function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, withoutRx = false, withoutBill = false, failBillPuts = 0, beforeBillPut } = {}) {
+function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, withoutRx = false, withoutBill = false, failBillPuts = 0, beforeBillPut,
+  beforeConditionCheck } = {}) {
   const rows = new Map();
   const key = (table, item) => `${table}|${KEYS[table].map(k => item[k]).join('|')}`;
   const put = (table, item) => rows.set(key(table, item), structuredClone(item));
@@ -92,16 +93,22 @@ function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, 
     }
     if (kind === 'TransactWriteCommand') {
       if (transactionFailures > 0) { transactionFailures--; throw cancelled(input.TransactItems.map(() => 'ThrottlingError')); }
+      // Runs once, before a transaction that checks a row without writing it, to model a competing writer.
+      if (beforeConditionCheck && input.TransactItems.some(entry => entry.ConditionCheck)) {
+        const competing = beforeConditionCheck; beforeConditionCheck = undefined;
+        competing(get(RX, { prescriptionId: 'test-rx' }), get(BILLS, { billId: 'test-bill' }));
+      }
       const staged = input.TransactItems.map(entry => {
         const [op, spec] = Object.entries(entry)[0];
-        assert.equal(op, 'Update', `Unexpected transaction operation ${op}`);
+        assert.ok(op === 'Update' || op === 'ConditionCheck', `Unexpected transaction operation ${op}`);
         const item = get(spec.TableName, spec.Key);
-        return { spec, item, ok: !!item && holds(item, spec.ConditionExpression, spec.ExpressionAttributeNames, spec.ExpressionAttributeValues) };
+        return { op, spec, item, ok: !!item && holds(item, spec.ConditionExpression, spec.ExpressionAttributeNames, spec.ExpressionAttributeValues) };
       });
       if (staged.some(s => !s.ok)) throw cancelled(staged.map(s => s.ok ? 'None' : 'ConditionalCheckFailed'));
-      // Validate every update before applying any, like DynamoDB does.
-      const copies = staged.map(s => { const copy = structuredClone(s.item); apply(copy, s.spec.UpdateExpression, s.spec.ExpressionAttributeNames, s.spec.ExpressionAttributeValues); return copy; });
-      staged.forEach((s, i) => put(s.spec.TableName, copies[i]));
+      // Validate every update before applying any, like DynamoDB does. A ConditionCheck writes nothing.
+      const writes = staged.filter(s => s.op === 'Update');
+      const copies = writes.map(s => { const copy = structuredClone(s.item); apply(copy, s.spec.UpdateExpression, s.spec.ExpressionAttributeNames, s.spec.ExpressionAttributeValues); return copy; });
+      writes.forEach((s, i) => put(s.spec.TableName, copies[i]));
       return {};
     }
     throw new Error(`Unexpected command ${kind}`);
@@ -292,4 +299,61 @@ test('a reconciliation write is only treated as done when the row that exists re
     assert.equal((await other.deliver(BILLING_PAY_METADATA)).status, 500, 'V5: a row recording a different payment is not this payment');
     assert.equal(other.bill().paymentIntentId, 'pi_other');
   } finally { mock.restoreAll(); }
+});
+
+// A25: the retired pharmacy service issued pickup codes without checking payment, so a collected fill can still carry
+// its unpaid first bill. Paying that debt settles it; it is not money for a fill that can no longer be collected.
+test('paying the unpaid bill of an already-collected fill settles it without reopening the fill', async () => {
+  for (const [label, rx] of [
+    ['legacy pickup', { status: 'PICKED_UP', fulfilledAt: '2026-01-05T00:00:00Z' }],
+    ['dispensed', { status: 'DISPENSED', dispensedAt: '2026-01-05T00:00:00Z' }],
+    ['latest of two hand-overs', { status: 'DISPENSED', dispensedAt: '2026-01-02T00:00:00Z', fulfilledAt: '2026-01-05T00:00:00Z' }],
+  ]) {
+    try {
+      const h = harness({ rx, bill: { createdAt: '2026-01-03T00:00:00Z' } });
+      const before = structuredClone(h.rx());
+      assert.equal((await h.deliver()).status, 200, label);
+      assert.equal(h.bill().status, 'PAID', label);
+      assert.equal(h.bill().paymentIntentId, 'pi_test', label);
+      assert.equal(h.bill().reviewReason, undefined, `${label}: a settled debt is not a refund case`);
+      assert.deepEqual(h.rx(), before, `${label}: the collected fill is unchanged`);
+      assert.equal(h.stock(), 5, `${label}: nothing is dispensed twice`);
+    } finally { mock.restoreAll(); }
+  }
+});
+
+test('payment that is not a debt for a collected fill is still flagged for refund review', async () => {
+  const collected = { status: 'DISPENSED', dispensedAt: '2026-01-05T00:00:00Z' };
+  for (const [label, options] of [
+    ['bill created after the hand-over', { rx: collected, bill: { createdAt: '2026-01-06T00:00:00Z' } }],
+    ['undated bill', { rx: collected }],
+    ['no hand-over recorded', { rx: { status: 'DISPENSED' }, bill: { createdAt: '2026-01-03T00:00:00Z' } }],
+    ['refill requested on the collected fill', { rx: { ...collected, status: 'REFILL_REQUESTED' }, bill: { createdAt: '2026-01-03T00:00:00Z' } }],
+    ['cancelled prescription', { rx: { ...collected, cancelledAt: '2026-01-06T00:00:00Z' }, bill: { createdAt: '2026-01-03T00:00:00Z' } }],
+    ['prescription changed before the write', { rx: collected, bill: { createdAt: '2026-01-03T00:00:00Z' },
+      beforeConditionCheck: rx => { rx.status = 'REFILL_REQUESTED'; } }],
+    ['hand-over re-dated before the write', { rx: collected, bill: { createdAt: '2026-01-03T00:00:00Z' },
+      beforeConditionCheck: rx => { rx.dispensedAt = '2026-01-07T00:00:00Z'; } }],
+  ]) {
+    try {
+      const h = harness(options);
+      assert.equal((await h.deliver()).status, 200, label);
+      assert.equal(h.bill().status, 'PAID', `${label}: captured money is still recorded`);
+      assert.equal(h.bill().reviewReason, 'PRESCRIPTION_NOT_PAYABLE', label);
+      assert.equal(h.stock(), 5, label);
+    } finally { mock.restoreAll(); }
+  }
+});
+
+test('a debt refunded or paid before the settlement is written is never paid over', async () => {
+  for (const status of ['REFUNDED', 'PAID']) {
+    try {
+      const h = harness({ rx: { status: 'DISPENSED', dispensedAt: '2026-01-05T00:00:00Z' }, bill: { createdAt: '2026-01-03T00:00:00Z' },
+        beforeConditionCheck: (_rx, bill) => { bill.status = status; bill.paymentIntentId = 'pi_other'; } });
+      assert.equal((await h.deliver()).status, 200, status);
+      assert.equal(h.bill().status, status, `${status}: left as the competing writer set it`);
+      assert.equal(h.bill().paymentIntentId, 'pi_other', `${status}: not overwritten by this payment`);
+      assert.equal(h.bill().reviewReason, undefined, status);
+    } finally { mock.restoreAll(); }
+  }
 });

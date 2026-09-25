@@ -15,6 +15,7 @@ import { publishEvent, EventType } from '../../../../shared/event-bus';
 import { TABLE_NAMES, setting } from '../../../../shared/settings';
 import { PAYABLE_BILL_STATUSES } from '../../../../shared/billing-status';
 import { ERASED_MARKER } from '../../../../shared/erasure';
+import { DISPENSE_EVIDENCE, lastHandover, observedPrescriptionCondition } from '../../../../shared/prescription-handover';
 import { canListPrescriptions, isApprovedClinician, isApprovedPrescriber, isConditionalFailure, isPrescriptionPatient } from './prescription-access';
 
 const router = Router();
@@ -369,7 +370,6 @@ const REFILLABLE_FROM: string[] = [RX_STATUS.DISPENSED, RX_STATUS.PICKED_UP, RX_
 const refillBillId = (prescriptionId: string, remainingBeforeRefill: number) => `refill-${prescriptionId}-${remainingBeforeRefill}`;
 // Evidence that a fill was handed over: this service records dispensedAt, the retired pharmacy Lambda fulfilledAt.
 // Neither is cleared when a new fill starts, so together they date the LAST hand-over, not the current fill's.
-const DISPENSE_EVIDENCE = ["dispensedAt", "fulfilledAt"] as const;
 
 type DocClient = ReturnType<typeof getRegionalClient>;
 /** A DynamoDB item as the document client returns it. */
@@ -395,15 +395,8 @@ const findPrescriptionBills = async (docClient: DocClient, patientId: string, pr
 };
 
 /** Pins a write to the hand-over evidence and cancellation state that were read, so a concurrent dispense or cancel fails it. */
-const observedHandoverCondition = (rx: Row) => {
-    const clauses = ["attribute_not_exists(cancelledAt)"];
-    const values: Record<string, unknown> = {};
-    for (const field of DISPENSE_EVIDENCE) {
-        if (rx[field] === undefined) clauses.push(`attribute_not_exists(${field})`);
-        else { clauses.push(`${field} = :observed_${field}`); values[`:observed_${field}`] = rx[field]; }
-    }
-    return { expression: clauses.join(" AND "), values };
-};
+// A refill decision rests on the hand-over evidence and on the patient not having been erased since the read.
+const observedRefillCondition = (rx: Row) => observedPrescriptionCondition(rx, [...DISPENSE_EVIDENCE, "patientName"]);
 
 type RefillPlan =
     | { kind: "bill" }
@@ -428,29 +421,29 @@ const planRefill = (rx: Row, bills: Row[]): RefillPlan => {
     const payable = bills.filter(bill => PAYABLE_BILL_STATUSES.includes(bill.status));
     if (rx.status !== RX_STATUS.REFILL_REQUESTED) {
         return payable.length > 0
-            ? { kind: "review", error: "Settle the outstanding bill for this prescription before requesting a refill." }
+            ? { kind: "review", error: "Settle the outstanding bill for this prescription in Billing before requesting a refill." }
             : { kind: "bill" };
     }
     const clean = bills.length > 0 && bills.every(bill =>
         (bill.status === "PAID" || PAYABLE_BILL_STATUSES.includes(bill.status)) &&
         bill.reviewReason === undefined && typeof bill.createdAt === "string");
     if (!clean) return { kind: "review", error: BILLING_REVIEW };
-    const lastHandover = DISPENSE_EVIDENCE.map(field => rx[field]).filter((value): value is string => typeof value === "string").sort().at(-1);
-    if (lastHandover !== undefined && payable.some(bill => bill.createdAt <= lastHandover)) return { kind: "review", error: BILLING_REVIEW };
-    const open = bills.filter(bill => lastHandover === undefined || bill.createdAt > lastHandover);
+    const handover = lastHandover(rx);
+    if (handover !== undefined && payable.some(bill => bill.createdAt <= handover)) return { kind: "review", error: BILLING_REVIEW };
+    const open = bills.filter(bill => handover === undefined || bill.createdAt > handover);
     if (open.length === 1) return { kind: "restore", paymentStatus: open[0].status === "PAID" ? "PAID" : "UNPAID", openBill: open[0] };
-    if (open.length === 0 && lastHandover !== undefined) return { kind: "bill" };
+    if (open.length === 0 && handover !== undefined) return { kind: "bill" };
     return { kind: "review", error: BILLING_REVIEW };
 };
 
 /** Restores the uncollected fill in one transaction; its bill must still be in the state it was classified by. */
 const restoreUncollectedFill = (docClient: DocClient, rx: Row, plan: Extract<RefillPlan, { kind: "restore" }>) => {
-    const pinned = observedHandoverCondition(rx);
+    const pinned = observedRefillCondition(rx);
     const transactItems: NonNullable<TransactWriteCommandInput["TransactItems"]> = [{ Update: {
         TableName: TABLE_RX, Key: { prescriptionId: rx.prescriptionId },
         UpdateExpression: "SET #s = :issued, paymentStatus = :paymentStatus, updatedAt = :now",
         ConditionExpression: `#s = :refillRequested AND ${pinned.expression}`,
-        ExpressionAttributeNames: { "#s": "status" },
+        ExpressionAttributeNames: { "#s": "status", ...pinned.names },
         ExpressionAttributeValues: {
             ":issued": RX_STATUS.ISSUED, ":paymentStatus": plan.paymentStatus, ":refillRequested": RX_STATUS.REFILL_REQUESTED,
             ":now": new Date().toISOString(), ...pinned.values,
@@ -479,13 +472,14 @@ export const requestRefill = async (req: Request, res: Response) => {
             return res.status(403).json({ error: "Only the patient or the prescribing clinician can request this refill." });
         }
 
-        if (!REFILLABLE_FROM.includes(rx.status)) {
-            return res.status(409).json({ error: "A refill can be requested after the current fill has been dispensed." });
+        // A cancelled prescription is refused with that reason whatever status it carries.
+        if (rx.cancelledAt !== undefined) {
+            return res.status(409).json({ error: "This prescription was cancelled. Issue a new prescription instead." });
         }
         // REFILL_REQUESTED rows come from the retired pharmacy service, which neither billed nor counted the refill
         // and did not check that the previous fill had been handed over.
-        if (rx.cancelledAt !== undefined) {
-            return res.status(409).json({ error: "This prescription was cancelled. Issue a new prescription instead." });
+        if (!REFILLABLE_FROM.includes(rx.status)) {
+            return res.status(409).json({ error: "A refill can be requested after the current fill has been dispensed." });
         }
         // Erasure anonymises the prescription and its bills, so the ledger can no longer be read for this patient.
         if (rx.patientName === ERASED_MARKER) {
@@ -505,14 +499,14 @@ export const requestRefill = async (req: Request, res: Response) => {
         // One refill per observed count: the condition rejects replays and concurrent duplicates, and the
         // bill id is derived from that count so a duplicate can never create a second charge.
         const now = new Date().toISOString();
-        const pinned = observedHandoverCondition(rx);
+        const pinned = observedRefillCondition(rx);
         await docClient.send(new TransactWriteCommand({
             TransactItems: [
                 { Update: {
                     TableName: TABLE_RX, Key: { prescriptionId },
                     UpdateExpression: "SET #s = :pending, paymentStatus = :unpaid, refillsRemaining = refillsRemaining - :one, updatedAt = :now",
                     ConditionExpression: `refillsRemaining = :expected AND #s = :observed AND ${pinned.expression}`,
-                    ExpressionAttributeNames: { "#s": "status" },
+                    ExpressionAttributeNames: { "#s": "status", ...pinned.names },
                     ExpressionAttributeValues: {
                         ":pending": RX_STATUS.PENDING, ":unpaid": "UNPAID", ":one": 1, ":now": now, ":expected": remaining, ":observed": rx.status,
                         ...pinned.values,
