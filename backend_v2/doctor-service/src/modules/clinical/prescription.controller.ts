@@ -15,7 +15,8 @@ import { publishEvent, EventType } from '../../../../shared/event-bus';
 import { TABLE_NAMES, setting } from '../../../../shared/settings';
 import { PAYABLE_BILL_STATUSES } from '../../../../shared/billing-status';
 import { ERASED_MARKER } from '../../../../shared/erasure';
-import { DISPENSE_EVIDENCE, lastHandover, observedPrescriptionCondition } from '../../../../shared/prescription-handover';
+import { DISPENSED_STATUSES, DISPENSE_EVIDENCE, lastHandover, observedPrescriptionCondition } from '../../../../shared/prescription-handover';
+import { findPrescriptionBills } from '../../../../shared/prescription-ledger';
 import { canListPrescriptions, isApprovedClinician, isApprovedPrescriber, isConditionalFailure, isPrescriptionPatient } from './prescription-access';
 
 const router = Router();
@@ -365,37 +366,19 @@ export const getPrescriptions = async (req: Request, res: Response) => {
     } catch (err: any) { res.status(500).json({ error: err.message }); }
 };
 
-const REFILLABLE_FROM: string[] = [RX_STATUS.DISPENSED, RX_STATUS.PICKED_UP, RX_STATUS.REFILL_REQUESTED];
+// A refill follows a hand-over, or a legacy refill request the retired pharmacy service recorded.
+const REFILLABLE_FROM: readonly string[] = [...DISPENSED_STATUSES, RX_STATUS.REFILL_REQUESTED];
 /** A refill bill is named after the refills remaining before it, so a replayed or concurrent request cannot bill twice. */
 const refillBillId = (prescriptionId: string, remainingBeforeRefill: number) => `refill-${prescriptionId}-${remainingBeforeRefill}`;
-// Evidence that a fill was handed over: this service records dispensedAt, the retired pharmacy Lambda fulfilledAt.
-// Neither is cleared when a new fill starts, so together they date the LAST hand-over, not the current fill's.
 
 type DocClient = ReturnType<typeof getRegionalClient>;
 /** A DynamoDB item as the document client returns it. */
 type Row = NonNullable<QueryCommandOutput["Items"]>[number];
 
-/** Every ledger row of a prescription. The ledger has no reference index, so bills are found through the patient index. */
-const findPrescriptionBills = async (docClient: DocClient, patientId: string, prescriptionId: string) => {
-    const bills: Row[] = [];
-    let page: QueryCommandOutput["LastEvaluatedKey"];
-    do {
-        const result = await docClient.send(new QueryCommand({
-            TableName: TABLE_TRANSACTION,
-            IndexName: "PatientIndex",
-            KeyConditionExpression: "patientId = :pid",
-            FilterExpression: "referenceId = :rid",
-            ExpressionAttributeValues: { ":pid": patientId, ":rid": prescriptionId },
-            ExclusiveStartKey: page
-        }));
-        bills.push(...(result.Items || []));
-        page = result.LastEvaluatedKey;
-    } while (page);
-    return bills;
-};
-
-/** Pins a write to the hand-over evidence and cancellation state that were read, so a concurrent dispense or cancel fails it. */
-// A refill decision rests on the hand-over evidence and on the patient not having been erased since the read.
+/**
+ * Pins a refill write to what its decision read: the hand-over evidence, the cancellation state and the patient not
+ * having been erased, so a concurrent dispense, cancel or erasure fails it.
+ */
 const observedRefillCondition = (rx: Row) => observedPrescriptionCondition(rx, [...DISPENSE_EVIDENCE, "patientName"]);
 
 type RefillPlan =
@@ -485,7 +468,7 @@ export const requestRefill = async (req: Request, res: Response) => {
         if (rx.patientName === ERASED_MARKER) {
             return res.status(409).json({ error: "This patient's records were anonymised by an erasure request. Issue a new prescription if care continues." });
         }
-        const plan = planRefill(rx, await findPrescriptionBills(docClient, rx.patientId, prescriptionId));
+        const plan = planRefill(rx, await findPrescriptionBills(docClient, TABLE_TRANSACTION, rx.patientId, prescriptionId));
         if (plan.kind === "review") return res.status(409).json({ error: plan.error });
         if (plan.kind === "restore") {
             await restoreUncollectedFill(docClient, rx, plan);
@@ -523,7 +506,7 @@ export const requestRefill = async (req: Request, res: Response) => {
         return res.json({ message: "Refill authorized", status: RX_STATUS.PENDING });
     } catch (e: any) {
         if (isConditionalFailure(e)) {
-            return res.status(409).json({ error: "This refill was already processed or the prescription changed. Refresh before trying again." });
+            return res.status(409).json({ error: "This prescription changed while the refill was being requested. Sync to see its current state." });
         }
         safeError("Refill request failed", e);
         res.status(500).json({ error: "Refill request failed" });
@@ -714,7 +697,7 @@ export const cancelPrescription = async (req: Request, res: Response) => {
         }
 
         // Cannot cancel already dispensed or cancelled prescriptions
-        if (rx.status === RX_STATUS.DISPENSED || rx.status === RX_STATUS.PICKED_UP) {
+        if (DISPENSED_STATUSES.includes(rx.status)) {
             return res.status(400).json({ error: "Cannot cancel a dispensed prescription." });
         }
         if (rx.status === 'CANCELLED') {
@@ -725,7 +708,7 @@ export const cancelPrescription = async (req: Request, res: Response) => {
 
         // Find the prescription's bills BEFORE the atomic write so they change together. A failed lookup aborts the
         // cancel: leaving a bill payable for a cancelled prescription is worse than asking the doctor to retry.
-        const relatedBills = await findPrescriptionBills(docClient, rx.patientId, prescriptionId);
+        const relatedBills = await findPrescriptionBills(docClient, TABLE_TRANSACTION, rx.patientId, prescriptionId);
         // The index is eventually consistent. A refill's bill id is derived from the count it consumed, so the
         // current refill bill is read directly in case the index has not caught up with it yet.
         if (rx.status === RX_STATUS.PENDING && typeof rx.refillsRemaining === 'number') {

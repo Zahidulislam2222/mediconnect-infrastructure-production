@@ -109,8 +109,13 @@ for (const region of ['US', 'EU']) {
         if (kind === 'QueryCommand' && input.TableName === BILLS) {
           assert.equal(input.IndexName, 'PatientIndex', 'The ledger has no reference index');
           const values = input.ExpressionAttributeValues;
-          // hiddenFromIndex models GSI replication lag: the row exists but the index has not caught up.
-          return { Items: store.bills().filter(bill => !bill.hiddenFromIndex && bill.patientId === values[':pid'] && bill.referenceId === values[':rid']).map(bill => structuredClone(bill)) };
+          // hiddenFromIndex models GSI replication lag: the row exists but the index has not caught up. Results come one
+          // row per page, and the reference filter runs after paging as in DynamoDB, so a single-page reader misses bills.
+          const indexed = store.bills().filter(bill => !bill.hiddenFromIndex && bill.patientId === values[':pid'])
+            .sort((a, b) => a.billId.localeCompare(b.billId));
+          const start = input.ExclusiveStartKey?.offset ?? 0;
+          return { Items: indexed.slice(start, start + 1).filter(bill => bill.referenceId === values[':rid']).map(bill => structuredClone(bill)),
+            LastEvaluatedKey: start + 1 < indexed.length ? { offset: start + 1 } : undefined };
         }
         if (kind === 'QueryCommand') {
           assert.equal(input.TableName, RX, 'Only prescription queries are expected');
@@ -207,6 +212,9 @@ for (const region of ['US', 'EU']) {
       seed();
       const racing = await Promise.all([1, 2, 3].map(() => call('pat-1', 'POST', '/pharmacy/request-refill', { prescriptionId: 'rx-1' })));
       assert.deepEqual(racing.map(r => r.status).sort(), [200, 409, 409], 'D3: concurrent refills are atomic');
+      for (const loser of racing.filter(r => r.status === 409)) {
+        assert.doesNotMatch((await loser.json()).error, /already processed/, 'A37: a refused request is never described as processed');
+      }
       assert.equal(rx1().refillsRemaining, 1); assert.equal(store.bills().length, 1);
 
       seed({ refillsRemaining: 0 });
@@ -305,6 +313,12 @@ for (const region of ['US', 'EU']) {
       assert.equal(billRow('bill-1').status, 'CANCELLED', 'an unpaid bill cannot be paid after cancellation');
       assert.equal(billRow('bill-other').status, 'PENDING', 'other prescriptions are untouched');
       assert.equal((await call('doc-1', 'PUT', '/prescriptions/rx-1/cancel')).status, 400, 'already cancelled');
+      for (const status of ['DISPENSED', 'PICKED_UP']) {
+        seed({ status, paymentStatus: 'PAID' });
+        const cancelDispensed = await call('doc-1', 'PUT', '/prescriptions/rx-1/cancel');
+        assert.equal(cancelDispensed.status, 400, `a ${status} fill was handed over and cannot be cancelled`);
+        assert.equal(rx1().status, status); assert.equal(rx1().cancelledAt, undefined);
+      }
       seed({ status: 'READY_FOR_PICKUP', paymentStatus: 'PAID' });
       bill('bill-1', { status: 'PAID' });
       assert.equal((await call('doc-1', 'PUT', '/prescriptions/rx-1/cancel')).status, 200);
@@ -439,6 +453,7 @@ for (const region of ['US', 'EU']) {
           const result = await refillAs('doc-1');
           store.beforeUpdate = store.beforeTransact = null;
           assert.equal(result.status, 409, `${shape}: ${name}`);
+          assert.match((await result.json()).error, /changed while the refill was being requested/, `A37: ${shape}: ${name}`);
           assert.equal(rx1().status, change(structuredClone(before)).status, `${shape}: ${name} leaves the competing state`);
           assert.equal(rx1().refillsRemaining, before.refillsRemaining);
           assert.ok(!store.bills().some(b => b.billId.startsWith('refill-')), `${shape}: ${name} creates no bill`);

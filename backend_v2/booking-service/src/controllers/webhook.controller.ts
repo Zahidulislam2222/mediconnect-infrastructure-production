@@ -16,6 +16,7 @@ import {
 import { TABLE_NAMES, setting } from '../../../shared/settings';
 import { PAYABLE_BILL_STATUSES } from '../../../shared/billing-status';
 import { DISPENSED_STATUSES, DISPENSE_EVIDENCE, lastHandover, observedPrescriptionCondition } from '../../../shared/prescription-handover';
+import { findPrescriptionBills } from '../../../shared/prescription-ledger';
 
 const STRIPE_SECRET_NAME = "/mediconnect/stripe/keys";
 const STRIPE_WEBHOOK_SECRET_NAME = "/mediconnect/stripe/webhook_secret";
@@ -402,6 +403,7 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
     }
 
     if (prescriptionId) {
+        let settledDebt = false;
         try {
             await regionalDb.send(new TransactWriteCommand({ TransactItems: transactItems }));
         } catch (error) {
@@ -411,25 +413,28 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
                 return;
             }
             if (ledger !== 'None' || prescription !== 'ConditionalCheckFailed') throw error;
-            if (await settleCollectedFillDebt(regionalDb, billId, existingTxItem, prescriptionId, paymentIntent.id, timestamp)) {
-                safeLog(`[WEBHOOK] Payment ${billId} settled the unpaid bill of an already-collected fill`);
+            settledDebt = await settleCollectedFillDebt(regionalDb, billId, existingTxItem, prescriptionId, paymentIntent.id, timestamp);
+            if (!settledDebt) {
+                // Money was captured for a fill that can no longer be collected: record it and flag it for refund review.
+                const flagged = await regionalDb.send(new UpdateCommand({
+                    TableName: TABLE_TRANSACTIONS,
+                    Key: { billId },
+                    UpdateExpression: "SET #s = :s, paymentIntentId = :pid, paidAt = :now, reviewReason = :reason",
+                    ConditionExpression: PAYABLE_BILL_CONDITION,
+                    ExpressionAttributeNames: { "#s": "status" },
+                    ExpressionAttributeValues: { ":s": "PAID", ":pid": paymentIntent.id, ":now": timestamp, ":reason": "PRESCRIPTION_NOT_PAYABLE", ...PAYABLE_BILL_VALUES }
+                })).then(() => true, (ledgerError: unknown) => {
+                    if ((ledgerError as { name?: string })?.name !== 'ConditionalCheckFailedException') throw ledgerError;
+                    return false;
+                });
+                if (flagged) safeError(`[WEBHOOK] Payment ${billId} received for a prescription that is not awaiting payment; refund review required`);
+                else safeLog(`Idempotency Check: Transaction ${billId} is no longer payable (paid or refunded). Skipping.`);
                 return;
             }
-            // Money was captured for a fill that can no longer be collected: record it and flag it for refund review.
-            await regionalDb.send(new UpdateCommand({
-                TableName: TABLE_TRANSACTIONS,
-                Key: { billId },
-                UpdateExpression: "SET #s = :s, paymentIntentId = :pid, paidAt = :now, reviewReason = :reason",
-                ConditionExpression: PAYABLE_BILL_CONDITION,
-                ExpressionAttributeNames: { "#s": "status" },
-                ExpressionAttributeValues: { ":s": "PAID", ":pid": paymentIntent.id, ":now": timestamp, ":reason": "PRESCRIPTION_NOT_PAYABLE", ...PAYABLE_BILL_VALUES }
-            })).catch((ledgerError: unknown) => {
-                if ((ledgerError as { name?: string })?.name !== 'ConditionalCheckFailedException') throw ledgerError;
-            });
-            safeError(`[WEBHOOK] Payment ${billId} received for a prescription that is not awaiting payment; refund review required`);
-            return;
+            // A settled debt is a real payment, recorded below like any other; nothing is dispensed for it.
+            safeLog(`[WEBHOOK] Payment ${billId} settled the unpaid bill of an already-collected fill`);
         }
-        await decrementPharmacyStock(regionalDb, prescriptionId, pharmacyId);
+        if (!settledDebt) await decrementPharmacyStock(regionalDb, prescriptionId, pharmacyId);
     }
 
     try {
@@ -497,12 +502,12 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
 const PAYABLE_BILL_VALUES = Object.fromEntries([...PAYABLE_BILL_STATUSES, 'CANCELLED'].map((status, i) => [`:payable${i}`, status]));
 const PAYABLE_BILL_CONDITION = `#s IN (${Object.keys(PAYABLE_BILL_VALUES).join(', ')})`;
 
-/** DynamoDB lists one cancellation reason per transaction item, in request order. */
 /**
  * The retired pharmacy service issued pickup codes without checking payment, so a collected fill can still carry its
- * unpaid bill. A payable bill created at or before the prescription's last hand-over is that debt: paying it marks the
- * bill PAID and leaves the prescription alone. Returns false for any other payment, or when the bill or prescription
- * changed after it was read, so the caller keeps flagging it for refund review.
+ * unpaid bill. That debt is the prescription's ONLY payable bill created at or before its last hand-over; paying it
+ * marks the bill PAID and leaves the prescription alone. Two such bills cannot be told apart from a double bill, so
+ * they, like any other payment or a bill or prescription that changed after it was read, return false and the caller
+ * keeps flagging the payment for refund review.
  */
 async function settleCollectedFillDebt(regionalDb: ReturnType<typeof getRegionalClient>, billId: string,
     bill: Record<string, unknown> | undefined, prescriptionId: string, paymentIntentId: string, timestamp: string): Promise<boolean> {
@@ -511,6 +516,12 @@ async function settleCollectedFillDebt(regionalDb: ReturnType<typeof getRegional
     const rx = (await regionalDb.send(new GetCommand({ TableName: TABLE_PRESCRIPTIONS, Key: { prescriptionId }, ConsistentRead: true }))).Item;
     const handover = rx && lastHandover(rx);
     if (!rx || !DISPENSED_STATUSES.includes(rx.status) || handover === undefined || createdAt > handover) return false;
+    // The ledger read is scoped to the prescription's patient, so another patient's bill is never counted as its debt.
+    if (typeof rx.patientId !== 'string') return false;
+    const payableBills = new Set<unknown>([...PAYABLE_BILL_STATUSES, 'CANCELLED']);
+    const debts = (await findPrescriptionBills(regionalDb, TABLE_TRANSACTIONS, rx.patientId, prescriptionId))
+        .filter(row => payableBills.has(row.status) && !(typeof row.createdAt === 'string' && row.createdAt > handover));
+    if (debts.length !== 1 || debts[0].billId !== billId) return false;
     const pinned = observedPrescriptionCondition(rx, ['status', ...DISPENSE_EVIDENCE]);
     try {
         await regionalDb.send(new TransactWriteCommand({ TransactItems: [
@@ -535,6 +546,7 @@ async function settleCollectedFillDebt(regionalDb: ReturnType<typeof getRegional
     }
 }
 
+/** DynamoDB lists one cancellation reason per transaction item, in request order. */
 function cancellationCodes(error: unknown): string[] {
     const { name, CancellationReasons } = (error ?? {}) as { name?: string; CancellationReasons?: { Code?: string }[] };
     return name === 'TransactionCanceledException' && Array.isArray(CancellationReasons)

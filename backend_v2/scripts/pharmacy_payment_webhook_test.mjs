@@ -17,6 +17,7 @@ const aws = require('./dist/shared/aws-config.js');
 const audit = require('./dist/shared/audit.js');
 const notifications = require('./dist/shared/notifications.js');
 const billing = require('./dist/booking-service/src/controllers/billing.controller.js');
+const logger = require('./dist/shared/logger.js');
 const { TABLE_NAMES } = require('./dist/shared/settings.js');
 
 const WEBHOOK_SECRET = 'whsec_test_secret';
@@ -54,19 +55,19 @@ const cancelled = codes => Object.assign(new Error('Transaction cancelled'), {
   name: 'TransactionCanceledException', CancellationReasons: codes.map(Code => ({ Code })) });
 
 function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, withoutRx = false, withoutBill = false, failBillPuts = 0, beforeBillPut,
-  beforeConditionCheck } = {}) {
+  beforeConditionCheck, otherBills = [], billPageSize = Infinity, beforeFlag } = {}) {
   const rows = new Map();
   const key = (table, item) => `${table}|${KEYS[table].map(k => item[k]).join('|')}`;
   const put = (table, item) => rows.set(key(table, item), structuredClone(item));
   const get = (table, k) => rows.get(key(table, k));
   if (!withoutBill) put(BILLS, { billId: 'test-bill', referenceId: 'test-rx', patientId: 'test-patient', amount: 12, status: 'PENDING', type: 'PHARMACY', ...bill });
   if (!withoutRx) put(RX, { prescriptionId: 'test-rx', patientId: 'test-patient', medication: 'test-med', status: 'ISSUED', paymentStatus: 'UNPAID', ...rx });
+  for (const other of otherBills) put(BILLS, { referenceId: 'test-rx', patientId: 'test-patient', amount: 12, type: 'PHARMACY', ...other });
   put(INVENTORY, { pharmacyId: 'test-pharmacy', drugId: 'test-med', stock: 5 });
   let transactionFailures = failTransactions, billReadFailures = failBillReads, billPutFailures = failBillPuts;
   mock.method(aws, 'getSSMParameter', async name => name.includes('webhook') ? WEBHOOK_SECRET : 'sk_test_key');
-  mock.method(audit, 'writeAuditLog', async () => {});
-  mock.method(notifications, 'sendNotification', async () => {});
-  mock.method(billing, 'pushRevenueToBigQuery', async () => {});
+  const effects = { audit: mock.method(audit, 'writeAuditLog', async () => {}), notify: mock.method(notifications, 'sendNotification', async () => {}),
+    revenue: mock.method(billing, 'pushRevenueToBigQuery', async () => {}), errors: mock.method(logger, 'safeError', () => {}) };
   mock.method(billing, 'pushAppointmentToBigQuery', async () => {});
   mock.method(aws, 'getRegionalClient', () => ({ send: async command => {
     await new Promise(done => setImmediate(done));
@@ -75,6 +76,18 @@ function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, 
       billReadFailures--; throw Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' });
     }
     if (kind === 'GetCommand') { const item = get(input.TableName, input.Key); return { Item: item && structuredClone(item) }; }
+    // The only query the webhook may run: a patient's bills for one prescription, read page by page.
+    if (kind === 'QueryCommand') {
+      assert.equal(input.TableName, BILLS); assert.equal(input.IndexName, 'PatientIndex');
+      assert.equal(input.KeyConditionExpression, 'patientId = :pid'); assert.equal(input.FilterExpression, 'referenceId = :rid');
+      // DynamoDB rejects a key condition without a value, so a query for a missing patient id would fail the delivery.
+      if (typeof input.ExpressionAttributeValues[':pid'] !== 'string') throw Object.assign(new Error('invalid key'), { name: 'ValidationException' });
+      const matches = [...rows.entries()].filter(([k, item]) => k.startsWith(`${BILLS}|`) && item.patientId === input.ExpressionAttributeValues[':pid'])
+        .sort(([a], [b]) => a.localeCompare(b));
+      const start = input.ExclusiveStartKey?.offset ?? 0, end = Math.min(start + billPageSize, matches.length);
+      return { Items: matches.slice(start, end).map(([, item]) => item).filter(item => item.referenceId === input.ExpressionAttributeValues[':rid'])
+        .map(item => structuredClone(item)), LastEvaluatedKey: end < matches.length ? { offset: end } : undefined };
+    }
     if (kind === 'PutCommand') {
       if (input.TableName === BILLS && billPutFailures > 0) {
         billPutFailures--; throw Object.assign(new Error('throttled'), { name: 'ProvisionedThroughputExceededException' });
@@ -86,6 +99,9 @@ function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, 
     }
     if (kind === 'DeleteCommand') { rows.delete(key(input.TableName, input.Key)); return {}; }
     if (kind === 'UpdateCommand') {
+      if (beforeFlag && input.TableName === BILLS && input.ExpressionAttributeValues?.[':reason']) {
+        const competing = beforeFlag; beforeFlag = undefined; competing(get(BILLS, { billId: 'test-bill' }));
+      }
       const item = get(input.TableName, input.Key);
       if (!item || !holds(item, input.ConditionExpression, input.ExpressionAttributeNames, input.ExpressionAttributeValues))
         throw Object.assign(new Error('conditional'), { name: 'ConditionalCheckFailedException' });
@@ -125,7 +141,7 @@ function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, 
     await handleStripeWebhook({ body: Buffer.from(payload), headers: { 'stripe-signature': signature } }, res);
     return result;
   }
-  return { deliver, bill: () => get(BILLS, { billId: 'test-bill' }), rx: () => get(RX, { prescriptionId: 'test-rx' }),
+  return { deliver, effects, bill: () => get(BILLS, { billId: 'test-bill' }), other: billId => get(BILLS, { billId }), rx: () => get(RX, { prescriptionId: 'test-rx' }),
     stock: () => get(INVENTORY, { pharmacyId: 'test-pharmacy', drugId: 'test-med' }).stock, events: () => [...rows.keys()].filter(k => k.startsWith(`${EVENTS}|`)) };
 }
 
@@ -356,4 +372,63 @@ test('a debt refunded or paid before the settlement is written is never paid ove
       assert.equal(h.bill().reviewReason, undefined, status);
     } finally { mock.restoreAll(); }
   }
+});
+
+// A31: a pre-hand-over bill is the fill's debt only when it is the prescription's ONLY payable bill from before the
+// hand-over; anything else cannot be told apart from a double bill, so the payment goes to refund review.
+test('a debt is settled only when it is the single payable bill from before the hand-over', async () => {
+  const collected = { status: 'DISPENSED', dispensedAt: '2026-01-05T00:00:00Z' };
+  const debt = { createdAt: '2026-01-03T00:00:00Z' };
+  for (const [label, options] of [
+    ['a second unpaid bill before the hand-over', { otherBills: [{ billId: 'test-bill-2', status: 'PENDING', createdAt: '2026-01-02T00:00:00Z' }] }],
+    ['the second bill on a later page', { billPageSize: 1, otherBills: [{ billId: 'test-bill-9', status: 'UNPAID', createdAt: '2026-01-04T00:00:00Z' }] }],
+    ['an undated payable bill', { otherBills: [{ billId: 'test-bill-2', status: 'PENDING' }] }],
+    ['a bill belonging to another patient', { bill: { ...debt, patientId: 'test-other-patient' } }],
+    ['a prescription without a patient', { rx: { ...collected, patientId: undefined } }],
+  ]) {
+    try {
+      const h = harness({ rx: collected, bill: debt, ...options });
+      assert.equal((await h.deliver()).status, 200, label);
+      assert.equal(h.bill().status, 'PAID', `${label}: captured money is still recorded`);
+      assert.equal(h.bill().reviewReason, 'PRESCRIPTION_NOT_PAYABLE', label);
+      assert.equal(h.stock(), 5, label);
+    } finally { mock.restoreAll(); }
+  }
+  for (const [label, otherBills] of [
+    ['an earlier PAID bill', [{ billId: 'test-bill-0', status: 'PAID', createdAt: '2026-01-01T00:00:00Z' }]],
+    ['an unpaid bill after the hand-over', [{ billId: 'test-bill-2', status: 'PENDING', createdAt: '2026-01-06T00:00:00Z' }]],
+    ['a bill of another prescription', [{ billId: 'test-bill-x', referenceId: 'test-rx-other', status: 'PENDING', createdAt: '2026-01-02T00:00:00Z' }]],
+  ]) {
+    try {
+      const h = harness({ rx: collected, bill: debt, otherBills, billPageSize: 1 });
+      assert.equal((await h.deliver()).status, 200, label);
+      assert.equal(h.bill().status, 'PAID', label);
+      assert.equal(h.bill().reviewReason, undefined, `${label}: still a settled debt`);
+    } finally { mock.restoreAll(); }
+  }
+});
+
+// A34: settling a debt is a real payment, so it is audited, counted as revenue and confirmed to the patient.
+test('a settled debt gets the same audit, revenue and notification as any payment, and no stock movement', async () => {
+  try {
+    const h = harness({ rx: { status: 'PICKED_UP', fulfilledAt: '2026-01-05T00:00:00Z' }, bill: { createdAt: '2026-01-03T00:00:00Z' } });
+    assert.equal((await h.deliver()).status, 200);
+    assert.equal(h.bill().reviewReason, undefined);
+    assert.equal(h.effects.revenue.mock.callCount(), 1, 'revenue recorded');
+    assert.ok(h.effects.audit.mock.calls.some(call => call.arguments[2] === 'PAYMENT_SUCCESS'), 'payment audited');
+    assert.equal(h.effects.notify.mock.callCount(), 1, 'patient notified');
+    assert.equal(h.stock(), 5, 'nothing dispensed');
+  } finally { mock.restoreAll(); }
+});
+
+// A38: a payment whose bill another writer settled first is not a refund case, and the log must not say it is.
+test('a flag write that finds the bill already settled is skipped without a refund-review alarm', async () => {
+  try {
+    const h = harness({ rx: { status: 'DISPENSED', cancelledAt: '2026-01-06T00:00:00Z' }, bill: { createdAt: '2026-01-03T00:00:00Z' },
+      beforeFlag: bill => { bill.status = 'PAID'; bill.paymentIntentId = 'pi_other'; } });
+    assert.equal((await h.deliver()).status, 200);
+    assert.equal(h.bill().paymentIntentId, 'pi_other');
+    assert.equal(h.bill().reviewReason, undefined);
+    assert.ok(!h.effects.errors.mock.calls.some(call => /refund review required/.test(String(call.arguments[0]))), 'no false alarm');
+  } finally { mock.restoreAll(); }
 });
