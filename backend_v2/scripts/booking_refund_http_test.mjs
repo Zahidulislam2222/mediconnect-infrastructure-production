@@ -15,6 +15,7 @@ const Stripe = require('stripe');
 const aws = require('./dist/shared/aws-config.js');
 const audit = require('./dist/shared/audit.js');
 const kms = require('./dist/shared/kms-crypto.js');
+const logging = require('./dist/shared/logger.js');
 const notifications = require('./dist/shared/notifications.js');
 const eventBus = require('./dist/shared/event-bus.js');
 const billing = require('./dist/booking-service/src/controllers/billing.controller.js');
@@ -104,7 +105,7 @@ const appointment = (overrides = {}) => ({
 });
 
 function harness({ region = 'US', appointments = [appointment()], refund = 'succeeded', stripeKey = true, failFinalize = 0,
-  bills = [], beforeFinalize = null, providerRefunds = [], commitThenFail = 0, afterStatusQuery = null } = {}) {
+  bills = [], beforeFinalize = null, providerRefunds = [], commitThenFail = 0, afterStatusQuery = null, failDecrypt = false } = {}) {
   const rows = new Map();
   const key = (table, item) => `${table}|${KEYS[table].map(k => item[k]).join('|')}`;
   const put = (table, item) => rows.set(key(table, item), structuredClone(item));
@@ -125,7 +126,9 @@ function harness({ region = 'US', appointments = [appointment()], refund = 'succ
   let finalizeFailures = failFinalize, committedFailures = commitThenFail;
   mock.method(aws, 'getSSMParameter', async name => /cleanup/.test(name) ? CLEANUP_SECRET : (stripeKey ? 'sk_test_key' : undefined));
   mock.method(audit, 'writeAuditLog', async () => {});
-  mock.method(kms, 'decryptPHI', async fields => Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, String(v).replace(/^phi:kms:/, 'plain-')])));
+  const decryptRegions = [];
+  const loggedErrors = mock.method(logging.logger, 'error', () => {});
+  mock.method(kms, 'decryptPHI', async (fields, keyRegion) => { decryptRegions.push(keyRegion); if (failDecrypt && 'email' in fields) throw new Error('KMS unavailable'); return Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, String(v).replace(/^phi:kms:/, 'plain-')])); });
   mock.method(kms, 'encryptPHI', async fields => Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, `phi:kms:${v}`])));
   const notices = [], receipts = [];
   mock.method(notifications, 'sendNotification', async notice => { notices.push(notice); });
@@ -225,7 +228,7 @@ function harness({ region = 'US', appointments = [appointment()], refund = 'succ
   });
   const user = (sub, extra = {}) => ({ sub, region, email: `${sub}@example.test`, ...extra });
   return {
-    stripe, notices, receipts, regions,
+    stripe, notices, receipts, regions, decryptRegions, loggedErrors,
     put: (tableName, item) => put(tableName, item),
     apt: (id = 'test-apt') => get(APPOINTMENTS, { appointmentId: id }),
     refundRows: () => table(BILLS).filter(b => b.type === 'REFUND'),
@@ -289,6 +292,17 @@ test('a doctor cancellation notifies the patient at the decrypted profile email'
     for (let i = 0; i < 5; i++) await new Promise(done => setImmediate(done));
     const recipients = h.notices.filter(n => n.type === 'BOOKING_CANCELLATION').map(n => n.recipientEmail);
     assert.deepEqual(recipients, ['plain-patient@example.test']);
+    assert.ok(h.decryptRegions.length > 0 && h.decryptRegions.every(r => r === 'US'), `decrypted with the request region: ${h.decryptRegions}`);
+  } finally { mock.restoreAll(); }
+});
+
+test('a cancellation notice that cannot be addressed is logged, not swallowed', async () => {
+  try {
+    const h = harness({ refund: 'pending', failDecrypt: true });
+    assert.equal((await h.doctorCancel()).status, 200);
+    for (let i = 0; i < 5; i++) await new Promise(done => setImmediate(done));
+    assert.equal(h.notices.filter(n => n.type === 'BOOKING_CANCELLATION').length, 0);
+    assert.ok(h.loggedErrors.mock.calls.some(call => /not notified/i.test(String(call.arguments[0]))), 'missed notice logged');
   } finally { mock.restoreAll(); }
 });
 

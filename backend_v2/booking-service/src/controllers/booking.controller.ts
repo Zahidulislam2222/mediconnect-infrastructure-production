@@ -1274,8 +1274,13 @@ async function cancelAppointment(apt: any, newStatus: string, refund: RefundOutc
                         type: 'BOOKING_CANCELLATION',
                         metadata: { appointmentId: apt.appointmentId }
                     }).catch(() => {});
+                } else {
+                    logger.error("[BOOKING] Cancellation notice not sent: patient not notified (no email on profile)", { appointmentId: apt.appointmentId });
                 }
-            } catch { /* Non-blocking */ }
+            } catch (noticeErr: unknown) {
+                // Non-blocking: the cancellation is already saved.
+                logger.error("[BOOKING] Cancellation notice failed: patient not notified", { appointmentId: apt.appointmentId, error: noticeErr instanceof Error ? noticeErr.message : String(noticeErr) });
+            }
         }
 
     } catch (e: any) { logger.error("[BOOKING] Post-cancellation side effect failed", { error: e.message }); }
