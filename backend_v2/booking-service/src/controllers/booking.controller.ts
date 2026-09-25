@@ -20,6 +20,7 @@ import { CANCELLATION_COPY, RECEIPT_STATUS, REFUND_NOTICES, type RefundStatus } 
 import {
     CLEANUP_CANCELLABLE, DOCTOR_CANCELLABLE, FHIR_CANCELLED, MANUAL_REFUND_LEDGER_STATUS, PATIENT_CANCELLABLE, REFUNDED_STATUS, refundBillId
 } from '../cancellation-policy';
+import { patientContactEmail } from '../patient-contact';
 import {
     PlanId,
     SubscriptionStatus,
@@ -1263,15 +1264,11 @@ async function cancelAppointment(apt: any, newStatus: string, refund: RefundOutc
         // Fire-and-forget cancellation notification to patient
         if (apt.patientId) {
             try {
-                const patientRecord = await docClient.send(new GetCommand({
-                    TableName: setting("DYNAMO_TABLE"),
-                    Key: { patientId: apt.patientId },
-                    ProjectionExpression: 'email'
-                }));
-                if (patientRecord.Item?.email) {
+                const recipientEmail = await patientContactEmail(docClient, apt.patientId, region);
+                if (recipientEmail) {
                     sendNotification({
                         region,
-                        recipientEmail: patientRecord.Item.email,
+                        recipientEmail,
                         subject: CANCELLATION_COPY.noticeSubjectSystem,
                         message: cancellationNotice(apt.appointmentId, newStatus, refundStatus),
                         type: 'BOOKING_CANCELLATION',

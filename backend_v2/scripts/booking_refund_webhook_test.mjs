@@ -11,6 +11,8 @@ for (const line of (await readFile(new URL('../.env.example', import.meta.url), 
     ? `test-${match[1].toLowerCase().replaceAll('_', '-')}` : match[2] || `test-${match[1].toLowerCase()}`;
 }
 process.env.AWS_EC2_METADATA_DISABLED = 'true';
+// DYNAMO_TABLE names a different table in each service; the booking webhook must not depend on it (R5).
+delete process.env.DYNAMO_TABLE;
 const require = createRequire(new URL('../booking-service/package.json', import.meta.url));
 const Stripe = require('stripe');
 const aws = require('./dist/shared/aws-config.js');
@@ -18,13 +20,15 @@ const audit = require('./dist/shared/audit.js');
 const notifications = require('./dist/shared/notifications.js');
 const billing = require('./dist/booking-service/src/controllers/billing.controller.js');
 const logger = require('./dist/shared/logger.js');
+const kms = require('./dist/shared/kms-crypto.js');
 const { REFUND_NOTICES } = require('./dist/booking-service/src/content/cancellation.js');
 
 const WEBHOOK_SECRET = 'whsec_test_secret';
 const APPOINTMENTS = process.env.TABLE_APPOINTMENTS, BILLS = process.env.TABLE_TRANSACTIONS, EVENTS = process.env.TABLE_WEBHOOK_EVENTS;
-// The patient's contact email lives only on the patient profile (DYNAMO_TABLE), as the cancellation path reads it.
-const PATIENT_EMAILS = process.env.DYNAMO_TABLE;
-const KEYS = { [APPOINTMENTS]: ['appointmentId'], [BILLS]: ['billId'], [EVENTS]: ['eventId'], [PATIENT_EMAILS]: ['patientId'] };
+// The patient's contact email lives only on the patient profile (TABLE_PATIENTS), KMS-encrypted by the patient service.
+const PATIENTS = process.env.TABLE_PATIENTS;
+const KEYS = { [APPOINTMENTS]: ['appointmentId'], [BILLS]: ['billId'], [EVENTS]: ['eventId'], [PATIENTS]: ['patientId'] };
+const STORED_EMAIL = 'phi:kms:patient@example.test', PATIENT_EMAIL = 'patient@example.test';
 
 // Evaluates only the expression forms these handlers use; anything else throws so it cannot silently pass.
 const resolve = (path, names = {}) => path.startsWith('#') ? names[path] : path;
@@ -53,12 +57,12 @@ function apply(item, expression, names = {}, values = {}) {
 const cancelled = codes => Object.assign(new Error('Transaction cancelled'), {
   name: 'TransactionCanceledException', CancellationReasons: codes.map(Code => ({ Code })) });
 
-function harness({ appointment = {}, refundRow = {}, withoutRefundRow = false, failTransactions = 0, withoutPatientEmail = false } = {}) {
+function harness({ appointment = {}, refundRow = {}, withoutRefundRow = false, failTransactions = 0, withoutPatientEmail = false, failDecrypt = false } = {}) {
   const rows = new Map();
   const key = (table, item) => `${table}|${KEYS[table].map(k => item[k]).join('|')}`;
   const put = (table, item) => rows.set(key(table, item), structuredClone(item));
   const get = (table, k) => rows.get(key(table, k));
-  if (!withoutPatientEmail) put(PATIENT_EMAILS, { patientId: 'test-patient', email: 'patient@example.test' });
+  if (!withoutPatientEmail) put(PATIENTS, { patientId: 'test-patient', name: 'phi:kms:Test Patient', email: STORED_EMAIL });
   put(APPOINTMENTS, { appointmentId: 'test-apt', patientId: 'test-patient', status: 'REFUNDED',
     refundId: 're_test_1', refundStatus: 'ISSUED', ...appointment });
   if (!withoutRefundRow) put(BILLS, { billId: 'refund-test-apt', referenceId: 'test-apt', type: 'REFUND', amount: -50, status: 'PROCESSED',
@@ -70,6 +74,11 @@ function harness({ appointment = {}, refundRow = {}, withoutRefundRow = false, f
   mock.method(billing, 'pushRevenueToBigQuery', async () => {});
   mock.method(billing, 'pushAppointmentToBigQuery', async () => {});
   mock.method(notifications, 'sendNotification', async notice => { notices.push(notice); });
+  const decrypts = mock.method(kms, 'decryptPHI', async (fields, region) => {
+    if (failDecrypt) throw new Error('KMS unavailable');
+    assert.equal(region, 'EU', 'decrypted with the refund region key');
+    return Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, String(v).replace(/^phi:kms:/, '')]));
+  });
   mock.method(aws, 'getRegionalClient', selected => { regions.push(selected); return { send: async command => {
     await new Promise(done => setImmediate(done));
     const input = command.input, kind = command.constructor.name;
@@ -110,7 +119,7 @@ function harness({ appointment = {}, refundRow = {}, withoutRefundRow = false, f
     await handleStripeWebhook({ body: Buffer.from(payload), headers: { 'stripe-signature': signature } }, res);
     return result;
   }
-  return { deliver, effects, notices, regions, apt: () => get(APPOINTMENTS, { appointmentId: 'test-apt' }), refundRow: () => get(BILLS, { billId: 'refund-test-apt' }) };
+  return { deliver, effects, notices, regions, decrypts, apt: () => get(APPOINTMENTS, { appointmentId: 'test-apt' }), refundRow: () => get(BILLS, { billId: 'refund-test-apt' }) };
 }
 
 // EU differs from the default AWS_REGION, so routing by the refund's own metadata is what these tests observe.
@@ -125,7 +134,7 @@ test('a charge.refunded notice says a refund was requested, never that it was pr
       metadata: { appointmentId: 'test-apt', patientId: 'test-patient', billId: 'test-bill', region: 'EU' } };
     assert.equal((await h.deliver('charge.refunded', charge)).status, 200);
     assert.equal(h.notices.length, 1);
-    assert.equal(h.notices[0].recipientEmail, 'patient@example.test', 'sent to the email on the patient profile');
+    assert.equal(h.notices[0].recipientEmail, PATIENT_EMAIL, 'sent to the decrypted email on the patient profile');
     const text = `${h.notices[0].subject} ${h.notices[0].message}`;
     assert.doesNotMatch(text, /processed|succeeded|completed|successful/i, text);
     assert.match(h.notices[0].message, /requested/i);
@@ -145,7 +154,7 @@ test('refund.failed hands our appointment refund to a person and tells the patie
     assert.equal(h.refundRow().refundStatus, 'REQUIRES_MANUAL_REFUND');
     assert.equal(h.notices.length, 1);
     assert.equal(h.notices[0].message, REFUND_NOTICES.REQUIRES_MANUAL_REFUND);
-    assert.equal(h.notices[0].recipientEmail, 'patient@example.test');
+    assert.equal(h.notices[0].recipientEmail, PATIENT_EMAIL, 'sent to the decrypted email on the patient profile');
     assert.deepEqual([...new Set(h.regions)], ['EU']);
   } finally { mock.restoreAll(); }
 });
@@ -185,4 +194,20 @@ test('a refund.failed write that DynamoDB cancels logs the cancellation reasons'
     assert.equal((await h.deliver('refund.failed', failedRefund())).status, 200);
     assert.ok(h.effects.errors.mock.calls.some(call => /ThrottlingError/.test(String(call.arguments[0]))), 'reason codes logged');
   } finally { mock.restoreAll(); }
+});
+
+// R5: the profile email is KMS ciphertext; a notice must never go to it, and a decrypt failure must not throw.
+test('a refund notice is never sent to the stored ciphertext, and a decrypt failure is logged', async () => {
+  const charge = { id: 'ch_test', object: 'charge', amount_refunded: 5000,
+    metadata: { appointmentId: 'test-apt', patientId: 'test-patient', billId: 'test-bill', region: 'EU' } };
+  for (const [label, type, object] of [['charge.refunded', 'charge.refunded', charge], ['refund.failed', 'refund.failed', failedRefund()]]) {
+    try {
+      const h = harness({ failDecrypt: true });
+      assert.equal((await h.deliver(type, object)).status, 200, label);
+      assert.ok(h.decrypts.mock.callCount() >= 1, `${label}: the stored email was decrypted`);
+      assert.equal(h.notices.length, 0, `${label}: no notice to an undecrypted address`);
+      assert.ok(h.effects.errors.mock.calls.some(call => /not notified|notice.*failed|follow-up.*failed/i.test(String(call.arguments[0]))), `${label}: logged`);
+      if (type === 'refund.failed') assert.equal(h.apt().refundStatus, 'REQUIRES_MANUAL_REFUND', 'the manual refund is still recorded');
+    } finally { mock.restoreAll(); }
+  }
 });

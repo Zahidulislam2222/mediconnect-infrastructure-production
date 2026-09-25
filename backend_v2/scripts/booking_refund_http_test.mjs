@@ -21,8 +21,8 @@ const billing = require('./dist/booking-service/src/controllers/billing.controll
 const pdf = require('./dist/booking-service/src/utils/pdf-generator.js');
 
 const APPOINTMENTS = process.env.TABLE_APPOINTMENTS, BILLS = process.env.TABLE_TRANSACTIONS, LOCKS = process.env.TABLE_LOCKS;
-const PATIENT_EMAILS = process.env.DYNAMO_TABLE, PATIENTS = process.env.TABLE_PATIENTS, DOCTORS = process.env.TABLE_DOCTORS;
-const KEYS = { [APPOINTMENTS]: ['appointmentId'], [BILLS]: ['billId'], [LOCKS]: ['lockId'], [PATIENT_EMAILS]: ['patientId'],
+const PATIENTS = process.env.TABLE_PATIENTS, DOCTORS = process.env.TABLE_DOCTORS;
+const KEYS = { [APPOINTMENTS]: ['appointmentId'], [BILLS]: ['billId'], [LOCKS]: ['lockId'],
   [PATIENTS]: ['patientId'], [DOCTORS]: ['doctorId'], [process.env.TABLE_GRAPH]: ['PK', 'SK'], [process.env.TABLE_SUBSCRIPTIONS]: ['patientId'] };
 const CLEANUP_SECRET = 'test-cleanup-secret';
 
@@ -115,8 +115,8 @@ function harness({ region = 'US', appointments = [appointment()], refund = 'succ
     put(LOCKS, { lockId: `${apt.doctorId}#${apt.timeSlot}`, status: 'BOOKED', appointmentId: apt.appointmentId });
   }
   for (const row of bills) put(BILLS, row);
-  put(PATIENT_EMAILS, { patientId: 'test-patient', email: 'patient@example.test' });
-  put(PATIENTS, { patientId: 'test-patient', name: 'Test Patient', isIdentityVerified: true, email: 'patient@example.test' });
+  // The patient service stores the profile email KMS-encrypted (R5).
+  put(PATIENTS, { patientId: 'test-patient', name: 'Test Patient', isIdentityVerified: true, email: 'phi:kms:patient@example.test' });
   put(DOCTORS, { doctorId: 'test-doctor', name: 'Test Doctor', verificationStatus: 'APPROVED', consultationFee: 50 });
 
   // refunds: idempotency-key cache (Stripe may prune it after 24h); created: every refund the provider holds.
@@ -279,6 +279,18 @@ for (const refund of ['throw', 'failed', 'canceled', 'requires_action']) {
     } finally { mock.restoreAll(); }
   });
 }
+
+// R5: when someone else cancels, the patient's notice goes to the decrypted email on their profile, never to the
+// stored ciphertext.
+test('a doctor cancellation notifies the patient at the decrypted profile email', async () => {
+  try {
+    const h = harness({ refund: 'pending' });
+    assert.equal((await h.doctorCancel()).status, 200);
+    for (let i = 0; i < 5; i++) await new Promise(done => setImmediate(done));
+    const recipients = h.notices.filter(n => n.type === 'BOOKING_CANCELLATION').map(n => n.recipientEmail);
+    assert.deepEqual(recipients, ['plain-patient@example.test']);
+  } finally { mock.restoreAll(); }
+});
 
 // C20: Stripe accepted the refund but has not completed it, so it is requested, never "issued".
 test('a pending refund is reported as requested, not issued', async () => {

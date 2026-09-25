@@ -16,6 +16,7 @@ import {
 import { TABLE_NAMES, setting } from '../../../shared/settings';
 import { REFUND_NOTICES, REFUND_WEBHOOK_COPY, type RefundStatus } from '../content/cancellation';
 import { MANUAL_REFUND_LEDGER_STATUS, refundBillId } from '../cancellation-policy';
+import { patientContactEmail } from '../patient-contact';
 
 const STRIPE_SECRET_NAME = "/mediconnect/stripe/keys";
 const STRIPE_WEBHOOK_SECRET_NAME = "/mediconnect/stripe/webhook_secret";
@@ -23,8 +24,6 @@ const STRIPE_WEBHOOK_SECRET_NAME = "/mediconnect/stripe/webhook_secret";
 const TABLE_TRANSACTIONS = setting("TABLE_TRANSACTIONS");
 const TABLE_PRESCRIPTIONS = setting("TABLE_PRESCRIPTIONS");
 const TABLE_APPOINTMENTS = setting("TABLE_APPOINTMENTS");
-// Patient profiles, where the contact email lives (appointments and bills do not carry it).
-const TABLE_PATIENT_PROFILES = setting("DYNAMO_TABLE");
 const TABLE_INVENTORY = TABLE_NAMES.inventory;
 
 // ─── IDEMPOTENCY FIX ───────────────────────────────────────────────────────
@@ -527,7 +526,7 @@ async function handleChargeRefunded(charge: Stripe.Charge, regionalDb: any, regi
     // Notify patient of refund
     if (patientId) {
         try {
-            const recipientEmail = await patientEmail(regionalDb, patientId);
+            const recipientEmail = await patientContactEmail(regionalDb, patientId, region);
             if (!recipientEmail) {
                 safeError(`Refund notice for charge ${charge.id} not sent: patient not notified (no email on profile)`);
                 return;
@@ -540,17 +539,11 @@ async function handleChargeRefunded(charge: Stripe.Charge, regionalDb: any, regi
                 type: 'GENERAL',
                 metadata: { billId: billId || '', refundId: charge.id }
             }).catch(() => {});
-        } catch { /* Non-blocking */ }
+        } catch (err: unknown) {
+            // Non-blocking: the refund is already recorded.
+            safeError(`Refund notice for charge ${charge.id} failed: patient not notified (${err instanceof Error ? err.message : String(err)})`);
+        }
     }
-}
-
-/** The patient's contact email from their profile, as the cancellation notice reads it; undefined when there is none. */
-async function patientEmail(regionalDb: ReturnType<typeof getRegionalClient>, patientId: unknown): Promise<string | undefined> {
-    if (typeof patientId !== 'string' || !patientId) return undefined;
-    const item = (await regionalDb.send(new GetCommand({
-        TableName: TABLE_PATIENT_PROFILES, Key: { patientId }, ProjectionExpression: 'email'
-    }))).Item;
-    return typeof item?.email === 'string' && item.email ? item.email : undefined;
 }
 
 /**
@@ -595,7 +588,7 @@ async function handleRefundFailed(refund: Stripe.Refund, regionalDb: ReturnType<
         const appointment = (await regionalDb.send(new GetCommand({ TableName: TABLE_APPOINTMENTS, Key: { appointmentId } }))).Item;
         await writeAuditLog(appointment?.patientId || "SYSTEM", appointment?.patientId || "UNKNOWN", "REFUND_FAILED",
             `Stripe refund ${refund.id} failed; manual refund required`, { region, refundId: refund.id, appointmentId });
-        const recipientEmail = await patientEmail(regionalDb, appointment?.patientId);
+        const recipientEmail = await patientContactEmail(regionalDb, appointment?.patientId, region);
         if (!recipientEmail) {
             safeError(`Refund ${refund.id} failure for appointment ${appointmentId}: patient not notified (no email on profile)`);
             return;
