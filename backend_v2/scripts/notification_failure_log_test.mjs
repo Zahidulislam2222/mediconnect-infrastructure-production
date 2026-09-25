@@ -1,5 +1,6 @@
 // F2 (memory/followups-2-acceptance-20260926.md): when a patient notice is skipped or fails, the log says which
-// appointment/bill it was for, using allowlisted ID fields only; no recipient, message or clinical detail is logged.
+// appointment/bill it was for, using allowlisted ID fields only; no recipient, message or clinical detail is logged,
+// and a failed send logs the SDK error's name, not its message (F2b).
 // Uses the booking-service build of shared/notifications; no provider requests.
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
@@ -33,11 +34,14 @@ for (const [label, recipient, failSend] of [['skipped (no recipient)', undefined
     try {
       const lines = capture();
       const sends = [];
-      mock.method(aws, 'getRegionalSESClient', () => ({ send: async command => { sends.push(command); if (failSend) throw new Error('SES unavailable'); } }));
+      mock.method(aws, 'getRegionalSESClient', () => ({ send: async command => { sends.push(command); if (failSend) throw Object.assign(new Error('Email address is not verified: patient@example.test'), { name: 'MessageRejected' }); } }));
       await sendNotification(notice(recipient));
       assert.equal(sends.length, failSend ? 1 : 0);
       const text = lines.join('\n');
       for (const id of ['test-apt', 'test-bill', 'test-rx']) assert.ok(text.includes(id), `${label}: ${id} logged\n${text}`);
+      // F2b: an SDK error message can echo the address, so only the error's name is logged.
+      if (failSend) assert.ok(text.includes('MessageRejected'), `${label}: error name logged
+${text}`);
       for (const bit of SECRET_BITS) assert.ok(!text.includes(bit), `${label}: must not log ${bit}\n${text}`);
     } finally { mock.restoreAll(); }
   });

@@ -22,6 +22,12 @@ function traceIds(metadata: Record<string, string> | undefined): Record<string, 
   return Object.fromEntries(TRACEABLE_METADATA_KEYS.filter(key => metadata?.[key]).map(key => [key, String(metadata![key])]));
 }
 
+const HTML_ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+/** Subjects and messages can carry user-written text (a custom reminder, a reason), so the HTML part never trusts them. */
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, ch => HTML_ESCAPES[ch]).replace(/\r?\n/g, '<br>');
+}
+
 /**
  * Send a notification via SES email.
  * Non-blocking: failures are logged but never thrown.
@@ -45,8 +51,8 @@ export async function sendNotification(options: NotificationOptions): Promise<vo
         Body: {
           Text: { Data: options.message },
           Html: { Data: `<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-            <h2 style="color: #2563eb;">${options.subject}</h2>
-            <p>${options.message}</p>
+            <h2 style="color: #2563eb;">${escapeHtml(options.subject)}</h2>
+            <p>${escapeHtml(options.message)}</p>
             <hr style="border: 1px solid #e5e7eb; margin: 20px 0;">
             <p style="color: #6b7280; font-size: 12px;">This is an automated message from MediConnect. Please do not reply.</p>
           </div>` }
@@ -56,8 +62,8 @@ export async function sendNotification(options: NotificationOptions): Promise<vo
 
     safeLog('Notification sent', { type: options.type, subject: options.subject });
   } catch (error) {
-    // Non-blocking: log and continue
-    safeError('Failed to send notification', { type: options.type, ...traceIds(options.metadata), error: (error as Error).message });
+    // Non-blocking: log and continue. Only the error's name: SDK messages can echo the recipient address.
+    safeError('Failed to send notification', { type: options.type, ...traceIds(options.metadata), error: error instanceof Error ? error.name : 'UnknownError' });
   }
 }
 

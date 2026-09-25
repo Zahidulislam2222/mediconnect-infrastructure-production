@@ -43,6 +43,8 @@ export const REMINDER_COPY = {
     customForbidden: 'Only the appointment\'s doctor can send a custom message',
     pendingForbidden: 'Only doctors can list pending reminders',
     notActive: 'Reminders can only be sent for a confirmed appointment',
+    outsideWindow: 'This reminder can only be sent in its time window before the appointment',
+    customEmpty: 'A custom reminder needs a message',
     duplicate: 'This reminder has already been sent or is being sent',
     sent: 'Reminder sent',
     failed: 'Reminder could not be delivered on any requested channel',
@@ -53,3 +55,20 @@ export const REMINDER_COPY = {
 
 /** SMS longer than one segment is truncated, as before. */
 export const SMS_MAX_LENGTH = 160;
+export const SMS_SENDER_ID = 'MediConnect';
+
+const HOUR_MS = 60 * 60 * 1000;
+/**
+ * How long before the appointment each timed reminder may be sent: more than `minMs` and at most `maxMs` ahead.
+ * The pending list uses the 24h window.
+ */
+export const REMINDER_WINDOWS: Record<Exclude<ReminderType, 'custom'>, { minMs: number; maxMs: number }> = {
+    '24h': { minMs: HOUR_MS, maxMs: 26 * HOUR_MS },
+    '1h': { minMs: 0, maxMs: HOUR_MS },
+};
+
+/** A reminder left in "sending" this long (its request died mid-send) may be claimed again. */
+export const REMINDER_CLAIM_TIMEOUT_MS = 15 * 60 * 1000;
+
+/** Times are shown in the doctor's time zone; this is used, and named, when the doctor has none or an invalid one. */
+export const REMINDER_FALLBACK_TIME_ZONE = 'UTC';

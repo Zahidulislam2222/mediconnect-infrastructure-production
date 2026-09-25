@@ -30,13 +30,16 @@ const resolve = (path, names = {}) => path.startsWith('#') ? names[path] : path;
 // Evaluates only the condition forms a reminder claim may use; anything else throws so it cannot silently pass.
 function holds(item, expression, names = {}, values = {}) {
   if (!expression) return true;
-  return expression.split(/\s+OR\s+/).some(clause => {
+  return expression.split(/\s+OR\s+/).some(clause => clause.trim().replace(/^\((.*)\)$/, '$1').split(/\s+AND\s+/).every(part => {
     let m;
-    clause = clause.trim().replace(/^\((.*)\)$/, '$1');
-    if ((m = clause.match(/^attribute_not_exists\((\S+)\)$/))) return item?.[resolve(m[1], names)] === undefined;
-    if ((m = clause.match(/^(\S+)\s*=\s*(:\w+)$/))) return item !== undefined && item[resolve(m[1], names)] === values[m[2]];
-    throw new Error(`Test double cannot evaluate condition: ${clause}`);
-  });
+    if ((m = part.match(/^attribute_not_exists\((\S+)\)$/))) return item?.[resolve(m[1], names)] === undefined;
+    if ((m = part.match(/^(\S+)\s*(=|<)\s*(:\w+)$/))) {
+      if (item === undefined) return false;
+      const left = item[resolve(m[1], names)], right = values[m[3]];
+      return m[2] === '=' ? left === right : left !== undefined && left < right;
+    }
+    throw new Error(`Test double cannot evaluate condition: ${part}`);
+  }));
 }
 function apply(item, expression, names = {}, values = {}) {
   const [setPart, removePart = ''] = expression.replace(/^SET\s+/i, '').split(/\s+REMOVE\s+/i);
@@ -54,7 +57,8 @@ const appointment = (overrides = {}) => ({
   reason: 'test-reason', patientName: 'phi:kms:phi:kms:double-encrypted', doctorName: 'phi:kms:phi:kms:double-encrypted', ...overrides,
 });
 
-function harness({ region = 'EU', appointments = [appointment()], profile = {}, failSms = 0, failDecrypt = false } = {}) {
+function harness({ region = 'EU', appointments = [appointment()], profile = {}, doctorProfile = {}, failSms = 0, failDecrypt = false,
+  failDoctorRead = false, seedReminders = [], duringSms } = {}) {
   const rows = new Map();
   const key = (table, item) => `${table}|${KEYS[table].map(k => item[k]).join('|')}`;
   const put = (table, item) => rows.set(key(table, item), structuredClone(item));
@@ -62,8 +66,9 @@ function harness({ region = 'EU', appointments = [appointment()], profile = {}, 
   const table = name => [...rows.entries()].filter(([k]) => k.startsWith(`${name}|`)).map(([, v]) => structuredClone(v));
   for (const apt of appointments) put(APPOINTMENTS, apt);
   put(PATIENTS, { patientId: 'test-patient', name: 'phi:kms:Test Patient', phone: `phi:kms:${PHONE}`, email: `phi:kms:${EMAIL}`, ...profile });
-  put(DOCTORS, { doctorId: 'test-doctor', name: 'phi:kms:Test Doctor' });
+  put(DOCTORS, { doctorId: 'test-doctor', name: 'phi:kms:Test Doctor', timezone: 'America/New_York', ...doctorProfile });
   put(DOCTORS, { doctorId: 'other-doctor', name: 'phi:kms:Other Doctor' });
+  for (const reminder of seedReminders) put(REMINDERS, reminder);
 
   const reads = [], sms = [], emails = [], snsRegions = [], decryptRegions = [];
   let smsFailures = failSms;
@@ -83,6 +88,7 @@ function harness({ region = 'EU', appointments = [appointment()], profile = {}, 
     // The claim is written before anything is sent (F1e).
     const claimed = table(REMINDERS).some(r => r.appointmentId === 'test-apt' && r.status === 'sending');
     sms.push({ ...input, claimed });
+    duringSms?.({ reminders: () => table(REMINDERS), put: row => put(REMINDERS, row) });
     if (smsFailures > 0) { smsFailures--; throw new Error('test SNS outage'); }
     return { MessageId: `test-msg-${sms.length}` };
   } }));
@@ -91,7 +97,14 @@ function harness({ region = 'EU', appointments = [appointment()], profile = {}, 
     const input = command.input, kind = command.constructor.name;
     if (kind === 'GetCommand') {
       reads.push(input.TableName);
-      return { Item: structuredClone(get(input.TableName, input.Key)) };
+      if (failDoctorRead && input.TableName === DOCTORS) throw new Error('test doctor read outage');
+      const item = get(input.TableName, input.Key);
+      if (!item || !input.ProjectionExpression) return { Item: structuredClone(item) };
+      // Like DynamoDB: only the projected fields come back, and a bare reserved word is rejected.
+      const fields = input.ProjectionExpression.split(',').map(f => f.trim());
+      for (const field of fields) assert.ok(!['name', 'timezone'].includes(field.toLowerCase()), `unaliased reserved word ${field}`);
+      const wanted = fields.map(f => resolve(f, input.ExpressionAttributeNames));
+      return { Item: Object.fromEntries(wanted.filter(f => f in item).map(f => [f, structuredClone(item[f])])) };
     }
     if (kind === 'PutCommand') {
       if (!holds(get(input.TableName, input.Item), input.ConditionExpression, input.ExpressionAttributeNames, input.ExpressionAttributeValues)) throw conditional();
@@ -233,7 +246,6 @@ test('F1e: a repeated 24h reminder is 409 with no second send; a failed one may 
   assert.equal((await h.send(h.patient, { type: '24h', channel: 'sms' })).status, 409);
   assert.equal(h.sms.length, 2);
   assert.equal(h.reminders().length, 1);
-  assert.equal((await h.send(h.doctor, { type: '1h' })).status, 200, 'a different type is its own reminder');
 }));
 
 test('F1e: two simultaneous 24h reminders send once', run(async () => {
@@ -251,7 +263,7 @@ test('F1d: a requested channel without a contact is recorded as such; nothing at
   assert.equal(h.emails.length, 0);
   mock.restoreAll();
   const none = harness({ profile: { phone: '' } });
-  const smsOnly = await none.send(none.doctor, { type: '1h', channel: 'sms' });
+  const smsOnly = await none.send(none.doctor, { type: '24h', channel: 'sms' });
   assert.equal(smsOnly.body.status, 'failed');
   assert.deepEqual(none.reminders()[0].deliveries, { sms: 'no_contact' });
   assert.equal(none.sms.length, 0);
@@ -294,7 +306,7 @@ test('F1b: pending reminders are the requesting doctor\'s own upcoming appointme
 test('F1b: a participant sees every reminder of the appointment', run(async () => {
   const h = harness();
   await h.send(h.doctor, { type: '24h', channel: 'sms' });
-  await h.send(h.doctor, { type: '1h', channel: 'sms' });
+  await h.send(h.doctor, { type: 'custom', customMessage: 'test', channel: 'sms' });
   await h.send(h.doctor, { type: 'custom', customMessage: 'test', channel: 'sms' });
   const result = await h.list(h.patient);
   assert.equal(result.status, 200);
@@ -308,4 +320,93 @@ test('F1d: a failed SMS marks the reminder failed even when the email was submit
   assert.equal(result.body.status, 'failed');
   assert.deepEqual(h.reminders()[0].deliveries, { sms: 'failed', email: 'submitted' });
   assert.equal(h.reminders()[0].status, 'failed');
+}));
+
+test('F1i: the time is the doctor\'s local time with its zone, never the server\'s; a bad zone falls back to labelled UTC', run(async () => {
+  // 02:00 UTC, 2-26h ahead: still the previous day in New York but not in UTC or any zone east of it, so text formatted
+  // in the server's zone (whatever it is here) shows a different date and no New York zone name.
+  const next = new Date(); next.setUTCHours(2, 0, 0, 0);
+  if (next.getTime() - Date.now() < 2 * HOUR) next.setTime(next.getTime() + 24 * HOUR);
+  const slot = next.toISOString();
+  const h = harness({ appointments: [appointment({ timeSlot: slot })] });
+  await h.send(h.doctor, { type: '24h' });
+  const ny = new Date(slot).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'America/New_York', timeZoneName: 'short' });
+  const nyDate = new Date(slot).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
+  assert.ok(h.sms[0].Message.includes(`at ${ny} with`), `${h.sms[0].Message} should show ${ny}`);
+  assert.ok(h.emails[0].message.includes(`${nyDate} at ${ny} with`), h.emails[0].message);
+  mock.restoreAll();
+  for (const timezone of ['Not/AZone', undefined]) {
+    const bad = harness({ appointments: [appointment({ timeSlot: slot })], doctorProfile: { timezone } });
+    await bad.send(bad.doctor, { type: '24h', channel: 'sms' });
+    const utc = new Date(slot).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', timeZone: 'UTC', timeZoneName: 'short' });
+    assert.ok(bad.sms[0].Message.includes(`at ${utc} with`), `${timezone}: ${bad.sms[0].Message}`);
+    mock.restoreAll();
+  }
+}));
+
+test('F1j: 24h and 1h reminders only inside their windows; outside is 409 with no claim and no send', run(async () => {
+  for (const [hours, type, expected] of [[30, '24h', 409], [25, '24h', 200], [0.5, '24h', 409], [-1, '24h', 409],
+    [0.5, '1h', 200], [2, '1h', 409], [-0.5, '1h', 409]]) {
+    const h = harness({ appointments: [appointment({ timeSlot: inHours(hours) })] });
+    const result = await h.send(h.doctor, { type, channel: 'sms' });
+    assert.equal(result.status, expected, `${type} at ${hours}h`);
+    if (expected === 409) assert.equal(h.sms.length + h.reminders().length, 0, `${type} at ${hours}h`);
+    mock.restoreAll();
+  }
+  const h = harness({ appointments: [appointment({ timeSlot: inHours(0.5) })] });
+  assert.equal((await h.send(h.doctor, { type: '1h', channel: 'sms' })).status, 200);
+  assert.equal((await h.send(h.doctor, { type: '1h', channel: 'sms' })).status, 409, 'once per type');
+}));
+
+test('F1l: a claim stuck in sending past the timeout can be taken over; a recent one cannot', run(async () => {
+  const stuck = at => ({ reminderId: 'test-apt#24h', appointmentId: 'test-apt', status: 'sending', createdAt: at });
+  const old = harness({ seedReminders: [stuck(new Date(Date.now() - HOUR).toISOString())] });
+  assert.equal((await old.send(old.doctor, { type: '24h', channel: 'sms' })).status, 200);
+  assert.equal(old.reminders()[0].status, 'sent');
+  mock.restoreAll();
+  const recent = harness({ seedReminders: [stuck(new Date(Date.now() - 60_000).toISOString())] });
+  assert.equal((await recent.send(recent.doctor, { type: '24h', channel: 'sms' })).status, 409);
+  assert.equal(recent.sms.length, 0);
+}));
+
+test('F1l: a request whose claim was taken over while it was sending does not overwrite the new claim', run(async () => {
+  const h = harness({ duringSms: ({ reminders, put }) => put({ ...reminders()[0], claimId: 'test-other-claim', createdAt: new Date().toISOString() }) });
+  await h.send(h.doctor, { type: '24h', channel: 'sms' });
+  const [row] = h.reminders();
+  assert.equal(row.claimId, 'test-other-claim');
+  assert.equal(row.status, 'sending', 'the newer claim is left for its own request to finish');
+}));
+
+test('F1e/F1l: two simultaneous retries of a failed reminder send once', run(async () => {
+  const h = harness({ seedReminders: [{ reminderId: 'test-apt#24h', appointmentId: 'test-apt', status: 'failed', claimId: 'test-old-claim',
+    deliveries: { sms: 'failed' }, createdAt: new Date(Date.now() - HOUR).toISOString() }] });
+  const results = await Promise.all([h.send(h.doctor, { type: '24h', channel: 'sms' }), h.send(h.patient, { type: '24h', channel: 'sms' })]);
+  assert.deepEqual(results.map(r => r.status).sort(), [200, 409]);
+  assert.equal(h.sms.length, 1);
+}));
+
+test('F1m: retrying a failed reminder re-sends only the channel that failed', run(async () => {
+  const h = harness({ failSms: 1 });
+  assert.equal((await h.send(h.doctor, { type: '24h' })).body.status, 'failed');
+  const retried = await h.send(h.doctor, { type: '24h' });
+  assert.equal(retried.body.status, 'sent');
+  assert.equal(h.emails.length, 1, 'the email already submitted is not sent again');
+  assert.equal(h.sms.length, 2);
+  assert.deepEqual(h.reminders()[0].deliveries, { sms: 'sent', email: 'submitted' });
+}));
+
+test('F1n: a custom reminder needs a message', run(async () => {
+  const h = harness();
+  for (const body of [{ type: 'custom' }, { type: 'custom', customMessage: '   ' }]) {
+    assert.equal((await h.send(h.doctor, body)).status, 400, JSON.stringify(body));
+  }
+  assert.equal(h.sms.length + h.emails.length + h.reminders().length, 0);
+}));
+
+test('F1c: a doctor profile that cannot be read only loses the name and zone; the reminder still goes', run(async () => {
+  const h = harness({ failDoctorRead: true });
+  const result = await h.send(h.doctor, { type: '24h', channel: 'sms' });
+  assert.equal(result.body.status, 'sent');
+  assert.match(h.sms[0].Message, /Dr\. your doctor/);
+  assert.match(h.sms[0].Message, /UTC/);
 }));
