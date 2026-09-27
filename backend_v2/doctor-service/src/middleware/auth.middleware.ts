@@ -42,7 +42,13 @@ const getVerifier = async (userRegion: string) => {
     }
 };
 
-export const authMiddleware = async (req: Request, res: Response, next: NextFunction) => {
+type AuthPolicy = { allowPatientWrites?: boolean };
+
+/**
+ * Patients are read-only on clinical routes by default. `allowPatientWrites` exists only for
+ * routes whose handler enforces patient ownership itself (pharmacy refill and pickup code).
+ */
+const createAuthMiddleware = ({ allowPatientWrites = false }: AuthPolicy = {}) => async (req: Request, res: Response, next: NextFunction) => {
     try {
         const authHeader = req.headers.authorization;
         if (!authHeader?.startsWith('Bearer ')) {
@@ -70,7 +76,7 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
 
         const isReadRequest = req.method === 'GET';
 
-        if (!isDoctor && !isReadRequest) {
+        if (!isDoctor && !isReadRequest && !allowPatientWrites) {
             await writeAuditLog(payload.sub, "SYSTEM", "UNAUTHORIZED_WRITE_ATTEMPT", 
                 "Blocked patient attempt to modify clinical data", {
                 region: userRegion,
@@ -106,3 +112,6 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
         return;
     }
 };
+
+export const authMiddleware = createAuthMiddleware();
+export const patientOwnedPharmacyAuthMiddleware = createAuthMiddleware({ allowPatientWrites: true });

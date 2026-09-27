@@ -10,7 +10,8 @@ import {
     requestRefill,
     generateQR,
     fulfillPrescription,
-    cancelPrescription
+    cancelPrescription,
+    PRESCRIBER_UPDATABLE_STATUSES
 } from "./prescription.controller";
 import { handleEhrAction } from "./ehr.controller";
 import { getPatientScans, uploadDicom } from './imaging.controller';
@@ -27,7 +28,7 @@ import { createLabOrder, getLabOrders, getLabOrder, submitLabResults, getLabTest
 import { createReferral, getPatientReferrals, getIncomingReferrals, updateReferral, getReferralSpecialties } from "./referral.controller";
 import { performReconciliation, getReconciliationHistory, getReconciliation, getDrugClasses } from "./med-reconciliation.controller";
 import { requestEmergencyAccess, getActiveOverrides, revokeEmergencyAccess, getEmergencyReasons, emergencyAccessMiddleware } from "../../../../shared/emergency-access";
-import { authMiddleware } from "../../middleware/auth.middleware";
+import { authMiddleware, patientOwnedPharmacyAuthMiddleware } from "../../middleware/auth.middleware";
 import { writeAuditLog } from "../../../../shared/audit";
 
 const router = Router();
@@ -52,7 +53,7 @@ const CreatePrescriptionBody = z.object({
 
 const UpdatePrescriptionBody = z.object({
     prescriptionId: z.string().min(1, 'Prescription ID is required'),
-    status: z.string().min(1, 'Status is required'),
+    status: z.enum(PRESCRIBER_UPDATABLE_STATUSES),
 });
 
 const CheckInteractionsBody = z.object({
@@ -212,8 +213,8 @@ router.put("/prescriptions/:prescriptionId/cancel", authMiddleware, validate({ p
 router.post("/prescriptions/check-interactions", authMiddleware, validate({ body: CheckInteractionsBody }), checkInteractions);
 
 // Pharmacy Actions
-router.post("/pharmacy/request-refill", authMiddleware, validate({ body: RequestRefillBody }), requestRefill);
-router.post("/pharmacy/generate-qr", authMiddleware, validate({ body: GenerateQRBody }), generateQR);
+router.post("/pharmacy/request-refill", patientOwnedPharmacyAuthMiddleware, validate({ body: RequestRefillBody }), requestRefill);
+router.post("/pharmacy/generate-qr", patientOwnedPharmacyAuthMiddleware, validate({ body: GenerateQRBody }), generateQR);
 router.post("/pharmacy/fulfill", authMiddleware, validate({ body: FulfillPrescriptionBody }), fulfillPrescription);
 
 // =============================================================================

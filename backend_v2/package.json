@@ -10,7 +10,7 @@
   ],
   "main": "verify_consolidation.js",
   "scripts": {
-    "test": "npm run test:config && npm test --workspaces --if-present && node scripts/auth_region_http_test.mjs && node scripts/phi_failure_http_test.mjs && node scripts/fhir_http_test.mjs && node scripts/socket_ticket_test.mjs && node scripts/socket_ticket_http_test.mjs && node scripts/chat_identity_http_test.mjs && node scripts/patient_data_access_http_test.mjs && node scripts/browser_policy_test.mjs && node scripts/monitoring_socket_test.mjs && node scripts/sensitive_operation_mfa_http_test.mjs && node scripts/vitals_disclosure_http_test.mjs && node scripts/iot_analytics_transport_test.mjs && node scripts/care_plan_access_http_test.mjs && node scripts/clinical_route_access_http_test.mjs",
+    "test": "npm run test:config && npm test --workspaces --if-present && node scripts/auth_region_http_test.mjs && node scripts/phi_failure_http_test.mjs && node scripts/fhir_http_test.mjs && node scripts/socket_ticket_test.mjs && node scripts/socket_ticket_http_test.mjs && node scripts/chat_identity_http_test.mjs && node scripts/patient_data_access_http_test.mjs && node scripts/browser_policy_test.mjs && node scripts/monitoring_socket_test.mjs && node scripts/sensitive_operation_mfa_http_test.mjs && node scripts/vitals_disclosure_http_test.mjs && node scripts/iot_analytics_transport_test.mjs && node scripts/care_plan_access_http_test.mjs && node scripts/clinical_route_access_http_test.mjs && node scripts/pharmacy_access_http_test.mjs && node scripts/pharmacy_payment_webhook_test.mjs",
     "test:config": "node scripts/verify_config_boundary.mjs",
     "lint": "eslint \"*-service/src/**/*.ts\" \"shared/**/*.ts\" \"ws-authorizer/*.mjs\""
   },
