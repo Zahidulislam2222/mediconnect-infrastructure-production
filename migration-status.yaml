@@ -503,3 +503,21 @@ doctor_pharmacy_runtime_discovery:
   infrastructure_mutated: false
   next: Trace workflow/artifact evidence for observed commit tag; no backend runtime
     edit before drift reconciliation
+
+local_operator_tooling_20260928:
+  scope: "Local CMS and RAG tooling only; no new cloud resource or infrastructure mutation"
+  cms:
+    source_commit: "196947b"
+    configuration: "CMS_ASSET_* validated in scripts/asset-settings.cjs; destination must be explicitly configured"
+    gates: "77 migration tests, strict types, syntax, security and Strapi build pass; independent qualified approval"
+    live_upload: false
+  rag:
+    source_commit: "2885a10"
+    configuration: "config/ingestion.json and config/hyde.json; LIGHTRAG_MEDICAL_URL, LIGHTRAG_CODEBASE_URL, LIGHTRAG_API_KEY; existing GEMINI_API_KEY and HYDE_MODEL"
+    backup_policy: "config/backup-policy.json shared by backup and verification; local file groups only"
+    gates: "17 ingestion,18 HyDE,12 backup tests; types,syntax,security pass; independent qualified approval"
+    live_ingestion: false
+    stack_changed: false
+    runtime_limits: "Acknowledged background submission does not prove indexing or workspace isolation"
+  new_resources: false
+  app_vs_iac: "129 PASS / 0 FAIL / 0 WARN before and after local record update"
