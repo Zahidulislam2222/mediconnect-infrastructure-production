@@ -104,8 +104,8 @@ async function doctorDetails(db: Db, doctorId: unknown, region: string): Promise
  * it failed or its claim went stale, and only while it is still exactly the row that was read (same status and claim).
  * Returns the earlier attempt's completed deliveries, or null when the reminder is not claimable.
  */
-async function claimReminder(db: Db, item: Record<string, any>, timed: boolean): Promise<Partial<Record<Channel, Delivery>> | null> {
-    let previous: Record<string, any> | undefined;
+async function claimReminder(db: Db, item: Record<string, unknown>, timed: boolean): Promise<Partial<Record<Channel, Delivery>> | null> {
+    let previous: Record<string, unknown> | undefined;
     if (timed) {
         previous = (await db.send(new GetCommand({
             TableName: TABLE_REMINDERS, Key: { reminderId: item.reminderId, appointmentId: item.appointmentId },
@@ -115,9 +115,12 @@ async function claimReminder(db: Db, item: Record<string, any>, timed: boolean):
             || (previous.status === 'sending' && typeof previous.createdAt === 'string' && previous.createdAt < staleBefore);
         if (!claimable) return null;
     }
-    const prior = previous?.deliveries && typeof previous.deliveries === 'object' ? previous.deliveries : {};
+    const prior = (previous?.deliveries && typeof previous.deliveries === 'object' ? previous.deliveries : {}) as Record<string, unknown>;
     const kept: Partial<Record<Channel, Delivery>> = {};
-    for (const c of ['sms', 'email'] as const) if (done(prior[c])) kept[c] = prior[c];
+    for (const c of ['sms', 'email'] as const) {
+        const delivery = prior[c];
+        if (done(delivery)) kept[c] = delivery;
+    }
     try {
         await db.send(new PutCommand({
             TableName: TABLE_REMINDERS,
@@ -133,8 +136,8 @@ async function claimReminder(db: Db, item: Record<string, any>, timed: boolean):
                 }
                 : { ConditionExpression: 'attribute_not_exists(reminderId)' }),
         }));
-    } catch (err: any) {
-        if (err?.name === 'ConditionalCheckFailedException') return null;
+    } catch (err: unknown) {
+        if (errorName(err) === 'ConditionalCheckFailedException') return null;
         throw err;
     }
     return kept;
@@ -201,7 +204,7 @@ export const sendAppointmentReminder = async (req: Request, res: Response) => {
 
         // A channel is "failed" when the contact could not be read, and "no_contact" when the profile has none.
         // A channel an earlier attempt already sent keeps that result and is not sent again.
-        const deliveries: Partial<Record<Channel, Delivery>> = {};
+        const deliveries: Partial<Record<Channel, Delivery>> = { ...prior };
         const wants = (c: Channel) => channel === c || channel === 'both';
         let snsMessageId: string | undefined;
         if (wants('sms') && prior.sms) {
@@ -240,7 +243,7 @@ export const sendAppointmentReminder = async (req: Request, res: Response) => {
                 deliveries.email = 'submitted';
             }
         }
-        const attempted = Object.values(deliveries).some(d => d === 'sent' || d === 'submitted');
+        const attempted = (['sms', 'email'] as const).some(c => wants(c) && done(deliveries[c]));
         const status = deliveries.sms === 'failed' || !attempted ? 'failed' : 'sent';
 
         // The claim is finished only by its own request (same claimId); if this write fails the claim stays and blocks
@@ -309,13 +312,15 @@ export const getPendingReminders = async (req: Request, res: Response) => {
         const upcoming = appointments.filter(appt =>
             appt.status === 'CONFIRMED' && inWindow('24h', new Date(appt.timeSlot || appt.date).getTime(), now));
 
-        // The 24h reminder is pending until it is sent or being sent; a failed one is pending again.
+        // Failed attempts and expired claims are pending again; active claims stay excluded.
         const needsReminder: any[] = [];
+        const staleBefore = new Date(now - REMINDER_CLAIM_TIMEOUT_MS).toISOString();
         for (const appt of upcoming) {
             const { Item: reminder } = await db.send(new GetCommand({
                 TableName: TABLE_REMINDERS, Key: { reminderId: `${appt.appointmentId}#24h`, appointmentId: appt.appointmentId },
             }));
-            if (!reminder || reminder.status === 'failed') {
+            if (!reminder || reminder.status === 'failed'
+                || (reminder.status === 'sending' && typeof reminder.createdAt === 'string' && reminder.createdAt < staleBefore)) {
                 needsReminder.push({
                     appointmentId: appt.appointmentId,
                     patientId: appt.patientId,

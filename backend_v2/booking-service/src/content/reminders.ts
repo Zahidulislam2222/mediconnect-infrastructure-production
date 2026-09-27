@@ -12,15 +12,15 @@ export interface ReminderTemplate {
 export const REMINDER_TEMPLATES: Record<ReminderType, ReminderTemplate> = {
     '24h': {
         channel: 'both',
-        subject: 'Appointment Reminder - Tomorrow',
+        subject: 'Appointment Reminder',
         bodyTemplate: 'Dear {{patientName}},\n\nThis is a reminder that you have an appointment scheduled for {{appointmentDate}} at {{appointmentTime}} with Dr. {{doctorName}}.\n\nReason: {{reason}}\n\nPlease arrive 10 minutes early. If you need to reschedule, please do so at least 2 hours before your appointment.\n\nBest regards,\nMediConnect Healthcare',
-        smsTemplate: 'MediConnect: Reminder - Appt tomorrow at {{appointmentTime}} with Dr. {{doctorName}}. Reply HELP for info.',
+        smsTemplate: 'MediConnect: Appointment {{appointmentDate}} at {{appointmentTime}} with Dr. {{doctorName}}.',
     },
     '1h': {
         channel: 'sms',
         subject: 'Appointment Starting Soon',
-        bodyTemplate: 'Dear {{patientName}},\n\nYour appointment with Dr. {{doctorName}} begins in approximately 1 hour at {{appointmentTime}}.\n\nPlease ensure you are ready.\n\nMediConnect Healthcare',
-        smsTemplate: 'MediConnect: Your appt with Dr. {{doctorName}} starts in 1 hour ({{appointmentTime}}). Please be ready.',
+        bodyTemplate: 'Dear {{patientName}},\n\nYour appointment with Dr. {{doctorName}} is scheduled for {{appointmentDate}} at {{appointmentTime}}.\n\nPlease ensure you are ready.\n\nMediConnect Healthcare',
+        smsTemplate: 'MediConnect: Appointment {{appointmentDate}} at {{appointmentTime}} with Dr. {{doctorName}}. Please be ready.',
     },
     'custom': {
         channel: 'both',

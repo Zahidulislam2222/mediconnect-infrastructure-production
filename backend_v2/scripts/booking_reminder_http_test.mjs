@@ -403,10 +403,95 @@ test('F1n: a custom reminder needs a message', run(async () => {
   assert.equal(h.sms.length + h.emails.length + h.reminders().length, 0);
 }));
 
+test('F1l: pending lists expired sending claims but excludes current claims', run(async () => {
+  for (const [age, expected] of [[HOUR, 1], [60_000, 0]]) {
+    const h = harness({ seedReminders: [{ reminderId: 'test-apt#24h', appointmentId: 'test-apt',
+      status: 'sending', claimId: 'test-old-claim', createdAt: new Date(Date.now() - age).toISOString() }] });
+    const result = await h.pending(h.doctor);
+    assert.equal(result.status, 200);
+    assert.equal(result.body.pendingReminders.length, expected);
+    mock.restoreAll();
+  }
+}));
+
+test('F1m: an SMS-only retry retains the email already submitted on the failed attempt', run(async () => {
+  const h = harness({ failSms: 1 });
+  assert.equal((await h.send(h.doctor, { type: '24h' })).body.status, 'failed');
+  const retried = await h.send(h.doctor, { type: '24h', channel: 'sms' });
+  assert.equal(retried.body.status, 'sent');
+  assert.deepEqual(h.reminders()[0].deliveries, { sms: 'sent', email: 'submitted' });
+  assert.equal(h.emails.length, 1);
+}));
+
+test('F1d/F1m: an earlier email does not make an unavailable SMS-only retry successful', run(async () => {
+  const h = harness({ profile: { phone: '' }, seedReminders: [{ reminderId: 'test-apt#24h', appointmentId: 'test-apt',
+    status: 'failed', claimId: 'test-old-claim', deliveries: { sms: 'failed', email: 'submitted' } }] });
+  const result = await h.send(h.doctor, { type: '24h', channel: 'sms' });
+  assert.equal(result.body.status, 'failed');
+  assert.deepEqual(h.reminders()[0].deliveries, { sms: 'no_contact', email: 'submitted' });
+  assert.equal(h.sms.length + h.emails.length, 0);
+}));
+
+test('F1i/F1j: timed messages show the actual date and do not promise tomorrow or exactly one hour', run(async () => {
+  for (const [type, hours] of [['24h', 2], ['24h', 25], ['1h', 0.1]]) {
+    const slot = inHours(hours);
+    const h = harness({ appointments: [appointment({ timeSlot: slot })] });
+    await h.send(h.doctor, { type, channel: 'both' });
+    const date = new Date(slot).toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: 'America/New_York' });
+    assert.ok(h.sms[0].Message.includes(date));
+    for (const text of [h.sms[0].Message, h.emails[0].subject, h.emails[0].message]) {
+      assert.doesNotMatch(text, /tomorrow|in (?:approximately )?1 hour/i);
+    }
+    mock.restoreAll();
+  }
+}));
+
 test('F1c: a doctor profile that cannot be read only loses the name and zone; the reminder still goes', run(async () => {
   const h = harness({ failDoctorRead: true });
   const result = await h.send(h.doctor, { type: '24h', channel: 'sms' });
   assert.equal(result.body.status, 'sent');
   assert.match(h.sms[0].Message, /Dr\. your doctor/);
   assert.match(h.sms[0].Message, /UTC/);
+}));
+
+test('reminder HTTP routes enforce authentication, ownership, validation and duplicate protection', run(async () => {
+  const h = harness();
+  const { CognitoJwtVerifier } = require('aws-jwt-verify');
+  mock.method(CognitoJwtVerifier, 'create', () => ({ verify: async token => {
+    if (token === 'test-doctor-token') return { sub: 'test-doctor', 'cognito:groups': ['doctors'] };
+    if (token === 'test-outsider-token') return { sub: 'other-patient', 'cognito:groups': ['patients'] };
+    throw new Error('test token rejected');
+  } }));
+  const express = require('express');
+  const app = express();
+  app.use(express.json());
+  app.use(require('./dist/booking-service/src/routes/booking.routes.js').default);
+  const server = await new Promise(resolve => {
+    const listening = app.listen(0, '127.0.0.1', () => resolve(listening));
+  });
+  try {
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const post = (token, body) => fetch(`${base}/appointments/test-apt/reminders`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-user-region': 'EU',
+        ...(token ? { authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body),
+    });
+    assert.equal((await post(undefined, {})).status, 401);
+    assert.equal((await post('test-outsider-token', {})).status, 403);
+    assert.equal((await post('test-doctor-token', { channel: 'invalid' })).status, 400);
+    assert.equal(h.sms.length + h.emails.length, 0);
+    const sent = await post('test-doctor-token', { type: '24h', channel: 'sms' });
+    assert.equal(sent.status, 200);
+    assert.equal((await sent.json()).status, 'sent');
+    assert.equal((await post('test-doctor-token', { type: '24h', channel: 'sms' })).status, 409);
+    const headers = { authorization: 'Bearer test-doctor-token', 'x-user-region': 'EU' };
+    const listed = await fetch(`${base}/appointments/test-apt/reminders`, { headers });
+    assert.equal(listed.status, 200);
+    assert.equal((await listed.json()).total, 1);
+    const pending = await fetch(`${base}/appointments/reminders/pending`, { headers });
+    assert.equal(pending.status, 200);
+    assert.equal((await pending.json()).total, 0);
+    assert.equal(h.sms.length, 1);
+  } finally {
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+  }
 }));
