@@ -1,4 +1,13 @@
 # --- Dependencies & Build ---
+# Project-private recovery, personal tooling and credentials
+memory/
+CREDENTIALS.md
+PROJECT-DOSSIER.md
+local-tests/
+.credentials/
+*.p12
+*.pfx
+
 node_modules/
 dist/
 build/
