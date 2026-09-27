@@ -32,9 +32,15 @@ booking_provenance_verification:
 configuration_boundary_audit:
   status: "PARTIAL"
   hardcoded_registry_entries: 0
-  documented_backend_variables: 163
+  documented_backend_variables: 188
   documented_frontend_variables: 54
   reason: "The nine registered hardcoded table names now use validated settings and safe examples. A broader audit still finds additional business-module defaults that must move to the central boundary."
+
+local_safety_integration:
+  recorded_date: "2026-09-28"
+  resource_references_added: false
+  app_vs_iac: "129 PASS / 0 FAIL / 0 WARN on combined local source"
+  coverage_limit: "Source coverage only; no infrastructure mutation, immutable live parity or full cloud inventory completion"
 
 
 cms_article_migration_configuration:

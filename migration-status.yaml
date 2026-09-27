@@ -9,6 +9,18 @@
 last_updated: "2026-09-08T19:52:49Z"
 last_verified_by: "verify_app_vs_iac.sh 129/0/0, verify_migration.sh showcase PASS, frontend 43 unit + 10 E2E PASS, static-container HTTP/security checks, Terraform validate, GitHub workflow read-back"
 
+local_safety_integration:
+  recorded_date: "2026-09-28"
+  status: "LOCAL_GATES_PASSED_REVIEW_PENDING"
+  scope: "Combined pharmacy authorization/payment, booking refunds/reminders and privacy receipt erasure on a local integration branch"
+  tests: "194 synthetic backend tests pass, including workspace TypeScript builds; no live provider acceptance claimed"
+  app_vs_iac: "129 PASS / 0 FAIL / 0 WARN before and after integration"
+  configuration: "188 backend and 54 frontend variables documented by the existing configuration boundary gate; broader audit remains partial"
+  discovery: "AWS inventory405 and cost read succeeded; explicitly scoped GCP inventory770 and project billing-enabled read succeeded; Azure authentication expired. Initial unscoped GCP failure targeted an unrelated CLI default and is not MediConnect evidence."
+  release_gate: "BLOCKED — independent integration review, immutable live source provenance, cloud authentication, historical credential triage and actual provider acceptance remain open"
+  deployment_performed: false
+  infrastructure_mutations_performed: false
+
 release_readiness_checkpoint:
   recorded_date: "2026-09-09"
   status: "LOCAL_AUDIT_RESUMED_RELEASE_BLOCKED"
