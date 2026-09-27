@@ -1,4 +1,17 @@
 # Terraform
+# Project-private recovery, personal tooling and credentials
+memory/
+CREDENTIALS.md
+PROJECT-DOSSIER.md
+local-tests/
+.credentials/
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
 .terraform/
 *.tfstate
 *.tfstate.backup
