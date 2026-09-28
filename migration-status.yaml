@@ -6,8 +6,44 @@
 # Run `bash verify_migration.sh` to verify claims in this file.
 # ============================================================================
 
-last_updated: "2026-09-08T19:52:49Z"
-last_verified_by: "verify_app_vs_iac.sh 129/0/0, verify_migration.sh showcase PASS, frontend 43 unit + 10 E2E PASS, static-container HTTP/security checks, Terraform validate, GitHub workflow read-back"
+last_updated: "2026-09-28T01:10:38.699965+00:00"
+last_verified_by: "Current local app/IaC129/0/0; frontend592unit59browser; explicit type gates; build/lint/security; historical Terraform results are not refreshed"
+
+operations_continuation_20260928:
+  status: "LOCAL_VERIFIED_INDEPENDENT_REVIEW_DEFERRED_BY_OWNER"
+  rag_recovery: "Configured online SQLite snapshots, atomic integrity/hash manifest, backup-wide lock and exact-source restores"
+  rag_tests: "63 full RAG tests passed; final focused12SQLite+16backup passed, including real encrypted four-group Restic roundtrip"
+  rag_actual_local_data: "Two actual local DBs snapshotted, integrity/hash verified, original bytes unchanged; no live Restic backup/prune or restart"
+  cms_packaging: "SupportedNode22, npm ci, source-only context, synthetic build settings, non-root writable runtime and persistence guide"
+  cms_tests: "90tests/types/localimage build pass; network-disabled adminregister/login, unauthorizedrefusal, articlecreate and postrestartread pass"
+  cms_media_local: "Network-none upload/auth/signedURL/exactbytes/session/noACL/restart/restore/delete PASS; 6volume hashes + SQLite integrity; synthetic storage only, no live S3 or CMS deployment"
+  security: "Edit hook/Gitleaks/Semgrep pass; Bandit no medium/high, six low process-use warnings retained without suppressions"
+  backend_provenance: "GCP770/freebillingmetadata; registry/cache absent. Retained AdminActivity2revisionnonce links to64b995aa source tag;19CIjobs include successful bookingbuild/deploy, localancestryPASS; exactlivefileparity still unverified"
+  runtime_metadata_coverage: "14/14 inventoried Cloud Run services described, all Ready metadata and 14 traffic entries; no functional health or file parity claim; previous booking-only provenance covered 2"
+  configuration: "39URL/5region literal candidates,0model literals; backend runtime edits await source/live reconciliation"
+  off_device_recovery: "PASS encrypted remote/download SHA256, full downloaded Restic check, 34763 file hashes, 3 SQLite integrity checks and 5 Git fsck; separate offline key custody remains unverified"
+  resources_added: false
+  deployed: false
+  paid_calls: 0
+
+
+frontend_verification_20260928:
+  status: "LOCAL_GATES_PASSED_INDEPENDENT_REVIEW_DEFERRED_BY_OWNER"
+  scope: "Browser request isolation, bidirectional signup checks, cached pharmacy profile validation and explicit TypeScript project gates"
+  unit_tests: "592 PASS in 53 files"
+  browser_tests: "59 PASS on final source; prior failed and stalled runs preserved"
+  types: "PASS app, node and all e2e projects through npm run typecheck"
+  lint: "0 errors, 49 warnings"
+  build: "PASS; large-chunk warning retained"
+  configuration: "275 frontend source/data files, 54 variables, 0 configuration-gate failures; broad backend audit remains open"
+  semgrep: "31 hash-matched targets, 0 findings, 0 errors"
+  live_before: "37/37 archived static release hashes matched; active mount and health verified read-only"
+  azure_inventory: "Resource Graph 2/2 records, no next page; Cosmos DB account and Network Watcher"
+  azure_cost_read: "Free ActualCost MonthToDate query succeeded with 0 rows; no zero-balance or future-cost claim"
+  owner_restrictions: "No paid actions; independent review in a new session; no new deployment authorized"
+  deployed: false
+  resources_added: false
+
 
 local_safety_integration:
   recorded_date: "2026-09-28"
@@ -16,8 +52,8 @@ local_safety_integration:
   tests: "194 synthetic backend tests pass, including workspace TypeScript builds; no live provider acceptance claimed"
   app_vs_iac: "129 PASS / 0 FAIL / 0 WARN before and after integration"
   configuration: "188 backend and 54 frontend variables documented by the existing configuration boundary gate; broader audit remains partial"
-  discovery: "AWS inventory405 and cost read succeeded; explicitly scoped GCP inventory770 and project billing-enabled read succeeded; Azure authentication expired. Initial unscoped GCP failure targeted an unrelated CLI default and is not MediConnect evidence."
-  release_gate: "BLOCKED — independent integration review, immutable live source provenance, cloud authentication, historical credential triage and actual provider acceptance remain open"
+  discovery: "AWS inventory405 and cost read succeeded; explicitly scoped GCP inventory770 and project billing-enabled read succeeded; Azure authentication restored by owner; ResourceGraph2 and free month-to-date cost read succeeded. Initial unscoped GCP failure targeted an unrelated CLI default and is not MediConnect evidence."
+  release_gate: "BLOCKED — latest frontend independent review deferred by owner; immutable backend live source provenance, historical credential revocation and actual provider acceptance remain open"
   deployment_performed: false
   infrastructure_mutations_performed: false
 
@@ -40,7 +76,7 @@ booking_runtime_reconciliation:
   application_health: "NOT_TESTED — no runtime invocation"
   infrastructure_mutations_performed: false
   app_vs_iac: "PASS — 129 PASS / 0 FAIL / 0 WARN before this record update"
-  local_image_recovery: "UNAVAILABLE — Docker engine pipe absent; cache inventory not obtained; no daemon or container started"
+  local_image_recovery: "2026-09-28: Docker available;52cached images inspected,0exact live booking digest matches"
   exact_digest_lookup: "Both registry lookups returned Image not found; source/live parity remains unestablished"
   scoped_build_history: "Four successful exact-digest Cloud Build history queries across global and observed service regions returned zero matches; API was verified enabled; no build or API activation"
   github_attestation_lookup: "Exact observed digest repository-attestation read returned HTTP404; attestation count unavailable and immutable source parity not established"
@@ -496,7 +532,7 @@ doctor_pharmacy_runtime_discovery:
     artifact_registry: Both exact digest lookups Image not found
     cloud_build: Four successful exact-digest queries; zero matches
     github_attestations: Both exact-digest repository queries returned not found
-    template_tag: Both reference 64b995aa859bfa2ebcee125a78239db2e8342dcc; local commit
+    template_tag: Both reference local commit 64b995a; the commit
       exists; mutable tag is a lead, not immutable source proof
   runtime_invoked: false
   backend_application_edited: false
@@ -507,9 +543,9 @@ doctor_pharmacy_runtime_discovery:
 local_operator_tooling_20260928:
   scope: "Local CMS and RAG tooling only; no new cloud resource or infrastructure mutation"
   cms:
-    source_commit: "196947b"
-    configuration: "CMS_ASSET_* validated in scripts/asset-settings.cjs; destination must be explicitly configured"
-    gates: "77 migration tests, strict types, syntax, security and Strapi build pass; independent qualified approval"
+    source_commit: "c004b8a"
+    configuration: "Typed src/config/runtime-settings.ts and validated data defaults; migration CMS_ASSET_* in scripts/asset-settings.cjs; explicit destinations and legacy credential compatibility"
+    gates: "77 migration + 10 runtime tests, strict/full types, build and security pass; independent qualified approval; lint script unavailable"
     live_upload: false
   rag:
     source_commit: "2885a10"
