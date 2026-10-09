@@ -1,0 +1,27 @@
+[
+  {
+    "name": "delete-old-images",
+    "action": {
+      "type": "Delete"
+    },
+    "condition": {
+      "olderThan": "1209600s",
+      "tagState": "any"
+    }
+  },
+  {
+    "name": "keep-phase2-release",
+    "action": {
+      "type": "Keep"
+    },
+    "condition": {
+      "tagState": "tagged",
+      "tagPrefixes": [
+        "phase2-release-"
+      ],
+      "packageNamePrefixes": [
+        "booking-service"
+      ]
+    }
+  }
+]

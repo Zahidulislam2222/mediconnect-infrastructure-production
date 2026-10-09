@@ -8,12 +8,11 @@ import { logger, safeError } from '../../../shared/logger';
 import { GoogleAuth } from "google-auth-library";
 import { createHash, randomUUID } from 'crypto';
 import { z } from 'zod';
-import { requiredEnv, setting, getBillingSettings } from '../../../shared/settings';
+import { requiredEnv, requiredResourceName, setting, getBillingSettings } from '../../../shared/settings';
 import { PAYABLE_BILL_STATUSES } from '../../../shared/billing-status';
 
 const HIPAA_SALT = requiredEnv('HIPAA_SALT');
 
-const TABLE_TRANSACTIONS = setting("TABLE_TRANSACTIONS");
 
 interface AuthRequest extends Request {
     user?: { sub?: string; id?: string; region?: string };
@@ -47,7 +46,7 @@ export const getPatientBilling = async (req: Request, res: Response) => {
 
         // 🟢 CORRECT QUERY: Use PatientIndex and properly handle the patientId
         const command = new QueryCommand({
-            TableName: TABLE_TRANSACTIONS,
+            TableName: requiredResourceName("TABLE_TRANSACTIONS"),
             IndexName: "PatientIndex",
             KeyConditionExpression: "patientId = :pid",
             ExpressionAttributeValues: { ":pid": patientId },
@@ -98,7 +97,7 @@ export const payBill = async (req: Request, res: Response) => {
         const config = getBillingSettings();
         const regionalDb = getRegionalClient(region);
         const { Item: bill } = await regionalDb.send(new GetCommand({
-            TableName: TABLE_TRANSACTIONS, Key: { billId }, ConsistentRead: true,
+            TableName: requiredResourceName("TABLE_TRANSACTIONS"), Key: { billId }, ConsistentRead: true,
         }));
         if (!bill || bill.patientId !== patientId) return res.status(404).json({ error: "Bill not found." });
         if (bill.status === 'PAID') return res.status(409).json({ code: "BILL_ALREADY_PAID" });
@@ -124,7 +123,7 @@ export const payBill = async (req: Request, res: Response) => {
             const attempt = randomUUID();
             // Never release this reservation automatically: Stripe keys can expire after 24h.
             await regionalDb.send(new UpdateCommand({
-                TableName: TABLE_TRANSACTIONS, Key: { billId },
+                TableName: requiredResourceName("TABLE_TRANSACTIONS"), Key: { billId },
                 UpdateExpression: 'SET paymentAttemptId = :attempt',
                 ConditionExpression: 'attribute_not_exists(paymentAttemptId) AND attribute_not_exists(paymentIntentId) AND patientId = :patient AND amount = :amount AND #status = :status',
                 ExpressionAttributeNames: { '#status': 'status' },
@@ -137,7 +136,7 @@ export const payBill = async (req: Request, res: Response) => {
             }, { idempotencyKey: attempt });
             // Persist before charging. If this write is uncertain, fail closed for reconciliation.
             await regionalDb.send(new UpdateCommand({
-                TableName: TABLE_TRANSACTIONS, Key: { billId },
+                TableName: requiredResourceName("TABLE_TRANSACTIONS"), Key: { billId },
                 UpdateExpression: 'SET paymentIntentId = :intent',
                 ConditionExpression: 'paymentAttemptId = :attempt AND attribute_not_exists(paymentIntentId)',
                 ExpressionAttributeValues: { ':attempt': attempt, ':intent': intent.id },
@@ -205,7 +204,7 @@ export const getDoctorAnalytics = async (req: Request, res: Response) => {
 
         do {
             const command = new QueryCommand({
-                TableName: TABLE_TRANSACTIONS,
+                TableName: requiredResourceName("TABLE_TRANSACTIONS"),
                 IndexName: "DoctorIndex",
                 KeyConditionExpression: keyCondition, 
                 ExpressionAttributeValues: expressionValues,

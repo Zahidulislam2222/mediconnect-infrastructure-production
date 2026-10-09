@@ -5,7 +5,7 @@ import globals from 'globals';
 
 export default defineConfig({
   files: ['*-service/src/**/*.ts', 'shared/**/*.ts', 'ws-authorizer/*.mjs',
-    'scripts/verify_config_boundary.mjs', 'scripts/__tests__/*.mjs'],
+    'scripts/verify_config_boundary.mjs', 'scripts/verify_booking_startup_settings.mjs', 'scripts/__tests__/*.mjs'],
   extends: [js.configs.recommended, tseslint.configs.recommended],
   languageOptions: { globals: globals.node },
   rules: {

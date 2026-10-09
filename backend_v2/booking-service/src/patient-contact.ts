@@ -3,7 +3,7 @@ import { getRegionalClient } from '../../shared/aws-config';
 import { decryptPHI } from '../../shared/kms-crypto';
 import { safeError } from '../../shared/logger';
 import { sendNotification } from '../../shared/notifications';
-import { setting } from '../../shared/settings';
+import { requiredResourceName } from '../../shared/settings';
 
 /**
  * The patient's contact email for a notice, from their profile. Appointments and bills do not carry it, and the
@@ -15,7 +15,7 @@ export async function patientContactEmail(
 ): Promise<string | undefined> {
     if (typeof patientId !== 'string' || !patientId) return undefined;
     const stored = (await db.send(new GetCommand({
-        TableName: setting("TABLE_PATIENTS"), Key: { patientId }, ProjectionExpression: 'email'
+        TableName: requiredResourceName("TABLE_PATIENTS"), Key: { patientId }, ProjectionExpression: 'email'
     }))).Item?.email;
     if (typeof stored !== 'string' || !stored) return undefined;
     const { email } = await decryptPHI({ email: stored }, region);

@@ -322,6 +322,15 @@ module "dynamodb_eu" {
       point_in_time_recovery = true
     }
 
+    # Regional webhook deduplication; no cross-region replication.
+    "mediconnect-webhook-events" = {
+      hash_key               = "eventId"
+      deletion_protection    = true
+      point_in_time_recovery = true
+      ttl_enabled            = true
+      ttl_attribute          = "expiresAt"
+    }
+
     # ── Subscription Tables ──────────────────────────────────────────
 
     "mediconnect-subscriptions" = {
@@ -359,6 +368,7 @@ module "dynamodb_eu" {
     "mediconnect-chat-sessions" = {
       hash_key               = "sessionId"
       range_key              = "messageIndex"
+      range_key_type         = "N"
       deletion_protection    = true
       point_in_time_recovery = true
       ttl_enabled            = true

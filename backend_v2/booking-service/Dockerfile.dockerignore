@@ -1,0 +1,25 @@
+# Explicit booking build inputs; private files never enter the context.
+**
+!backend_v2/
+!backend_v2/package.json
+!backend_v2/package-lock.json
+!backend_v2/shared/
+!backend_v2/shared/**
+!backend_v2/doctor-service/
+!backend_v2/doctor-service/package.json
+!backend_v2/patient-service/
+!backend_v2/patient-service/package.json
+!backend_v2/booking-service/
+!backend_v2/booking-service/package.json
+!backend_v2/booking-service/tsconfig.json
+!backend_v2/booking-service/src/
+!backend_v2/booking-service/src/**
+!backend_v2/communication-service/
+!backend_v2/communication-service/package.json
+!backend_v2/staff-service/
+!backend_v2/staff-service/package.json
+**/.env*
+**/*.pem
+**/*.key
+**/CREDENTIALS.md
+**/node_modules/**

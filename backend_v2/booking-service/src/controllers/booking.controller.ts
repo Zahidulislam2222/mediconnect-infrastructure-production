@@ -14,7 +14,7 @@ import { pushAppointmentToBigQuery, pushRevenueToBigQuery } from './billing.cont
 import { sendNotification } from '../../../shared/notifications';
 import { publishEvent, EventType } from '../../../shared/event-bus';
 
-import { getCancellationRefundSettings, getCancellationSettings, setting } from '../../../shared/settings';
+import { getCancellationRefundSettings, getCancellationSettings, requiredResourceName, setting } from '../../../shared/settings';
 import { ERASED_MARKER } from '../../../shared/erasure';
 import { CANCELLATION_COPY, RECEIPT_STATUS, REFUND_NOTICES, type RefundStatus } from '../content/cancellation';
 import {
@@ -43,9 +43,7 @@ interface AuthRequest extends Request {
 
 const TABLE_APPOINTMENTS = setting("TABLE_APPOINTMENTS");
 const TABLE_LOCKS = setting("TABLE_LOCKS");
-const TABLE_PATIENTS = setting("TABLE_PATIENTS");
 const TABLE_DOCTORS = setting("TABLE_DOCTORS"); // 🟢 Replaced Postgres
-const TABLE_TRANSACTIONS = setting("TABLE_TRANSACTIONS");
 const TABLE_GRAPH = setting("TABLE_GRAPH");
 const STRIPE_SECRET_NAME = "/mediconnect/stripe/keys";
 const CLEANUP_SECRET_PARAM = "/mediconnect/prod/cleanup/secret";
@@ -96,7 +94,7 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
     let patientAge = "N/A";
 
     const [patientRes, doctorRes] = await Promise.all([
-        docClient.send(new GetCommand({ TableName: TABLE_PATIENTS, Key: { patientId } })),
+        docClient.send(new GetCommand({ TableName: requiredResourceName("TABLE_PATIENTS"), Key: { patientId } })),
         docClient.send(new GetCommand({ TableName: TABLE_DOCTORS, Key: { doctorId } }))
     ]);
 
@@ -323,7 +321,7 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
             },
             {
                 Put: {
-                    TableName: TABLE_TRANSACTIONS,
+                    TableName: requiredResourceName("TABLE_TRANSACTIONS"),
                     Item: {
                         billId: transactionId, referenceId: appointmentId,
                         patientId, doctorId, type: "BOOKING_FEE",
@@ -1028,7 +1026,7 @@ async function releaseCancellationClaim(docClient: DocClient, appointmentId: str
  */
 async function decideRefund(docClient: DocClient, apt: Record<string, any>, region: string, policy: "REFUND" | "NO_SHOW"): Promise<RefundOutcome> {
     const recorded = (await docClient.send(new GetCommand({
-        TableName: TABLE_TRANSACTIONS, Key: { billId: refundBillId(apt.appointmentId) }, ConsistentRead: true
+        TableName: requiredResourceName("TABLE_TRANSACTIONS"), Key: { billId: refundBillId(apt.appointmentId) }, ConsistentRead: true
     }))).Item;
     if (recorded) {
         const refundStatus: RefundStatus = RECORDED_REFUND_STATUSES.includes(recorded.refundStatus) ? recorded.refundStatus
@@ -1115,7 +1113,7 @@ async function finalizeCancellation(docClient: DocClient, apt: any, f: Finalizat
     if (f.refund.recordLedger) {
         transactItems.push({
             Put: {
-                TableName: TABLE_TRANSACTIONS,
+                TableName: requiredResourceName("TABLE_TRANSACTIONS"),
                 ConditionExpression: "attribute_not_exists(billId)",
                 Item: {
                     billId: refundBillId(apt.appointmentId), referenceId: apt.appointmentId,

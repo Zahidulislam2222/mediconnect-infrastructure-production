@@ -102,6 +102,21 @@ resource "google_artifact_registry_repository" "mediconnect_repo" {
   format        = "DOCKER"
   project       = var.gcp_project_id
 
+  cleanup_policy_dry_run = false
+  dynamic "cleanup_policies" {
+    for_each = { for policy in jsondecode(file("${path.module}/config/artifact-retention.json")) : policy.name => policy }
+    content {
+      id     = cleanup_policies.key
+      action = upper(cleanup_policies.value.action.type)
+      condition {
+        tag_state             = upper(cleanup_policies.value.condition.tagState)
+        older_than            = try(cleanup_policies.value.condition.olderThan, null)
+        tag_prefixes          = try(cleanup_policies.value.condition.tagPrefixes, null)
+        package_name_prefixes = try(cleanup_policies.value.condition.packageNamePrefixes, null)
+      }
+    }
+  }
+
   labels = {
     project     = "mediconnect"
     environment = "prod"

@@ -559,21 +559,32 @@ local_operator_tooling_20260928:
   app_vs_iac: "129 PASS / 0 FAIL / 0 WARN before and after local record update"
 
 phase2_backend_contract_audit_20261009:
-  status: "TOOLING_REVIEW_APPROVED_PHASE2_LIVE_PARITY_BLOCKED"
-  scope: "Standalone backend config audit; explicit frontend scope; root CI regional/HTTP contract checks and lint"
-  inventory: "AWS406 complete; GCP770; Azure2;14/14 Cloud Run services and traffic revisions read"
-  billing: "GCP metadata read; Azure current-month0rows; owner-approved one$0.01 AWS account cost query, no retry/pagination"
-  source_provenance: "Seven exact serving images absent from registry; historicallogs410,99cachedimages0matches,retainedbuildartifacts0; source/file parity NOT established"
-  configuration: "Tracked safe backend example;188 backend/54 explicit frontend variables audited; broader runtime literal/startup deployment work remains blocked"
-  local_gates: "201backendtests,types/build,lint0errors1043existingwarnings,security PASS; isolated/backend188 and explicitfrontend54 audit PASS; app-vs-IaC129/0/0,inert migration guards,Terraformvalidate PASS"
-  resources_added: false
-  runtime_code_changed: false
+  status: "TABLES_VERIFIED_APPLICATION_RELEASE_IN_PROGRESS"
+  scope: "Backend configuration/startup and both-region infrastructure source coverage"
+  inventory: "AWS635 unique resources across three complete discovered LOCAL indexes; no aggregator, unindexed regions not established; GCP770; Azure2"
+  billing: "GCP metadata read; Azure current-month0rows; approved single AWS account cost request consumed, no retry or pagination"
+  source_provenance: "Fresh review approved application-source baseline:246 distinct hashed files/492 regional matches plus ten empty files; original container/dependency recovery not established"
+  configuration: "188 backend variables documented; booking startup shared validator and regional preflight edited locally; broad runtime configuration and immutable release acceptance unfinished"
+  local_gates: "Node24 and isolatedNode22 full214/214 pass; all five builds/types pass; lint0errors1043warnings; startup15 CLI5 parser4 mutation6 hostileplan9 pass; sourceaudit177/0/0; security scans zero findings; compatible dependency repair cleared3critical; repaired Node24/actualNode22 full214/214 tests/types/build pass, lint0errors1044warnings; installed security passes; expanded Semgrep0findings with22embedded-workflow parser errors, dedicated actionlint passes"
+  resources_added: true
+  completed_resource_creates: 10
+  resource_authorization: "AUTHORIZED_AND_EXECUTED: owner exception for exactly ten reviewed creates with variable additional1dollar/month budget; no IAM grants or unrelated changes"
+  runtime_code_changed: true
+  runtime_code_deployed: false
   cloud_mutations: true
-  cloud_execution: "Owner-approved bounded recovery: three prerequisite APIs enabled; pilot SSH enabled then disabled; original14 runtime/template/traffic snapshots unchanged"
+  cloud_execution: "Approved recovery, exact ten tables and separately authorized booking-only policy executed; tables120/120 and live policy38/38 checks pass; both follow-up targeted plans zero changes; original14 traffic/revision/image snapshots preserved"
   deployment_performed: false
-  publication: "Independent eight-file tooling review APPROVE; owner-authorized publication; whole-phase release blocked by live parity"
-  registry_cleanup_observed: "Enforced DELETE older than14days, tagged and untagged, no KEEP policy; empty repository. Deletion cause/actor not proven by audit evidence."
-  live_health: "Metadata Ready only; existing seven-day request/error queries returned no records; functional verification absent"
-  recovery_constraints: "Pilot tunnel rejected with environment guidance; generation remains unverified. SSH disabled again; no shell/file recovery. Original revision image metadata14/14 read successfully; image export pending automatic-approval cost gate."
-  image_metadata: "Seven original image manifests measured; paired regional image digests and metadata hashes agree. Metadata is not recovered source or functional acceptance."
+  publication: "Prior reviewed tooling and recovery records published under verified owner identity; current source corrections uncommitted pending final gates/review"
+  live_health: "Original regional readiness/health14/14 HTTP200; no clinical/payment/provider acceptance implied"
+  recovery_constraints: "Original image export failed upload; bounded destination variant HTTP500 with unknown operation outcome, no retry; no generation/IAM change"
+  remaining: "Final publication; reviewed existing-registry retention and immutable artifact; no-traffic candidates, rollback proof, activation and live hash parity"
   phase_complete: false
+
+phase2_booking_role_access_20261009:
+  status: APPLIED_OWNER_EXCEPTION_NATIVE_VERIFIED
+  creates: 1
+  updates: 0
+  deletes: 0
+  required_live_permission_checks_passed: 38
+  post_apply_targeted_plan_changes: 0
+  application_rollout: NOT_YET_PERFORMED

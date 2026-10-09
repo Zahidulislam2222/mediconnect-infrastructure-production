@@ -5,10 +5,9 @@ import { PutCommand, QueryCommand, GetCommand, UpdateCommand } from "@aws-sdk/li
 import { writeAuditLog } from '../../../shared/audit';
 import { safeError } from '../../../shared/logger';
 import { v4 as uuidv4 } from 'uuid';
-import { setting } from '../../../shared/settings';
+import { requiredResourceName, setting } from '../../../shared/settings';
 
 const TABLE_APPOINTMENTS = setting("TABLE_APPOINTMENTS");
-const TABLE_TRANSACTIONS = setting("TABLE_TRANSACTIONS");
 
 const extractRegion = (req: Request): string => requestJurisdiction(req);
 
@@ -232,7 +231,7 @@ export const assignCPTToAppointment = async (req: Request, res: Response) => {
         // Create billing transaction if fee > 0
         if (totalFee > 0) {
             await db.send(new PutCommand({
-                TableName: TABLE_TRANSACTIONS,
+                TableName: requiredResourceName("TABLE_TRANSACTIONS"),
                 Item: {
                     billId: uuidv4(),
                     referenceId: appointmentId,

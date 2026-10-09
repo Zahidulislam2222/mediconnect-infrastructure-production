@@ -6,11 +6,13 @@ export const SDK_ENVIRONMENT_NAMES = ["AWS_EC2_METADATA_DISABLED"] as const;
 
 const resourceNameSchema = z
     .string()
-    .trim()
-    .min(1)
+    .min(3)
+    .max(255)
     .regex(/^[A-Za-z0-9_.-]+$/, "must be a valid cloud resource name");
 
 export type TableEnvironmentVariable =
+    | "TABLE_PATIENTS"
+    | "TABLE_TRANSACTIONS"
     | "TABLE_DRUG_INTERACTIONS"
     | "TABLE_CHAT_HISTORY"
     | "TABLE_CHAT_CONNECTIONS"
@@ -92,6 +94,23 @@ export function getCancellationRefundSettings() {
         .parse({ refundMaxPages: setting('CANCELLATION_REFUND_MAX_PAGES') });
 }
 
+/** Validate booking resources and cancellation bounds after secret bootstrap, before listening. */
+export function getBookingStartupSettings() {
+    for (const name of ['TABLE_PATIENTS', 'TABLE_TRANSACTIONS',
+        'CANCELLATION_CLAIM_TTL_SECONDS', 'CANCELLATION_REFUND_MAX_PAGES'] as const) {
+        const value = process.env[name];
+        if (value !== undefined && (value !== value.trim() || /__[A-Z0-9_]+__/.test(value))) {
+            throw new Error(`Invalid deployment configuration: ${name}`);
+        }
+    }
+    return {
+        patientsTable: requiredResourceName('TABLE_PATIENTS'),
+        transactionsTable: requiredResourceName('TABLE_TRANSACTIONS'),
+        ...getCancellationSettings(),
+        ...getCancellationRefundSettings(),
+    };
+}
+
 export function getVitalsSettings() {
     return z.object({ historyLimit: z.coerce.number().int().positive() })
         .parse({ historyLimit: setting('VITALS_HISTORY_LIMIT') });
@@ -166,7 +185,7 @@ export function requiredUnitInterval(name: string): number {
 }
 
 export function requiredResourceName(name: TableEnvironmentVariable): string {
-    const parsed = resourceNameSchema.safeParse(requiredEnv(name));
+    const parsed = resourceNameSchema.safeParse(process.env[name]);
     if (!parsed.success) {
         throw new Error(`Missing or invalid required configuration: ${name}`);
     }

@@ -13,7 +13,7 @@ import {
     PLANS,
     TABLE_SUBSCRIPTIONS,
 } from '../../../shared/subscription';
-import { TABLE_NAMES, setting } from '../../../shared/settings';
+import { TABLE_NAMES, requiredResourceName, setting } from '../../../shared/settings';
 import { REFUND_NOTICES, REFUND_WEBHOOK_COPY, type RefundStatus } from '../content/cancellation';
 import { MANUAL_REFUND_LEDGER_STATUS, refundBillId } from '../cancellation-policy';
 import { notifyPatient, patientContactEmail } from '../patient-contact';
@@ -24,7 +24,6 @@ import { findPrescriptionBills } from '../../../shared/prescription-ledger';
 const STRIPE_SECRET_NAME = "/mediconnect/stripe/keys";
 const STRIPE_WEBHOOK_SECRET_NAME = "/mediconnect/stripe/webhook_secret";
 
-const TABLE_TRANSACTIONS = setting("TABLE_TRANSACTIONS");
 const TABLE_PRESCRIPTIONS = setting("TABLE_PRESCRIPTIONS");
 const TABLE_APPOINTMENTS = setting("TABLE_APPOINTMENTS");
 const TABLE_INVENTORY = TABLE_NAMES.inventory;
@@ -208,7 +207,7 @@ async function handlePaymentFailure(paymentIntent: Stripe.PaymentIntent, regiona
         const transactItems: any[] = [
             {
                 Update: {
-                    TableName: TABLE_TRANSACTIONS,
+                    TableName: requiredResourceName("TABLE_TRANSACTIONS"),
                     Key: { billId },
                     UpdateExpression: "SET #s = :s, failureReason = :fr, failedAt = :now, paymentIntentId = :pid",
                     ConditionExpression: `#s IN (${Object.keys(payable).join(', ')}) AND attribute_not_exists(reviewReason)`,
@@ -345,7 +344,7 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
 
     // The ledger row decides what this payment is for, so an unreadable row fails the delivery and Stripe retries it.
     const existingTxItem: any = (await regionalDb.send(new GetCommand({
-        TableName: TABLE_TRANSACTIONS,
+        TableName: requiredResourceName("TABLE_TRANSACTIONS"),
         Key: { billId },
         ConsistentRead: true
     }))).Item;
@@ -361,7 +360,7 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
     // ACTION A: Update the Ledger
     transactItems.push({
         Update: {
-            TableName: TABLE_TRANSACTIONS,
+            TableName: requiredResourceName("TABLE_TRANSACTIONS"),
             Key: { billId },
             UpdateExpression: "SET #s = :s, paymentIntentId = :pid, paidAt = :now",
             ExpressionAttributeNames: { "#s": "status" },
@@ -381,7 +380,7 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
         // from metadata onto a row that erasure may already have processed.
         try {
             await regionalDb.send(new PutCommand({
-                TableName: TABLE_TRANSACTIONS,
+                TableName: requiredResourceName("TABLE_TRANSACTIONS"),
                 Item: {
                     billId, type: 'PHARMACY', status: 'PAID', reviewReason: 'LEDGER_ROW_MISSING', paymentIntentId: paymentIntent.id,
                     amountMinor: paymentIntent.amount, currency: paymentIntent.currency, paidAt: timestamp
@@ -392,7 +391,7 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
             if ((recordErr as { name?: string })?.name !== 'ConditionalCheckFailedException') throw recordErr;
             // Done only if the row that won records this same payment (a concurrent delivery of it); anything else
             // stays unacknowledged so Stripe retries and the mismatch is investigated.
-            const recorded = await regionalDb.send(new GetCommand({ TableName: TABLE_TRANSACTIONS, Key: { billId }, ConsistentRead: true }));
+            const recorded = await regionalDb.send(new GetCommand({ TableName: requiredResourceName("TABLE_TRANSACTIONS"), Key: { billId }, ConsistentRead: true }));
             if (recorded.Item?.paymentIntentId !== paymentIntent.id) throw recordErr;
         }
         safeError(`[WEBHOOK] Payment ${billId} has no ledger row; recorded for reconciliation`);
@@ -441,7 +440,7 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
             if (!settledDebt) {
                 // Money was captured for a fill that can no longer be collected: record it and flag it for refund review.
                 const flagged = await regionalDb.send(new UpdateCommand({
-                    TableName: TABLE_TRANSACTIONS,
+                    TableName: requiredResourceName("TABLE_TRANSACTIONS"),
                     Key: { billId },
                     UpdateExpression: "SET #s = :s, paymentIntentId = :pid, paidAt = :now, reviewReason = :reason",
                     ConditionExpression: PAYABLE_BILL_CONDITION,
@@ -543,7 +542,7 @@ async function settleCollectedFillDebt(regionalDb: ReturnType<typeof getRegional
     // Both records were read consistently; the patient index is not, and may still list a bill that has since changed.
     if (typeof rx.patientId !== 'string' || bill?.patientId !== rx.patientId) return false;
     // A bill already flagged for review is PAID but still one of the bills this payment could be doubling.
-    const debts = (await findPrescriptionBills(regionalDb, TABLE_TRANSACTIONS, rx.patientId, prescriptionId))
+    const debts = (await findPrescriptionBills(regionalDb, requiredResourceName("TABLE_TRANSACTIONS"), rx.patientId, prescriptionId))
         .filter(row => (SETTLEABLE_BILL_STATUSES.includes(row.status) || row.reviewReason !== undefined)
             && !(typeof row.createdAt === 'string' && row.createdAt > handover));
     if (debts.length !== 1 || debts[0].billId !== billId) return false;
@@ -551,7 +550,7 @@ async function settleCollectedFillDebt(regionalDb: ReturnType<typeof getRegional
     try {
         await regionalDb.send(new TransactWriteCommand({ TransactItems: [
             { Update: {
-                TableName: TABLE_TRANSACTIONS, Key: { billId },
+                TableName: requiredResourceName("TABLE_TRANSACTIONS"), Key: { billId },
                 UpdateExpression: "SET #s = :s, paymentIntentId = :pid, paidAt = :now",
                 // A bill already under refund review stays a refund case even if a later event made it look payable again.
                 ConditionExpression: `${PAYABLE_BILL_CONDITION} AND attribute_not_exists(reviewReason)`,
@@ -615,7 +614,7 @@ async function handleChargeRefunded(charge: Stripe.Charge, regionalDb: any, regi
         if (billId) {
             transactItems.push({
                 Update: {
-                    TableName: TABLE_TRANSACTIONS,
+                    TableName: requiredResourceName("TABLE_TRANSACTIONS"),
                     Key: { billId },
                     UpdateExpression: "SET #s = :s, refundedAt = :now, refundId = :rid",
                     ExpressionAttributeNames: { "#s": "status" },
@@ -730,7 +729,7 @@ async function handleRefundFailed(refund: Stripe.Refund, regionalDb: ReturnType<
                 }
             }, {
                 Update: {
-                    TableName: TABLE_TRANSACTIONS, Key: { billId: refundBillId(appointmentId) },
+                    TableName: requiredResourceName("TABLE_TRANSACTIONS"), Key: { billId: refundBillId(appointmentId) },
                     UpdateExpression: 'SET #s = :failed, refundStatus = :manual, refundFailedAt = :now',
                     ConditionExpression: 'refundId = :rid',
                     ExpressionAttributeNames: { '#s': 'status' },
@@ -776,7 +775,7 @@ async function handleDisputeCreated(dispute: Stripe.Dispute, regionalDb: any, re
     if (billId) {
         try {
             await regionalDb.send(new UpdateCommand({
-                TableName: TABLE_TRANSACTIONS,
+                TableName: requiredResourceName("TABLE_TRANSACTIONS"),
                 Key: { billId },
                 UpdateExpression: 'SET #s = :s, disputeId = :did, disputeReason = :reason, disputedAt = :now',
                 ExpressionAttributeNames: { '#s': 'status' },
@@ -841,7 +840,7 @@ async function handleDisputeClosed(dispute: Stripe.Dispute, regionalDb: any, reg
     if (billId) {
         try {
             await regionalDb.send(new UpdateCommand({
-                TableName: TABLE_TRANSACTIONS,
+                TableName: requiredResourceName("TABLE_TRANSACTIONS"),
                 Key: { billId },
                 UpdateExpression: 'SET #s = :s, disputeResolvedAt = :now, disputeOutcome = :outcome',
                 ExpressionAttributeNames: { '#s': 'status' },

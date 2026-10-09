@@ -1,0 +1,2 @@
+# HCL2 parser used by verify_app_vs_iac.sh; install before the audit.
+bc-python-hcl2==0.4.3

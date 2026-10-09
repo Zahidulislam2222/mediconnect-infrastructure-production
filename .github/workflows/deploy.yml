@@ -63,10 +63,10 @@ jobs:
     needs: [authorization-gate]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version-file: backend_v2/.node-version
           cache: npm
           cache-dependency-path: backend_v2/package-lock.json
       - run: cd backend_v2 && npm ci
@@ -95,12 +95,18 @@ jobs:
           }
       - name: Upload audit report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: npm-audit-report
           path: backend_v2/audit-report.json
           if-no-files-found: ignore
           retention-days: 30
+
+      - name: Install Terraform source audit parser
+        run: python -m pip install -r scripts/requirements-resource-audit.txt
+
+      - name: Test Terraform declaration discovery
+        run: python -m unittest discover -s scripts/tests -p "test_dynamodb_declarations.py"
 
       # --- IaC Coverage Check (App Code vs Terraform) ---
       - name: Verify app resources have Terraform coverage
@@ -130,11 +136,11 @@ jobs:
           - service: dicom-service
             port: 8005
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       # --- Azure ACR (only when AKS enabled) ---
       - if: vars.DEPLOY_AKS == 'true'
-        uses: azure/login@v1
+        uses: azure/login@cb79c773a3cfa27f31f25eb3f677781210c9ce3d # v1
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -144,7 +150,7 @@ jobs:
 
       # --- AWS ECR (only when EKS enabled) ---
       - if: vars.DEPLOY_EKS == 'true'
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: eu-central-1
@@ -153,19 +159,23 @@ jobs:
 
       # --- GCP GAR (showcase is off unless DEPLOY_GCP=true) ---
       - if: vars.DEPLOY_GCP == 'true'
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
       - if: vars.DEPLOY_GCP == 'true'
-        uses: google-github-actions/setup-gcloud@v2
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
       - if: vars.DEPLOY_GCP == 'true'
         run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
 
       - name: "Build and push container image"
         run: |
           TAG=${{ github.sha }}
-          docker build -t local-img -f backend_v2/${{ matrix.service }}/Dockerfile .
+          BUILD_ARGS=()
+          if [ "${{ matrix.service }}" == "booking-service" ]; then
+            BUILD_ARGS+=(--build-arg "NODE_VERSION=$(cat backend_v2/.node-version)")
+          fi
+          docker build "${BUILD_ARGS[@]}" -t local-img -f backend_v2/${{ matrix.service }}/Dockerfile .
 
           # GCP Artifact Registry (only when explicitly enabled)
           if [ "${{ vars.DEPLOY_GCP }}" == "true" ]; then
@@ -193,17 +203,17 @@ jobs:
     if: vars.DEPLOY_AKS == 'true' || vars.DEPLOY_EKS == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - if: vars.DEPLOY_AKS == 'true'
-        uses: azure/login@v1
+        uses: azure/login@cb79c773a3cfa27f31f25eb3f677781210c9ce3d # v1
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - if: vars.DEPLOY_EKS == 'true'
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: eu-central-1
@@ -287,17 +297,42 @@ jobs:
           - service: dicom-service
             port: 8005
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: matrix.service == 'booking-service'
+        with:
+          node-version-file: backend_v2/.node-version
+      - name: Build booking configuration preflight
+        if: matrix.service == 'booking-service'
+        run: |
+          npm --prefix backend_v2 ci
+          npm --prefix backend_v2/booking-service run build
+      - name: Validate booking US startup configuration
+        if: matrix.service == 'booking-service' && vars.DEPLOY_AKS == 'true'
+        env:
+          TABLE_PATIENTS: ${{ vars.STAGING_BOOKING_TABLE_PATIENTS_US }}
+          TABLE_TRANSACTIONS: ${{ vars.STAGING_BOOKING_TABLE_TRANSACTIONS_US }}
+          CANCELLATION_CLAIM_TTL_SECONDS: ${{ vars.STAGING_BOOKING_CANCELLATION_CLAIM_TTL_SECONDS_US }}
+          CANCELLATION_REFUND_MAX_PAGES: ${{ vars.STAGING_BOOKING_CANCELLATION_REFUND_MAX_PAGES_US }}
+        run: node backend_v2/scripts/verify_booking_startup_settings.mjs
+      - name: Validate booking EU startup configuration
+        if: matrix.service == 'booking-service' && vars.DEPLOY_EKS == 'true'
+        env:
+          TABLE_PATIENTS: ${{ vars.STAGING_BOOKING_TABLE_PATIENTS_EU }}
+          TABLE_TRANSACTIONS: ${{ vars.STAGING_BOOKING_TABLE_TRANSACTIONS_EU }}
+          CANCELLATION_CLAIM_TTL_SECONDS: ${{ vars.STAGING_BOOKING_CANCELLATION_CLAIM_TTL_SECONDS_EU }}
+          CANCELLATION_REFUND_MAX_PAGES: ${{ vars.STAGING_BOOKING_CANCELLATION_REFUND_MAX_PAGES_EU }}
+        run: node backend_v2/scripts/verify_booking_startup_settings.mjs
 
       - if: vars.DEPLOY_AKS == 'true'
-        uses: azure/login@v1
+        uses: azure/login@cb79c773a3cfa27f31f25eb3f677781210c9ce3d # v1
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - if: vars.DEPLOY_EKS == 'true'
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: eu-central-1
@@ -326,9 +361,18 @@ jobs:
 
       - name: "Deploy to AKS Staging"
         if: vars.DEPLOY_AKS == 'true'
+        env:
+          TABLE_PATIENTS: ${{ vars.STAGING_BOOKING_TABLE_PATIENTS_US }}
+          TABLE_TRANSACTIONS: ${{ vars.STAGING_BOOKING_TABLE_TRANSACTIONS_US }}
+          CANCELLATION_CLAIM_TTL_SECONDS: ${{ vars.STAGING_BOOKING_CANCELLATION_CLAIM_TTL_SECONDS_US }}
+          CANCELLATION_REFUND_MAX_PAGES: ${{ vars.STAGING_BOOKING_CANCELLATION_REFUND_MAX_PAGES_US }}
         run: |
           IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
+              -e "s|__TABLE_PATIENTS__|${TABLE_PATIENTS}|g" \
+              -e "s|__TABLE_TRANSACTIONS__|${TABLE_TRANSACTIONS}|g" \
+              -e "s|__CANCELLATION_CLAIM_TTL_SECONDS__|${CANCELLATION_CLAIM_TTL_SECONDS}|g" \
+              -e "s|__CANCELLATION_REFUND_MAX_PAGES__|${CANCELLATION_REFUND_MAX_PAGES}|g" \
               -e "s|__PUBLIC_DOMAIN__|staging-${{ vars.AKS_DOMAIN }}|g" \
               -e "s|__AWS_REGION__|us-east-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
@@ -340,9 +384,18 @@ jobs:
 
       - name: "Deploy to EKS Staging"
         if: vars.DEPLOY_EKS == 'true'
+        env:
+          TABLE_PATIENTS: ${{ vars.STAGING_BOOKING_TABLE_PATIENTS_EU }}
+          TABLE_TRANSACTIONS: ${{ vars.STAGING_BOOKING_TABLE_TRANSACTIONS_EU }}
+          CANCELLATION_CLAIM_TTL_SECONDS: ${{ vars.STAGING_BOOKING_CANCELLATION_CLAIM_TTL_SECONDS_EU }}
+          CANCELLATION_REFUND_MAX_PAGES: ${{ vars.STAGING_BOOKING_CANCELLATION_REFUND_MAX_PAGES_EU }}
         run: |
           IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
+              -e "s|__TABLE_PATIENTS__|${TABLE_PATIENTS}|g" \
+              -e "s|__TABLE_TRANSACTIONS__|${TABLE_TRANSACTIONS}|g" \
+              -e "s|__CANCELLATION_CLAIM_TTL_SECONDS__|${CANCELLATION_CLAIM_TTL_SECONDS}|g" \
+              -e "s|__CANCELLATION_REFUND_MAX_PAGES__|${CANCELLATION_REFUND_MAX_PAGES}|g" \
               -e "s|__PUBLIC_DOMAIN__|staging-${{ vars.EKS_DOMAIN }}|g" \
               -e "s|__AWS_REGION__|eu-central-1|g" \
               -e "s|__MIN_REPLICAS__|1|g" \
@@ -390,17 +443,42 @@ jobs:
           - service: dicom-service
             port: 8005
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: matrix.service == 'booking-service'
+        with:
+          node-version-file: backend_v2/.node-version
+      - name: Build booking configuration preflight
+        if: matrix.service == 'booking-service'
+        run: |
+          npm --prefix backend_v2 ci
+          npm --prefix backend_v2/booking-service run build
+      - name: Validate booking US startup configuration
+        if: matrix.service == 'booking-service' && vars.DEPLOY_AKS == 'true'
+        env:
+          TABLE_PATIENTS: ${{ vars.BOOKING_TABLE_PATIENTS_US }}
+          TABLE_TRANSACTIONS: ${{ vars.BOOKING_TABLE_TRANSACTIONS_US }}
+          CANCELLATION_CLAIM_TTL_SECONDS: ${{ vars.BOOKING_CANCELLATION_CLAIM_TTL_SECONDS_US }}
+          CANCELLATION_REFUND_MAX_PAGES: ${{ vars.BOOKING_CANCELLATION_REFUND_MAX_PAGES_US }}
+        run: node backend_v2/scripts/verify_booking_startup_settings.mjs
+      - name: Validate booking EU startup configuration
+        if: matrix.service == 'booking-service' && vars.DEPLOY_EKS == 'true'
+        env:
+          TABLE_PATIENTS: ${{ vars.BOOKING_TABLE_PATIENTS_EU }}
+          TABLE_TRANSACTIONS: ${{ vars.BOOKING_TABLE_TRANSACTIONS_EU }}
+          CANCELLATION_CLAIM_TTL_SECONDS: ${{ vars.BOOKING_CANCELLATION_CLAIM_TTL_SECONDS_EU }}
+          CANCELLATION_REFUND_MAX_PAGES: ${{ vars.BOOKING_CANCELLATION_REFUND_MAX_PAGES_EU }}
+        run: node backend_v2/scripts/verify_booking_startup_settings.mjs
 
       - if: vars.DEPLOY_AKS == 'true'
-        uses: azure/login@v1
+        uses: azure/login@cb79c773a3cfa27f31f25eb3f677781210c9ce3d # v1
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - if: vars.DEPLOY_EKS == 'true'
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: eu-central-1
@@ -429,9 +507,18 @@ jobs:
 
       - name: "Deploy to AKS Production"
         if: vars.DEPLOY_AKS == 'true'
+        env:
+          TABLE_PATIENTS: ${{ vars.BOOKING_TABLE_PATIENTS_US }}
+          TABLE_TRANSACTIONS: ${{ vars.BOOKING_TABLE_TRANSACTIONS_US }}
+          CANCELLATION_CLAIM_TTL_SECONDS: ${{ vars.BOOKING_CANCELLATION_CLAIM_TTL_SECONDS_US }}
+          CANCELLATION_REFUND_MAX_PAGES: ${{ vars.BOOKING_CANCELLATION_REFUND_MAX_PAGES_US }}
         run: |
           IMAGE=${{ env.AZURE_ACR }}/${{ matrix.service }}:${{ github.sha }}
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
+              -e "s|__TABLE_PATIENTS__|${TABLE_PATIENTS}|g" \
+              -e "s|__TABLE_TRANSACTIONS__|${TABLE_TRANSACTIONS}|g" \
+              -e "s|__CANCELLATION_CLAIM_TTL_SECONDS__|${CANCELLATION_CLAIM_TTL_SECONDS}|g" \
+              -e "s|__CANCELLATION_REFUND_MAX_PAGES__|${CANCELLATION_REFUND_MAX_PAGES}|g" \
               -e "s|__PUBLIC_DOMAIN__|${{ vars.AKS_DOMAIN }}|g" \
               -e "s|__DOCTOR_SERVICE_URL__|${{ vars.AKS_DOMAIN }}|g" \
               -e "s|__GOOGLE_CLIENT_ID__|${{ secrets.GCP_CLIENT_ID }}|g" \
@@ -447,9 +534,18 @@ jobs:
 
       - name: "Deploy to EKS Production"
         if: vars.DEPLOY_EKS == 'true'
+        env:
+          TABLE_PATIENTS: ${{ vars.BOOKING_TABLE_PATIENTS_EU }}
+          TABLE_TRANSACTIONS: ${{ vars.BOOKING_TABLE_TRANSACTIONS_EU }}
+          CANCELLATION_CLAIM_TTL_SECONDS: ${{ vars.BOOKING_CANCELLATION_CLAIM_TTL_SECONDS_EU }}
+          CANCELLATION_REFUND_MAX_PAGES: ${{ vars.BOOKING_CANCELLATION_REFUND_MAX_PAGES_EU }}
         run: |
           IMAGE=${{ env.AWS_ECR }}/${{ matrix.service }}:${{ github.sha }}
           sed -e "s|__IMAGE_URI__|$IMAGE|g" \
+              -e "s|__TABLE_PATIENTS__|${TABLE_PATIENTS}|g" \
+              -e "s|__TABLE_TRANSACTIONS__|${TABLE_TRANSACTIONS}|g" \
+              -e "s|__CANCELLATION_CLAIM_TTL_SECONDS__|${CANCELLATION_CLAIM_TTL_SECONDS}|g" \
+              -e "s|__CANCELLATION_REFUND_MAX_PAGES__|${CANCELLATION_REFUND_MAX_PAGES}|g" \
               -e "s|__PUBLIC_DOMAIN__|${{ vars.EKS_DOMAIN }}|g" \
               -e "s|__DOCTOR_SERVICE_URL__|${{ vars.EKS_DOMAIN }}|g" \
               -e "s|__GOOGLE_CLIENT_ID__|${{ secrets.GCP_CLIENT_ID }}|g" \
@@ -518,11 +614,37 @@ jobs:
             port: 8005
             memory: 512Mi
     steps:
-      - uses: google-github-actions/auth@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: matrix.service == 'booking-service'
+        with:
+          node-version-file: backend_v2/.node-version
+      - name: Build booking configuration preflight
+        if: matrix.service == 'booking-service'
+        run: |
+          npm --prefix backend_v2 ci
+          npm --prefix backend_v2/booking-service run build
+      - name: Validate booking US startup configuration
+        if: matrix.service == 'booking-service'
+        env:
+          TABLE_PATIENTS: ${{ vars.BOOKING_TABLE_PATIENTS_US }}
+          TABLE_TRANSACTIONS: ${{ vars.BOOKING_TABLE_TRANSACTIONS_US }}
+          CANCELLATION_CLAIM_TTL_SECONDS: ${{ vars.BOOKING_CANCELLATION_CLAIM_TTL_SECONDS_US }}
+          CANCELLATION_REFUND_MAX_PAGES: ${{ vars.BOOKING_CANCELLATION_REFUND_MAX_PAGES_US }}
+        run: node backend_v2/scripts/verify_booking_startup_settings.mjs
+      - name: Validate booking EU startup configuration
+        if: matrix.service == 'booking-service'
+        env:
+          TABLE_PATIENTS: ${{ vars.BOOKING_TABLE_PATIENTS_EU }}
+          TABLE_TRANSACTIONS: ${{ vars.BOOKING_TABLE_TRANSACTIONS_EU }}
+          CANCELLATION_CLAIM_TTL_SECONDS: ${{ vars.BOOKING_CANCELLATION_CLAIM_TTL_SECONDS_EU }}
+          CANCELLATION_REFUND_MAX_PAGES: ${{ vars.BOOKING_CANCELLATION_REFUND_MAX_PAGES_EU }}
+        run: node backend_v2/scripts/verify_booking_startup_settings.mjs
+      - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_EMAIL }}
-      - uses: google-github-actions/setup-gcloud@v2
+      - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
 
       - name: "Resolve service role ARN"
         id: role
@@ -538,7 +660,16 @@ jobs:
           esac
 
       - name: "Deploy to Cloud Run (US – us-central1)"
+        env:
+          TABLE_PATIENTS: ${{ vars.BOOKING_TABLE_PATIENTS_US }}
+          TABLE_TRANSACTIONS: ${{ vars.BOOKING_TABLE_TRANSACTIONS_US }}
+          CANCELLATION_CLAIM_TTL_SECONDS: ${{ vars.BOOKING_CANCELLATION_CLAIM_TTL_SECONDS_US }}
+          CANCELLATION_REFUND_MAX_PAGES: ${{ vars.BOOKING_CANCELLATION_REFUND_MAX_PAGES_US }}
         run: |
+          BOOKING_ENV=""
+          if [ "${{ matrix.service }}" = "booking-service" ]; then
+            BOOKING_ENV=",TABLE_PATIENTS=${TABLE_PATIENTS},TABLE_TRANSACTIONS=${TABLE_TRANSACTIONS},CANCELLATION_CLAIM_TTL_SECONDS=${CANCELLATION_CLAIM_TTL_SECONDS},CANCELLATION_REFUND_MAX_PAGES=${CANCELLATION_REFUND_MAX_PAGES}"
+          fi
           gcloud run deploy ${{ matrix.service }}-us-backup \
             --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region us-central1 \
@@ -551,12 +682,21 @@ jobs:
             --concurrency 80 \
             --timeout 300 \
             --no-cpu-boost \
-            --set-env-vars "NODE_ENV=production,AWS_REGION=us-east-1,AWS_ROLE_ARN=${{ steps.role.outputs.arn }},AWS_EC2_METADATA_DISABLED=true,DOCTOR_SERVICE_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},API_PUBLIC_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},GOOGLE_CLIENT_ID=${{ secrets.GCP_CLIENT_ID }},GOOGLE_CLIENT_SECRET=${{ secrets.GCP_CLIENT_SECRET }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }},COGNITO_USER_POOL_ID_US=${{ secrets.COGNITO_USER_POOL_ID_US }},COGNITO_CLIENT_ID_US_PATIENT=${{ secrets.COGNITO_CLIENT_ID_US_PATIENT }},COGNITO_CLIENT_ID_US_DOCTOR=${{ secrets.COGNITO_CLIENT_ID_US_DOCTOR }},COGNITO_CLIENT_ID_US_ADMIN=${{ secrets.COGNITO_CLIENT_ID_US_ADMIN }},COGNITO_CLIENT_ID_US_STAFF=${{ secrets.COGNITO_CLIENT_ID_US_STAFF }}" \
+            --set-env-vars "NODE_ENV=production,AWS_REGION=us-east-1,AWS_ROLE_ARN=${{ steps.role.outputs.arn }},AWS_EC2_METADATA_DISABLED=true,DOCTOR_SERVICE_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},API_PUBLIC_URL=${{ vars.GCP_DOCTOR_US_DOMAIN }},GOOGLE_CLIENT_ID=${{ secrets.GCP_CLIENT_ID }},GOOGLE_CLIENT_SECRET=${{ secrets.GCP_CLIENT_SECRET }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }},COGNITO_USER_POOL_ID_US=${{ secrets.COGNITO_USER_POOL_ID_US }},COGNITO_CLIENT_ID_US_PATIENT=${{ secrets.COGNITO_CLIENT_ID_US_PATIENT }},COGNITO_CLIENT_ID_US_DOCTOR=${{ secrets.COGNITO_CLIENT_ID_US_DOCTOR }},COGNITO_CLIENT_ID_US_ADMIN=${{ secrets.COGNITO_CLIENT_ID_US_ADMIN }},COGNITO_CLIENT_ID_US_STAFF=${{ secrets.COGNITO_CLIENT_ID_US_STAFF }}${BOOKING_ENV}" \
             --platform managed \
             --allow-unauthenticated
 
       - name: "Deploy to Cloud Run (EU – europe-west3)"
+        env:
+          TABLE_PATIENTS: ${{ vars.BOOKING_TABLE_PATIENTS_EU }}
+          TABLE_TRANSACTIONS: ${{ vars.BOOKING_TABLE_TRANSACTIONS_EU }}
+          CANCELLATION_CLAIM_TTL_SECONDS: ${{ vars.BOOKING_CANCELLATION_CLAIM_TTL_SECONDS_EU }}
+          CANCELLATION_REFUND_MAX_PAGES: ${{ vars.BOOKING_CANCELLATION_REFUND_MAX_PAGES_EU }}
         run: |
+          BOOKING_ENV=""
+          if [ "${{ matrix.service }}" = "booking-service" ]; then
+            BOOKING_ENV=",TABLE_PATIENTS=${TABLE_PATIENTS},TABLE_TRANSACTIONS=${TABLE_TRANSACTIONS},CANCELLATION_CLAIM_TTL_SECONDS=${CANCELLATION_CLAIM_TTL_SECONDS},CANCELLATION_REFUND_MAX_PAGES=${CANCELLATION_REFUND_MAX_PAGES}"
+          fi
           gcloud run deploy ${{ matrix.service }}-eu-backup \
             --image ${{ env.GCP_GAR }}/${{ matrix.service }}:${{ github.sha }} \
             --region europe-west3 \
@@ -569,7 +709,7 @@ jobs:
             --concurrency 80 \
             --timeout 300 \
             --no-cpu-boost \
-            --set-env-vars "NODE_ENV=production,AWS_REGION=eu-central-1,AWS_ROLE_ARN=${{ steps.role.outputs.arn }},AWS_EC2_METADATA_DISABLED=true,DOCTOR_SERVICE_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},API_PUBLIC_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},GOOGLE_CLIENT_ID=${{ secrets.GCP_CLIENT_ID }},GOOGLE_CLIENT_SECRET=${{ secrets.GCP_CLIENT_SECRET }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }},COGNITO_USER_POOL_ID_EU=${{ secrets.COGNITO_USER_POOL_ID_EU }},COGNITO_CLIENT_ID_EU_PATIENT=${{ secrets.COGNITO_CLIENT_ID_EU_PATIENT }},COGNITO_CLIENT_ID_EU_DOCTOR=${{ secrets.COGNITO_CLIENT_ID_EU_DOCTOR }},COGNITO_CLIENT_ID_EU_ADMIN=${{ secrets.COGNITO_CLIENT_ID_EU_ADMIN }},COGNITO_CLIENT_ID_EU_STAFF=${{ secrets.COGNITO_CLIENT_ID_EU_STAFF }}" \
+            --set-env-vars "NODE_ENV=production,AWS_REGION=eu-central-1,AWS_ROLE_ARN=${{ steps.role.outputs.arn }},AWS_EC2_METADATA_DISABLED=true,DOCTOR_SERVICE_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},API_PUBLIC_URL=${{ vars.GCP_DOCTOR_EU_DOMAIN }},GOOGLE_CLIENT_ID=${{ secrets.GCP_CLIENT_ID }},GOOGLE_CLIENT_SECRET=${{ secrets.GCP_CLIENT_SECRET }},ALLOWED_ORIGINS=${{ vars.ALLOWED_ORIGINS }},COGNITO_USER_POOL_ID_EU=${{ secrets.COGNITO_USER_POOL_ID_EU }},COGNITO_CLIENT_ID_EU_PATIENT=${{ secrets.COGNITO_CLIENT_ID_EU_PATIENT }},COGNITO_CLIENT_ID_EU_DOCTOR=${{ secrets.COGNITO_CLIENT_ID_EU_DOCTOR }},COGNITO_CLIENT_ID_EU_ADMIN=${{ secrets.COGNITO_CLIENT_ID_EU_ADMIN }},COGNITO_CLIENT_ID_EU_STAFF=${{ secrets.COGNITO_CLIENT_ID_EU_STAFF }}${BOOKING_ENV}" \
             --platform managed \
             --allow-unauthenticated
 
@@ -608,12 +748,12 @@ jobs:
     if: vars.DEPLOY_LAMBDAS == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22
+          node-version-file: backend_v2/.node-version
 
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
         with:
           role-to-assume: ${{ secrets.AWS_OIDC_ROLE_ARN }}
           aws-region: us-east-1

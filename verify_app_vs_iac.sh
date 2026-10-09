@@ -122,6 +122,19 @@ DYNAMO_TABLES_APP=(
   "mediconnect-pharmacy-inventory"
 )
 
+# Include typed environment resource references from the maintained registry.
+# Quoted-literal scans cannot discover identifiers supplied only by configuration.
+mapfile -t REGISTERED_DYNAMO_TABLES < <(awk '
+  /^dynamodb:/ { inside = 1; next }
+  inside && /^[^[:space:]#]/ { exit }
+  inside && /^  - name: / { name = $3 }
+  inside && /^    env_var:/ { print name }
+' "$REPO_ROOT/resource-registry.yaml")
+if [ "${#REGISTERED_DYNAMO_TABLES[@]}" -eq 0 ]; then
+  fail "DynamoDB registry is missing or has no environment resource mappings"
+fi
+mapfile -t DYNAMO_TABLES_APP < <(printf '%s\n' "${DYNAMO_TABLES_APP[@]}" "${REGISTERED_DYNAMO_TABLES[@]}" | sort -u)
+
 # Also extract dynamically from code to catch any we missed
 DYNAMO_TABLES_CODE=$(grep -roh "${SOURCE_GREP_EXCLUDES[@]}" '"mediconnect-[a-z][a-z0-9_-]*"' "$BACKEND" --include="*.ts" --include="*.py" 2>/dev/null | tr -d '"' | sort -u)
 DYNAMO_TABLES_LAMBDA=$(for f in $(find "$LAMBDAS" -maxdepth 2 \( -name "index.mjs" -o -name "lambda_function.py" -o -name "handler.py" \) 2>/dev/null); do grep -oh '"mediconnect-[a-z][a-z0-9_-]*"' "$f" 2>/dev/null; done | tr -d '"' | sort -u)
@@ -135,12 +148,23 @@ NON_TABLE_PATTERN="fhir-server|identity-verification|drug-cache|data-lake-dlq"
 DDB_TF_US="$TF_DIR/dynamodb_us.tf"
 DDB_TF_EU="$TF_DIR/dynamodb_eu.tf"
 
+if ! DDB_DECLARED_US=$(python "$REPO_ROOT/scripts/read_dynamodb_declarations.py" "$DDB_TF_US" dynamodb_us); then
+  fail "DynamoDB US: cannot parse regional table declarations"
+  DDB_DECLARED_US=""
+fi
+if ! DDB_DECLARED_EU=$(python "$REPO_ROOT/scripts/read_dynamodb_declarations.py" "$DDB_TF_EU" dynamodb_eu); then
+  fail "DynamoDB EU: cannot parse regional table declarations"
+  DDB_DECLARED_EU=""
+fi
 for table in "${DYNAMO_TABLES_APP[@]}"; do
-  if in_tf "$table" "$DDB_TF_US" "$DDB_TF_EU"; then
-    pass "DynamoDB: $table"
-  else
-    fail "DynamoDB: $table — referenced in app but NOT in Terraform"
-  fi
+  for region in US EU; do
+    if [ "$region" = US ]; then declared="$DDB_DECLARED_US"; else declared="$DDB_DECLARED_EU"; fi
+    if printf '%s\n' "$declared" | grep -Fxq -- "$table"; then
+      pass "DynamoDB $region: $table"
+    else
+      fail "DynamoDB $region: $table — referenced in app but NOT in regional Terraform"
+    fi
+  done
 done
 
 # ============================================================================

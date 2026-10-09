@@ -16,7 +16,7 @@ import { safeError } from '../../../shared/logger';
 import { publishEvent, EventType } from '../../../shared/event-bus';
 import { decryptPHI } from '../../../shared/kms-crypto';
 import { sendNotification } from '../../../shared/notifications';
-import { setting } from '../../../shared/settings';
+import { requiredResourceName, setting } from '../../../shared/settings';
 import {
     REMINDER_CLAIM_TIMEOUT_MS, REMINDER_COPY, REMINDER_FALLBACK_TIME_ZONE, REMINDER_FALLBACKS, REMINDER_TEMPLATES,
     REMINDER_WINDOWS, SMS_MAX_LENGTH, SMS_SENDER_ID, type ReminderChannel, type ReminderType
@@ -24,7 +24,6 @@ import {
 
 const TABLE_APPOINTMENTS = setting("TABLE_APPOINTMENTS");
 const TABLE_REMINDERS = setting("TABLE_REMINDERS");
-const TABLE_PATIENTS = setting("TABLE_PATIENTS");
 const TABLE_DOCTORS = setting("TABLE_DOCTORS");
 
 type Db = ReturnType<typeof getRegionalClient>;
@@ -76,7 +75,7 @@ function participant(user: any, appointment: any): 'doctor' | 'patient' | undefi
 async function patientContact(db: Db, patientId: unknown, region: string): Promise<PatientContact> {
     if (typeof patientId !== 'string' || !patientId) return {};
     const { Item } = await db.send(new GetCommand({
-        TableName: TABLE_PATIENTS, Key: { patientId },
+        TableName: requiredResourceName("TABLE_PATIENTS"), Key: { patientId },
         ProjectionExpression: '#name, phone, email', ExpressionAttributeNames: { '#name': 'name' },
     }));
     const fields = await decryptPHI({ name: stored(Item?.name), phone: stored(Item?.phone), email: stored(Item?.email) }, region);

@@ -97,3 +97,6 @@ cloud-vs-code-*.md
 !README.md
 !compliance/*.md
 !backend_v2/**/docs/*.md
+
+# Reviewed public registry cleanup policy; other JSON exclusions remain.
+!environments/prod/config/artifact-retention.json
