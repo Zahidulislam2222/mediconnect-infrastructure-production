@@ -4,7 +4,14 @@ import process from "node:process";
 
 const backendRoot = path.resolve(import.meta.dirname, "..");
 const repositoryRoot = path.resolve(backendRoot, "..");
-const frontendRoot = path.resolve(repositoryRoot, "..", "mediconnect-hub");
+const scopeArguments = process.argv.slice(2);
+if (scopeArguments.length !== 0 &&
+    (scopeArguments.length !== 2 || scopeArguments[0] !== "--frontend-root" || !scopeArguments[1].trim())) {
+  throw new Error("Usage: node scripts/verify_config_boundary.mjs [--frontend-root PATH]");
+}
+// Standalone checkouts own backend coverage. Explicit client scope must fail
+// if its requested checkout or configuration is missing.
+const frontendRoot = scopeArguments.length === 2 ? path.resolve(scopeArguments[1]) : null;
 
 const forbiddenResourceNames = [
   "mediconnect-drug-interactions",
@@ -123,12 +130,12 @@ const backendReferences = collectMatches(maintainedBackendFiles, [
   // configuration names even when the helper call receives a variable.
   /["'](MODEL_[A-Z0-9_]+)["']/g,
 ]);
-const frontendReferences = collectMatches(
+const frontendReferences = frontendRoot === null ? new Set() : collectMatches(
   [path.join(frontendRoot, "src", "config", "env.ts")],
   [/["'](VITE_[A-Z0-9_]+)["']/g],
 );
 
-for (const file of walk(path.join(frontendRoot, "src"), new Set([".ts", ".tsx"]))) {
+for (const file of frontendRoot === null ? [] : walk(path.join(frontendRoot, "src"), new Set([".ts", ".tsx"]))) {
   if (file.endsWith(path.join("src", "config", "env.ts"))) continue;
   // The frontend's own boundary audit holds bypass examples as string fixtures.
   if (file.endsWith(path.join("src", "config", "configuration-boundary.test.ts"))) continue;
@@ -138,7 +145,7 @@ for (const file of walk(path.join(frontendRoot, "src"), new Set([".ts", ".tsx"])
 }
 
 const backendExample = envKeys(path.join(backendRoot, ".env.example"));
-const frontendExample = envKeys(path.join(frontendRoot, ".env.example"));
+const frontendExample = frontendRoot === null ? new Set() : envKeys(path.join(frontendRoot, ".env.example"));
 
 for (const name of backendReferences) {
   if (!backendExample.has(name)) failures.push(`backend .env.example is missing ${name}`);
@@ -154,5 +161,7 @@ if (failures.length > 0) {
 }
 
 console.log(
-  `Configuration-boundary verification passed: ${backendReferences.size} backend and ${frontendReferences.size} frontend variables documented; scattered fallbacks, direct frontend env reads, obvious secret patterns, and 9 forbidden resource literals absent from maintained source.`,
+  `Configuration-boundary verification passed: ${backendReferences.size} backend` +
+    (frontendRoot === null ? " variables documented; frontend audit not requested" : ` and ${frontendReferences.size} frontend variables documented`) +
+    "; configured-scope fallback, environment-documentation, obvious-secret and forbidden-resource checks passed.",
 );
