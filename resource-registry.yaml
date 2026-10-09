@@ -1122,10 +1122,12 @@ phase2_backend_contract_audit_20261009:
   local_gates: "201backendtests,types/build,lint0errors1043existingwarnings,security PASS; isolated/backend188 and explicitfrontend54 audit PASS; app-vs-IaC129/0/0,inert migration guards,Terraformvalidate PASS"
   resources_added: false
   runtime_code_changed: false
-  cloud_mutations: false
+  cloud_mutations: true
+  cloud_execution: "Owner-approved bounded recovery: three prerequisite APIs enabled; pilot SSH enabled then disabled; original14 runtime/template/traffic snapshots unchanged"
   deployment_performed: false
   publication: "Independent eight-file tooling review APPROVE; owner-authorized publication; whole-phase release blocked by live parity"
   registry_cleanup_observed: "Enforced DELETE older than14days, tagged and untagged, no KEEP policy; empty repository. Deletion cause/actor not proven by audit evidence."
   live_health: "Metadata Ready only; existing seven-day request/error queries returned no records; functional verification absent"
-  recovery_constraints: "No service explicitly SSH-enabled; generation unverified. SSH requires owner-run enablement and spending review; no session started."
+  recovery_constraints: "Pilot tunnel rejected with environment guidance; generation remains unverified. SSH disabled again; no shell/file recovery. Original revision image metadata14/14 read successfully; image export pending automatic-approval cost gate."
+  image_metadata: "Seven original image manifests measured; paired regional image digests and metadata hashes agree. Metadata is not recovered source or functional acceptance."
   phase_complete: false
