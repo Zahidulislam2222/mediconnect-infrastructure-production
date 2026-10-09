@@ -17,8 +17,8 @@
 # native inventory proves them live.
 # ============================================================================
 
-last_updated: "2026-10-09T00:08:35.672315+00:00"
-last_verified_by: "verify_app_vs_iac.sh (129 PASS / 0 FAIL / 0 WARN)"
+last_updated: "2026-10-09T05:28:39.364948+00:00"
+last_verified_by: "Phase2 sourceaudit177/0/0;216Node24/Node22 tests/types/build; active regional118hash/HTTP parity; fresh reviews PASS"
 
 operations_continuation_20260928:
   status: "LOCAL_VERIFIED_INDEPENDENT_REVIEW_DEFERRED_BY_OWNER"
@@ -37,7 +37,7 @@ operations_continuation_20260928:
   deployed: false
   paid_calls: 0
 
-operating_mode: "SHOWCASE_REFERENCE - retirement is not fully verified; 14 inventoried Cloud Run services report Ready metadata; functional health and file parity unverified; no apply authorized"
+operating_mode: "SHOWCASE_REFERENCE; exact owner-approved Phase2 tables/policy and two booking releases verified; other infrastructure retirement and real clinical/provider readiness remain unestablished"
 booking_provenance_verification:
   recorded_date: "2026-09-11"
   inventory: "GCP Cloud Asset Inventory770; billing read succeeded; two known booking services confirmed"
@@ -1150,26 +1150,31 @@ local_operator_tooling_20260928:
   app_vs_iac: "129 PASS / 0 FAIL / 0 WARN before and after local record update"
 
 phase2_backend_contract_audit_20261009:
-  status: "TABLES_VERIFIED_APPLICATION_RELEASE_IN_PROGRESS"
-  scope: "Backend configuration/startup and both-region infrastructure source coverage"
-  inventory: "AWS635 unique resources across three complete discovered LOCAL indexes; no aggregator, unindexed regions not established; GCP770; Azure2"
-  billing: "GCP metadata read; Azure current-month0rows; approved single AWS account cost request consumed, no retry or pagination"
-  source_provenance: "Fresh review approved application-source baseline:246 distinct hashed files/492 regional matches plus ten empty files; original container/dependency recovery not established"
-  configuration: "188 backend variables documented; booking startup shared validator and regional preflight edited locally; broad runtime configuration and immutable release acceptance unfinished"
-  local_gates: "Node24 and isolatedNode22 full214/214 pass; all five builds/types pass; lint0errors1043warnings; startup15 CLI5 parser4 mutation6 hostileplan9 pass; sourceaudit177/0/0; security scans zero findings; compatible dependency repair cleared3critical; repaired Node24/actualNode22 full214/214 tests/types/build pass, lint0errors1044warnings; installed security passes; expanded Semgrep0findings with22embedded-workflow parser errors, dedicated actionlint passes"
+  status: COMPLETE_7_OF_7
+  scope: Backend provenance, configuration/startup and both-region resource contracts; booking application release only
+  inventory: AWS645 unique resources across three complete discovered LOCAL indexes; unindexed regions not established; GCP778; Azure2
+  billing: Free metadata cross-checks and single approved AWS account-cost request preserved; no paid cost-query retry; actual charges unknown
+  source_provenance: Independent review approved246distinct application hashes/492regional matches plus ten empty files against original images; original container/dependency recovery remains unproven
+  configuration: 190backend variables documented; shared startup validator and regional preflight;77prepared settings per region including preserved original empty values; broader configuration audit remains later scope
+  local_gates: Node24 and actualNode22 full216tests/types/five builds PASS; lint0errors1044warnings; startup15 CLI9 parser4 regionalmutations6 hostileplan9; sourceaudit177/0/0;25release+4environment+4metadata regressions PASS
+  security: Installed hook/Gitleaks/Bandit and normal precommit PASS; supplemental Semgrep0findings with22/44embedded-workflow parser errors; actionlint and independent workflow review PASS; dependency0critical13high21moderate1low
   resources_added: true
   completed_resource_creates: 10
-  resource_authorization: "AUTHORIZED_AND_EXECUTED: owner exception for exactly ten reviewed creates with variable additional1dollar/month budget; no IAM grants or unrelated changes"
+  resource_authorization: Owner separately approved exactly ten table creates and narrow existing booking-role policy; no unrelated grants or resources
   runtime_code_changed: true
-  runtime_code_deployed: false
+  runtime_code_deployed: true
   cloud_mutations: true
-  cloud_execution: "Approved recovery, exact ten tables and separately authorized booking-only policy executed; tables120/120 and live policy38/38 checks pass; both follow-up targeted plans zero changes; original14 traffic/revision/image snapshots preserved"
-  deployment_performed: false
-  publication: "Prior reviewed tooling and recovery records published under verified owner identity; current source corrections uncommitted pending final gates/review"
-  live_health: "Original regional readiness/health14/14 HTTP200; no clinical/payment/provider acceptance implied"
-  recovery_constraints: "Original image export failed upload; bounded destination variant HTTP500 with unknown operation outcome, no retry; no generation/IAM change"
-  remaining: "Final publication; reviewed existing-registry retention and immutable artifact; no-traffic candidates, rollback proof, activation and live hash parity"
-  phase_complete: false
+  cloud_execution: Ten tables120/120 native checks; policy38required permissions allowed and live proposal parity; both targeted follow-up plans zero changes; two existing booking-service candidates activated after all gates
+  deployment_performed: true
+  application_source_commit: 06dde146b68e
+  publication: Application source independently reviewed and pushed under Zahidul Islam; exact remote SHA verified; current release record publication is verified separately
+  artifact_digest: sha256:532169285e0b7c5455012d0fcb658e3f8542ecc7a42c82e67991267a5d4f9518
+  retention: Existing DELETE preserved; narrow reviewed release-tag KEEP applied and verified;485827908retained bytes across three entries; projected0.046114USD/month, actual charges unknown
+  live_health: 'Both active booking regions: health/readiness200, unauthenticated denial, configured CORS allow and foreign-origin denial;118/118 compiled hashes match local; identity/resources/config/invoker preserved'
+  rollback: Preserved original revisions explicitly assigned100percent traffic and health/readiness verified before activation; no original revision deletion; broader operations drills remain later scope
+  recovery_constraints: Original image export failed upload and bounded alternative returned unknown HTTP500; no generation change requested; no unrelated IAM changes
+  remaining: No remaining Phase2 acceptance work; clinical/provider workflows, broader config/security debt, CMS/RAG/operations/native acceptance remain in later phases
+  phase_complete: true
 
 phase2_booking_role_access_20261009:
   tf_file: environments/prod/booking-runtime-access.tf
