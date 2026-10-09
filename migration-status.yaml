@@ -559,7 +559,7 @@ local_operator_tooling_20260928:
   app_vs_iac: "129 PASS / 0 FAIL / 0 WARN before and after local record update"
 
 phase2_backend_contract_audit_20261009:
-  status: "LOCAL_GATES_PASS_REVIEW_PENDING_PHASE2_LIVE_PARITY_BLOCKED"
+  status: "TOOLING_REVIEW_APPROVED_PHASE2_LIVE_PARITY_BLOCKED"
   scope: "Standalone backend config audit; explicit frontend scope; root CI regional/HTTP contract checks and lint"
   inventory: "AWS406 complete; GCP770; Azure2;14/14 Cloud Run services and traffic revisions read"
   billing: "GCP metadata read; Azure current-month0rows; owner-approved one$0.01 AWS account cost query, no retry/pagination"
@@ -570,5 +570,8 @@ phase2_backend_contract_audit_20261009:
   runtime_code_changed: false
   cloud_mutations: false
   deployment_performed: false
-  publication: "Local gates pass; independent tooling review authorization/verdict pending"
+  publication: "Independent eight-file tooling review APPROVE; owner-authorized publication; whole-phase release blocked by live parity"
+  registry_cleanup_observed: "Enforced DELETE older than14days, tagged and untagged, no KEEP policy; empty repository. Deletion cause/actor not proven by audit evidence."
+  live_health: "Metadata Ready only; existing seven-day request/error queries returned no records; functional verification absent"
+  recovery_constraints: "No service explicitly SSH-enabled; generation unverified. SSH requires owner-run enablement and spending review; no session started."
   phase_complete: false
