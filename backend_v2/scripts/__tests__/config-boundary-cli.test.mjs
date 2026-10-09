@@ -18,6 +18,7 @@ function fixture(t, frontend = false) {
   write('backend/backend_v2/scripts/verify_config_boundary.mjs', source);
   write('backend/backend_v2/.env.example', 'TEST_API_SETTING=test-value\n');
   write('backend/backend_v2/shared/example.ts', 'setting("TEST_API_SETTING");');
+  write('backend/backend_v2/shared/settings.ts', 'export const SDK_ENVIRONMENT_NAMES = [] as const;');
   mkdirSync(path.join(root, 'backend/legacy_lambdas'), { recursive: true });
   for (const service of ['patient', 'doctor', 'booking', 'communication', 'staff']) {
     write(`backend/backend_v2/${service}-service/src/index.ts`, 'getApiBrowserPolicy();');
@@ -56,6 +57,20 @@ test('missing backend documentation still fails a standalone audit', t => {
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /backend .env.example is missing TEST_API_SETTING/);
 });
+
+for (const name of ['AWS_ROLE_ARN', 'AWS_WEB_IDENTITY_TOKEN_FILE']) {
+  test(`SDK inventory requires documentation for ${name}`, t => {
+    const f = fixture(t);
+    f.write('backend/backend_v2/shared/settings.ts', `export const SDK_ENVIRONMENT_NAMES = ["${name}"] as const;`);
+    const missing = f.run();
+    assert.notEqual(missing.status, 0);
+    assert.ok(missing.stderr.includes(`backend .env.example is missing ${name}`));
+    f.write('backend/backend_v2/.env.example', `TEST_API_SETTING=test-value\n${name}=\n`);
+    const documented = f.run();
+    assert.equal(documented.status, 0, documented.stderr);
+    assert.match(documented.stdout, /2 backend/);
+  });
+}
 
 test('explicit frontend missing documentation cannot silently skip its audit', t => {
   const f = fixture(t, true);

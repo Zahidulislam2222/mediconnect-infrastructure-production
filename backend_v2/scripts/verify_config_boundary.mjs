@@ -130,6 +130,15 @@ const backendReferences = collectMatches(maintainedBackendFiles, [
   // configuration names even when the helper call receives a variable.
   /["'](MODEL_[A-Z0-9_]+)["']/g,
 ]);
+const settingsSource = fs.readFileSync(path.join(backendRoot, "shared", "settings.ts"), "utf8");
+const sdkInventory = settingsSource.match(/export const SDK_ENVIRONMENT_NAMES\s*=\s*\[([^\]]*)\]\s*as const/);
+if (!sdkInventory) {
+  failures.push("shared/settings.ts is missing its standardized SDK environment inventory");
+} else {
+  for (const match of sdkInventory[1].matchAll(/["']([A-Z][A-Z0-9_]*)["']/g)) {
+    backendReferences.add(match[1]);
+  }
+}
 const frontendReferences = frontendRoot === null ? new Set() : collectMatches(
   [path.join(frontendRoot, "src", "config", "env.ts")],
   [/["'](VITE_[A-Z0-9_]+)["']/g],

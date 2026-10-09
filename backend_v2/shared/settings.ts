@@ -2,7 +2,7 @@ import { z } from "zod";
 
 // These standardized process variables are consumed directly by the AWS SDK,
 // including before application modules initialize; their examples live in .env.example.
-export const SDK_ENVIRONMENT_NAMES = ["AWS_EC2_METADATA_DISABLED"] as const;
+export const SDK_ENVIRONMENT_NAMES = ["AWS_EC2_METADATA_DISABLED", "AWS_ROLE_ARN", "AWS_WEB_IDENTITY_TOKEN_FILE"] as const;
 
 const resourceNameSchema = z
     .string()
