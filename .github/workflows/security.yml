@@ -2,7 +2,9 @@
 # Layer 5: the backstop that blocks the branch for anything that slipped
 # past the agent hooks and pre-commit.
 #
-# Everything below runs on GitHub's free tier for public AND private repos.
+# Standard hosted runners are free for public repositories. Private-repository
+# usage depends on the account's remaining allowance and billing settings.
+# Verify eligibility before triggering CI; local edits do not authorize charges.
 # NOTE on the optional Claude review job at the bottom: it needs an
 # ANTHROPIC_API_KEY secret, and API usage is PAID (billed per token, separate
 # from the Claude Max plan). It ships commented out on purpose — prefer running
