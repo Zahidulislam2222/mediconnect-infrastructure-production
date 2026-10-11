@@ -17,8 +17,8 @@
 # native inventory proves them live.
 # ============================================================================
 
-last_updated: "2026-10-09T05:28:39.364948+00:00"
-last_verified_by: "Phase2 sourceaudit177/0/0;216Node24/Node22 tests/types/build; active regional118hash/HTTP parity; fresh reviews PASS"
+last_updated: "2026-10-11T20:06:42.956261+00:00"
+last_verified_by: "Identity before/after app-IaC177/0/0; offline Node22 full tests/types/lint/five builds PASS on327 frozen sources;20 identity cases and independent source review APPROVE; not deployed"
 
 operations_continuation_20260928:
   status: "LOCAL_VERIFIED_INDEPENDENT_REVIEW_DEFERRED_BY_OWNER"
@@ -611,7 +611,7 @@ lambda:
   # v2 Lambdas (actively deployed, in TF)
   - name: mediconnect-cognito-triggers
     tf_file: environments/prod/lambda_us.tf + lambda_eu.tf
-    app_files: [backend_v2/cognito-triggers/index.mjs]
+    app_files: [backend_v2/cognito-triggers/index.mjs, backend_v2/cognito-triggers/settings.mjs]
     status: OK
 
   - name: mediconnect-ws-authorizer
@@ -632,13 +632,15 @@ lambda:
   - name: mediconnect-auto-group-us
     tf_file: environments/prod/lambda_us.tf
     app_files: []
-    note: "Cognito auto-group assignment — US only"
+    note: "Existing US pool hook; recovered source matches an older local ancestor. Reviewed local index/settings are the intended replacement; no deployment claimed."
+    intended_app_files: [backend_v2/cognito-triggers/index.mjs, backend_v2/cognito-triggers/settings.mjs]
     status: OK
 
   - name: mediconnect-auto-group-eu
     tf_file: environments/prod/lambda_eu.tf
     app_files: []
-    note: "Cognito auto-group assignment — EU only"
+    note: "Existing EU pool hook; recovered source matches an older local ancestor. Reviewed local index/settings are the intended replacement; no deployment claimed."
+    intended_app_files: [backend_v2/cognito-triggers/index.mjs, backend_v2/cognito-triggers/settings.mjs]
     status: OK
 
   # Legacy Lambdas (29 functions in legacy_lambdas/ — in AWS but NOT in TF)
@@ -1192,7 +1194,7 @@ phase3_booking_billing_pharmacy_20261009:
   configuration: Typed Stripe provider API host/version/timeout/retries and secret parameter paths; webhook lease/retention; doctor pharmacy tables use existing regional resource variables; maintained subscription policy JSON
   behavior: Leased webhook receipts acknowledge only completed work; ambiguous legacy receipts retry pending reconciliation; durable atomic pharmacy stock recovery; late booking captures flagged for refund review; monotonic partial/full refunds and early cancellation-refund delivery retries
   discovery: AWS645 complete indexed rows; GCP778; Azure2; free billing metadata; live booking118 and historical doctor96 compiled hashes verified before edits
-  live_legacy_rows: NOT_VERIFIED_scans_rejected_pending_fresh_cost_approval
+  live_legacy_rows: BOUNDED_AGGREGATES_VERIFIED_NO_PENDING_SELECTED_LEGACY_CATEGORIES; no cross-table atomic snapshot or future-write guarantee
   provider_sandbox: Payment/refund/idempotency five checks PASS livemode_false; existing webhook endpoint disabled; live delivery not verified
   deployment: Four existing doctor/booking regional targets prepared; no cloud mutation or website activation performed
   verification: Full backend and frontend607 tests, types, lint, config and builds PASS on inspected snapshots; browser10 PASS after local connection retry; final frozen Node22 and image hash/runtime gates PASS; stable hook/Gitleaks/Bandit and supplemental Semgrep PASS; source publication exact remote SHAs verified
@@ -1204,9 +1206,22 @@ phase3_booking_billing_pharmacy_20261009:
     backend_security_commit: "4f593bb83d25"
     frontend_phase3_head: "169da2b144fc"
     frontend_phase4_head: "560599e521aa"
-    cms_head: "396c9ea61aa5"
+    cms_head: "784533378830"
     phase3_complete: false
     phase4_complete: false
     phase5_complete: false
     deployment_performed: false
-    limits: "Live legacy reconciliation, application sandbox delivery, broader identity/privacy and CMS routing/persistence/editorial migration remain open; historical credential revocation and dependency debt are not cleared"
+    limits: "Application sandbox delivery, broader identity/privacy and CMS routing/persistence/editorial migration remain open; bounded legacy aggregate verification completed; historical credential revocation and dependency debt are not cleared"
+
+phase4_cognito_confirmation_20261012:
+  status: LOCAL_GATES_REVIEW_PASSED_PUBLICATION_PENDING
+  branch: fix/phase4-privileged-signup-20261011
+  drift: Both deployed hook packages match an older Git ancestor; local is ahead and the local privileged-client enrollment defect is not deployed
+  source_fix: Only explicitly configured patient and doctor clients enroll; privileged and unknown signup clients reject; password recovery preserves roles; assignment errors propagate without event or username logging
+  configuration: Canonical regional pool and patient/doctor clients plus explicit SDK max attempts; no legacy fallback, new resources or dependencies
+  verification: Expanded20 handler/replay/workflow cases PASS; offline Node22 full tests, workspace and Lambda strict types, lint and five builds PASS on327 hash-matched sources; config202 PASS; independent source review APPROVE; final security/publication pending
+  generic_workflow: Cognito excluded from generic Lambda deployment because inventoried pool hooks have different names and require reviewed canonical settings
+  runtime: Existing functions report nodejs24.x; provider invocation and deployed parity not verified
+  infrastructure_changes: false
+  deployment_performed: false
+  broader_privacy_complete: false

@@ -1,67 +1,55 @@
-// backend_v2/cognito-triggers/index.mjs
-// Cognito Post-Confirmation Trigger — Auto-assigns user to doctor/patient group
-// Deployed per-region: US (us-east-1) and EU (eu-central-1)
-
 import { CognitoIdentityProviderClient, AdminAddUserToGroupCommand } from "@aws-sdk/client-cognito-identity-provider";
+import { loadSettings } from "./settings.mjs";
 
-const requireEnv = (name) => {
-    const value = process.env[name]?.trim();
-    if (!value) throw new Error(`Missing required configuration: ${name}`);
-    return value;
-};
+// Cognito protocol constants: only public enrollment roles belong here.
+const ENROLLMENT_GROUP = Object.freeze({ PATIENT: "patient", DOCTOR: "doctor" });
+const CONFIRM_SIGNUP = "PostConfirmation_ConfirmSignUp";
+const CONFIRM_PASSWORD_RESET = "PostConfirmation_ConfirmForgotPassword";
 
-// AWS_REGION is set automatically by Lambda runtime.
-const REGION = requireEnv("AWS_REGION");
-const IS_EU = REGION.includes("eu");
-
-// Regional Cognito client (matches shared/aws-config.ts factory pattern)
-const client = new CognitoIdentityProviderClient({ region: REGION });
-
-export const handler = async (event) => {
-    console.log(`[cognito-triggers][${REGION}] Post-confirmation event received`);
-
-    // Resolve regional client IDs (new per-region env var pattern, with legacy fallback)
-    const DOCTOR_CLIENT_ID = IS_EU
-        ? (process.env.COGNITO_CLIENT_ID_EU_DOCTOR || process.env.DOCTOR_CLIENT_ID)
-        : (process.env.COGNITO_CLIENT_ID_US_DOCTOR || process.env.DOCTOR_CLIENT_ID);
-
-    const ADMIN_CLIENT_ID = IS_EU
-        ? process.env.COGNITO_CLIENT_ID_EU_ADMIN
-        : process.env.COGNITO_CLIENT_ID_US_ADMIN;
-
-    const STAFF_CLIENT_ID = IS_EU
-        ? process.env.COGNITO_CLIENT_ID_EU_STAFF
-        : process.env.COGNITO_CLIENT_ID_US_STAFF;
-
-    if (!DOCTOR_CLIENT_ID) {
-        console.error(`[cognito-triggers][${REGION}] CRITICAL: Doctor client ID env var is missing`);
+/** @param {import('./settings.mjs').CognitoSettings} settings
+ * @param {{send: (command: AdminAddUserToGroupCommand) => Promise<unknown>}} client */
+export function createConfirmationHandler(settings, client) {
+    /** @param {unknown} event */
+    return async (event) => {
+        if (typeof event !== "object" || event === null) throw new Error("Invalid confirmation event");
+        const envelope = /** @type {Record<string, unknown>} */ (event);
+        const caller = envelope.callerContext;
+        if (envelope.region !== settings.region || envelope.userPoolId !== settings.userPoolId
+            || typeof envelope.userName !== "string" || !envelope.userName.trim()
+            || typeof caller !== "object" || caller === null) {
+            throw new Error("Invalid confirmation event");
+        }
+        const clientId = /** @type {Record<string, unknown>} */ (caller).clientId;
+        if (typeof clientId !== "string" || !clientId.trim()) throw new Error("Invalid confirmation event");
+        // Password recovery must preserve existing operator-assigned roles.
+        if (envelope.triggerSource === CONFIRM_PASSWORD_RESET) return event;
+        if (envelope.triggerSource !== CONFIRM_SIGNUP) throw new Error("Unsupported confirmation trigger");
+        let targetGroup;
+        if (clientId === settings.patientClientId) targetGroup = ENROLLMENT_GROUP.PATIENT;
+        else if (clientId === settings.doctorClientId) targetGroup = ENROLLMENT_GROUP.DOCTOR;
+        else throw new Error("Client is not permitted for public enrollment");
+        try {
+            await client.send(new AdminAddUserToGroupCommand({
+                UserPoolId: settings.userPoolId, Username: envelope.userName, GroupName: targetGroup,
+            }));
+        } catch {
+            // Provider errors and event payloads can contain personal identifiers.
+            throw new Error("Cognito enrollment group assignment failed");
+        }
         return event;
-    }
+    };
+}
 
-    const clientId = event.callerContext.clientId;
+/** @type {ReturnType<typeof createConfirmationHandler> | undefined} */
+let runtimeHandler;
 
-    // Map client ID to Cognito group
-    let targetGroup;
-    if (clientId === DOCTOR_CLIENT_ID) {
-        targetGroup = "doctor";
-    } else if (ADMIN_CLIENT_ID && clientId === ADMIN_CLIENT_ID) {
-        targetGroup = "admin";
-    } else if (STAFF_CLIENT_ID && clientId === STAFF_CLIENT_ID) {
-        targetGroup = "staff";
-    } else {
-        targetGroup = "patient";
-    }
-
-    try {
-        await client.send(new AdminAddUserToGroupCommand({
-            UserPoolId: event.userPoolId,
-            Username: event.userName,
-            GroupName: targetGroup,
+/** @param {unknown} event */
+export const handler = async (event) => {
+    if (!runtimeHandler) {
+        const settings = loadSettings(process.env);
+        runtimeHandler = createConfirmationHandler(settings, new CognitoIdentityProviderClient({
+            region: settings.region, maxAttempts: settings.maxAttempts,
         }));
-        console.log(`[cognito-triggers][${REGION}] Assigned ${event.userName} -> [${targetGroup}]`);
-    } catch (error) {
-        console.error(`[cognito-triggers][${REGION}] Failed to assign ${event.userName} -> [${targetGroup}]:`, error.message);
     }
-
-    return event;
+    return runtimeHandler(event);
 };

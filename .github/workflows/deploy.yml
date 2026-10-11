@@ -71,7 +71,7 @@ jobs:
           cache-dependency-path: backend_v2/package-lock.json
       - run: cd backend_v2 && npm ci
       - name: Type check
-        run: cd backend_v2 && npm run typecheck --workspaces --if-present
+        run: cd backend_v2 && npm run typecheck --workspaces --if-present && npm run typecheck:cognito
       - name: Backend configuration and regional HTTP contracts
         run: cd backend_v2 && npm test
       - name: Lint maintained backend source
@@ -917,8 +917,9 @@ jobs:
   #  7. Deploy AWS Lambda Functions (both US + EU regions)
   # ═══════════════════════════════════════════════════════════════
   #
-  #  Deploys 4 Lambda functions to both regions:
-  #    - cognito-triggers   (Cognito Post-Confirmation → group assignment)
+  #  Deploys 3 Lambda functions to both regions:
+  #  Cognito confirmation hooks require the separate reviewed owner-run path in
+  #  backend_v2/cognito-triggers/DEPLOYMENT.md; actual pool hooks use different names.
   #    - ws-authorizer      (API Gateway WebSocket → JWT verification)
   #    - cleanup-recordings (EventBridge → Chime pipeline teardown)
   #    - failover-proxy     (API Gateway WebSocket → communication-service
@@ -938,8 +939,6 @@ jobs:
   #    COGNITO_USER_POOL_ID_US, COGNITO_USER_POOL_ID_EU
   #    COGNITO_CLIENT_ID_US_PATIENT, COGNITO_CLIENT_ID_EU_PATIENT
   #    COGNITO_CLIENT_ID_US_DOCTOR, COGNITO_CLIENT_ID_EU_DOCTOR
-  #    COGNITO_CLIENT_ID_US_ADMIN, COGNITO_CLIENT_ID_EU_ADMIN
-  #    COGNITO_CLIENT_ID_US_STAFF, COGNITO_CLIENT_ID_EU_STAFF
   #    WS_PRIMARY_URL_US, WS_BACKUP_URL_US   (communication-service /chat/ws-event)
   #    WS_PRIMARY_URL_EU, WS_BACKUP_URL_EU   (communication-service /chat/ws-event)
   #
@@ -961,7 +960,7 @@ jobs:
       # ── Package all Lambdas ──────────────────────────────────
       - name: "Package Lambda functions"
         run: |
-          LAMBDAS="cognito-triggers ws-authorizer cleanup-recordings failover-proxy"
+          LAMBDAS="ws-authorizer cleanup-recordings failover-proxy"
 
           for fn in $LAMBDAS; do
             echo "📦 Packaging ${fn}..."
@@ -980,7 +979,7 @@ jobs:
       # ── Deploy code to US ────────────────────────────────────
       - name: "Deploy Lambda code (US — us-east-1)"
         run: |
-          for fn in cognito-triggers ws-authorizer cleanup-recordings failover-proxy; do
+          for fn in ws-authorizer cleanup-recordings failover-proxy; do
             FUNC_NAME="mediconnect-${fn}"
             REGION="us-east-1"
 
@@ -1010,7 +1009,7 @@ jobs:
       # ── Deploy code to EU ────────────────────────────────────
       - name: "Deploy Lambda code (EU — eu-central-1)"
         run: |
-          for fn in cognito-triggers ws-authorizer cleanup-recordings failover-proxy; do
+          for fn in ws-authorizer cleanup-recordings failover-proxy; do
             FUNC_NAME="mediconnect-${fn}"
             REGION="eu-central-1"
 
@@ -1039,12 +1038,6 @@ jobs:
       # ── Configure env vars per region ────────────────────────
       - name: "Configure Lambda env vars (US — us-east-1)"
         run: |
-          # cognito-triggers
-          aws lambda update-function-configuration \
-            --function-name mediconnect-cognito-triggers \
-            --region us-east-1 \
-            --environment "Variables={COGNITO_CLIENT_ID_US_DOCTOR=${{ secrets.COGNITO_CLIENT_ID_US_DOCTOR }},COGNITO_CLIENT_ID_US_ADMIN=${{ secrets.COGNITO_CLIENT_ID_US_ADMIN }},COGNITO_CLIENT_ID_US_STAFF=${{ secrets.COGNITO_CLIENT_ID_US_STAFF }}}"
-
           # ws-authorizer
           aws lambda update-function-configuration \
             --function-name mediconnect-ws-authorizer \
@@ -1065,12 +1058,6 @@ jobs:
 
       - name: "Configure Lambda env vars (EU — eu-central-1)"
         run: |
-          # cognito-triggers
-          aws lambda update-function-configuration \
-            --function-name mediconnect-cognito-triggers \
-            --region eu-central-1 \
-            --environment "Variables={COGNITO_CLIENT_ID_EU_DOCTOR=${{ secrets.COGNITO_CLIENT_ID_EU_DOCTOR }},COGNITO_CLIENT_ID_EU_ADMIN=${{ secrets.COGNITO_CLIENT_ID_EU_ADMIN }},COGNITO_CLIENT_ID_EU_STAFF=${{ secrets.COGNITO_CLIENT_ID_EU_STAFF }}}"
-
           # ws-authorizer
           aws lambda update-function-configuration \
             --function-name mediconnect-ws-authorizer \

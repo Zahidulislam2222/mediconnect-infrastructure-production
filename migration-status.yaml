@@ -6,8 +6,8 @@
 # Run `bash verify_migration.sh` to verify claims in this file.
 # ============================================================================
 
-last_updated: "2026-10-09T05:28:39.364948+00:00"
-last_verified_by: "Phase2 sourceaudit177/0/0;216Node24/Node22 tests/types/build; active regional118hash/HTTP parity; fresh reviews PASS"
+last_updated: "2026-10-11T20:06:42.956261+00:00"
+last_verified_by: "Identity before/after app-IaC177/0/0; offline Node22 full tests/types/lint/five builds PASS on327 frozen sources;20 identity cases and independent source review APPROVE; not deployed"
 
 operations_continuation_20260928:
   status: "LOCAL_VERIFIED_INDEPENDENT_REVIEW_DEFERRED_BY_OWNER"
@@ -599,14 +599,14 @@ phase3_booking_billing_pharmacy_20261009:
   infrastructure_changes: false
   application_changes: true
   local_evidence: memory/phase-3-20261009 in private umbrella workspace
-  legacy_decisions: Pending bounded read approval; legacy claim receipts fail closed without explicit completion
+  legacy_decisions: Authorized bounded aggregate verification complete; no pending legacy refill, markerless refund or unresolved payment reservation found in selected tables; status-only follow-up classified the omitted ISSUED protocol value; no patient rows or writes persisted
   provider_acceptance: Isolated sandbox five checks PASS; endpoint disabled and application delivery unverified
   release: Reviewed source pushed; exact feature-branch remote SHAs verified; not deployed; live acceptance and monetary authorization pending
   continuation_date: "2026-10-12"
   subscription_regressions: "27 signed HTTP cases PASS after replay, legacy-cycle, lifecycle, terminal and concurrent-snapshot corrections; independent source and final deployment delta reviews APPROVE; full frozen Node22 tests/builds/types/lint PASS, config200 and workflow7 PASS"
   frontend_current: "607 unit and 10 browser cases PASS; types, lint, configuration and release build PASS"
   privacy_followup: "Local privacy HTTP regressions PASS; merged cancellation branch 616 unit and 14 browser cases PASS, types/config/lint/build PASS with narrow source approval; initial 13/1 browser timeout retained, unchanged serial retry passed; broader live privacy acceptance open"
-  cms_followup: "90 tests, types, build and isolated admin/content/media restart/restore PASS with narrow source approval; live routing, storage and content migration open; general lint unavailable"
+  cms_followup: "93 tests, types, build and isolated admin/content/media restart/restore PASS; HTTPS proxy/origin correction independently approved and published; live routing, storage and content migration open; general lint unavailable"
 
   publication_proof:
     commit_format: "12-character Git commit references; exact full remote SHA parity retained in private release receipts"
@@ -614,9 +614,22 @@ phase3_booking_billing_pharmacy_20261009:
     backend_security_commit: "4f593bb83d25"
     frontend_phase3_head: "169da2b144fc"
     frontend_phase4_head: "560599e521aa"
-    cms_head: "396c9ea61aa5"
+    cms_head: "784533378830"
     phase3_complete: false
     phase4_complete: false
     phase5_complete: false
     deployment_performed: false
-    limits: "Live legacy reconciliation, application sandbox delivery, broader identity/privacy and CMS routing/persistence/editorial migration remain open; historical credential revocation and dependency debt are not cleared"
+    limits: "Application sandbox delivery, broader identity/privacy and CMS routing/persistence/editorial migration remain open; bounded legacy aggregate verification completed; historical credential revocation and dependency debt are not cleared"
+
+phase4_cognito_confirmation_20261012:
+  status: LOCAL_GATES_REVIEW_PASSED_PUBLICATION_PENDING
+  branch: fix/phase4-privileged-signup-20261011
+  drift: Both deployed hook packages match an older Git ancestor; local is ahead and the local privileged-client enrollment defect is not deployed
+  source_fix: Only explicitly configured patient and doctor clients enroll; privileged and unknown signup clients reject; password recovery preserves roles; assignment errors propagate without event or username logging
+  configuration: Canonical regional pool and patient/doctor clients plus explicit SDK max attempts; no legacy fallback, new resources or dependencies
+  verification: Expanded20 handler/replay/workflow cases PASS; offline Node22 full tests, workspace and Lambda strict types, lint and five builds PASS on327 hash-matched sources; config202 PASS; independent source review APPROVE; final security/publication pending
+  generic_workflow: Cognito excluded from generic Lambda deployment because inventoried pool hooks have different names and require reviewed canonical settings
+  runtime: Existing functions report nodejs24.x; provider invocation and deployed parity not verified
+  infrastructure_changes: false
+  deployment_performed: false
+  broader_privacy_complete: false
