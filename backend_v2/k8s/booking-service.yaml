@@ -62,6 +62,24 @@ spec:
               value: "__TABLE_PATIENTS__"
             - name: TABLE_TRANSACTIONS
               value: "__TABLE_TRANSACTIONS__"
+            - name: TABLE_WEBHOOK_EVENTS
+              value: "__TABLE_WEBHOOK_EVENTS__"
+            - name: WEBHOOK_CLAIM_TTL_SECONDS
+              value: "__WEBHOOK_CLAIM_TTL_SECONDS__"
+            - name: WEBHOOK_EVENT_RETENTION_SECONDS
+              value: "__WEBHOOK_EVENT_RETENTION_SECONDS__"
+            - name: BILLING_STRIPE_PARAMETER_PATH
+              value: "__BILLING_STRIPE_PARAMETER_PATH__"
+            - name: WEBHOOK_STRIPE_PARAMETER_PATH
+              value: "__WEBHOOK_STRIPE_PARAMETER_PATH__"
+            - name: STRIPE_API_VERSION
+              value: "__STRIPE_API_VERSION__"
+            - name: STRIPE_API_HOST
+              value: "__STRIPE_API_HOST__"
+            - name: STRIPE_REQUEST_TIMEOUT_MS
+              value: "__STRIPE_REQUEST_TIMEOUT_MS__"
+            - name: STRIPE_MAX_NETWORK_RETRIES
+              value: "__STRIPE_MAX_NETWORK_RETRIES__"
             - name: CANCELLATION_CLAIM_TTL_SECONDS
               value: "__CANCELLATION_CLAIM_TTL_SECONDS__"
             - name: CANCELLATION_REFUND_MAX_PAGES

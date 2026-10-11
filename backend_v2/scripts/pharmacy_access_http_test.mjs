@@ -21,7 +21,7 @@ const eventBus = require('./dist/shared/event-bus.js');
 
 // Minimal DynamoDB double: evaluates the condition/update forms the pharmacy controller uses and
 // fails closed (throws) on anything it does not understand, so an unmodelled expression cannot pass.
-const RX = 'mediconnect-prescriptions', BILLS = 'mediconnect-transactions', GRAPH = 'mediconnect-graph-data';
+const RX = process.env.TABLE_PRESCRIPTIONS, BILLS = process.env.TABLE_TRANSACTIONS, GRAPH = process.env.TABLE_GRAPH;
 const keyOf = (table, key) => `${table}|${JSON.stringify(key, Object.keys(key).sort())}`;
 function resolvePath(path, names) { return path.split('.').map(part => part.startsWith('#') ? names[part] : part); }
 function readPath(item, path) { return path.reduce((value, part) => value?.[part], item); }

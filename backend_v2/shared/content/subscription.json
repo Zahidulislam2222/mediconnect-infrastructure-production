@@ -1,0 +1,73 @@
+{
+  "PLANS": {
+    "free": {
+      "planId": "free",
+      "name": "Free",
+      "priceMonthly": 0,
+      "discountPercent": 0,
+      "platformFeePercent": 15,
+      "freeGpVisitsPerMonth": 0,
+      "familyMaxMembers": 0,
+      "priorityBooking": false,
+      "chatFollowUps": false
+    },
+    "plus": {
+      "planId": "plus",
+      "name": "MediConnect Plus",
+      "priceMonthly": 19,
+      "discountPercent": 20,
+      "platformFeePercent": 15,
+      "freeGpVisitsPerMonth": 0,
+      "familyMaxMembers": 0,
+      "priorityBooking": true,
+      "chatFollowUps": true
+    },
+    "premium": {
+      "planId": "premium",
+      "name": "MediConnect Premium",
+      "priceMonthly": 39,
+      "discountPercent": 30,
+      "platformFeePercent": 12,
+      "freeGpVisitsPerMonth": 1,
+      "familyMaxMembers": 4,
+      "priorityBooking": true,
+      "chatFollowUps": true
+    }
+  },
+  "DOCTOR_TIERS": {
+    "new": {
+      "tier": "new",
+      "doctorPercentage": 80,
+      "platformPercentage": 20,
+      "minMonths": 0,
+      "minRating": 0
+    },
+    "established": {
+      "tier": "established",
+      "doctorPercentage": 85,
+      "platformPercentage": 15,
+      "minMonths": 6,
+      "minRating": 4
+    },
+    "top": {
+      "tier": "top",
+      "doctorPercentage": 88,
+      "platformPercentage": 12,
+      "minMonths": 12,
+      "minRating": 4.8
+    }
+  },
+  "MAX_RATE_INCREASE_PERCENT": 10,
+  "PAYOUT_HOLD_DAYS": 7,
+  "FAMILY_MAX_MEMBERS": 4,
+  "FAMILY_CHANGES_PER_YEAR": 2,
+  "QUARTER_DAYS": 90,
+  "MIN_SUBSCRIPTION_AGE": 18,
+  "GRACE_PERIOD_DAYS": 3,
+  "GP_SPECIALTIES": [
+    "general_practice",
+    "family_medicine",
+    "internal_medicine",
+    "primary_care"
+  ]
+}

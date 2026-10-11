@@ -2,6 +2,7 @@
 // never to a field no writer sets; a notice that cannot be addressed is logged and never breaks the webhook.
 // Genuinely signed local test events and an in-memory DynamoDB double; no provider requests.
 import { test, mock } from 'node:test';
+import { holds } from './fixtures/dynamodb-conditions.mjs';
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFile } from 'node:fs/promises';
@@ -22,7 +23,7 @@ const kms = require('./dist/shared/kms-crypto.js');
 
 const WEBHOOK_SECRET = 'whsec_test_secret';
 const APPOINTMENTS = process.env.TABLE_APPOINTMENTS, BILLS = process.env.TABLE_TRANSACTIONS, EVENTS = process.env.TABLE_WEBHOOK_EVENTS;
-const PATIENTS = process.env.TABLE_PATIENTS;
+const PATIENTS = process.env.TABLE_PATIENTS, SUBS = process.env.TABLE_SUBSCRIPTIONS;
 const PATIENT_EMAIL = 'patient@example.test';
 
 const rowKey = (table, key) => `${table}|${JSON.stringify(Object.entries(key).sort())}`;
@@ -41,6 +42,7 @@ function harness({ profile = { email: `phi:kms:${PATIENT_EMAIL}` }, failDecrypt 
   if (profile) put(PATIENTS, { patientId: 'test-patient' }, profile);
   put(APPOINTMENTS, { appointmentId: 'test-apt' }, { patientId: 'test-patient', status: 'PENDING_PAYMENT' });
   put(BILLS, { billId: 'test-bill' }, { referenceId: 'test-apt', patientId: 'test-patient', amount: 50, type: 'BOOKING_FEE', status: 'PENDING' });
+  put(SUBS, { patientId: 'test-patient' }, { stripeSubscriptionId: 'sub_test', status: 'active', planId: 'premium', cycleStart: '2026-01-01T00:00:00.000Z' });
   const notices = [], decryptRegions = [];
   mock.method(aws, 'getSSMParameter', async name => name.includes('webhook') ? WEBHOOK_SECRET : 'sk_test_key');
   const errors = mock.method(logger, 'safeError', () => {});
@@ -67,7 +69,15 @@ function harness({ profile = { email: `phi:kms:${PATIENT_EMAIL}` }, failDecrypt 
       if (get(EVENTS, { eventId: input.Item.eventId })) throw Object.assign(new Error('conditional'), { name: 'ConditionalCheckFailedException' });
       put(EVENTS, { eventId: input.Item.eventId }, input.Item); return {};
     }
-    const updates = kind === 'TransactWriteCommand' ? input.TransactItems.map(entry => entry.Update)
+    if (kind === 'TransactWriteCommand') {
+      for (const entry of input.TransactItems) {
+        const spec = entry.ConditionCheck ?? entry.Update;
+        if (entry.ConditionCheck || spec.TableName === SUBS) {
+          if (!holds(get(spec.TableName, spec.Key), spec.ConditionExpression, spec.ExpressionAttributeNames, spec.ExpressionAttributeValues)) throw Object.assign(new Error('test conditional'), { name: 'TransactionCanceledException' });
+        }
+      }
+    }
+    const updates = kind === 'TransactWriteCommand' ? input.TransactItems.filter(entry => entry.Update).map(entry => entry.Update)
       : kind === 'UpdateCommand' ? [input] : null;
     if (!updates) throw new Error(`Unexpected command ${kind}`);
     for (const spec of updates) {
@@ -82,7 +92,7 @@ function harness({ profile = { email: `phi:kms:${PATIENT_EMAIL}` }, failDecrypt 
   const stripe = new Stripe('sk_test_key');
   let sequence = 0;
   async function deliver(type, object) {
-    const payload = JSON.stringify({ id: `evt_test_${++sequence}`, object: 'event', type, data: { object } });
+    const payload = JSON.stringify({ id: `evt_test_${++sequence}`, object: 'event', type, created: 1772323200, data: { object } });
     const signature = stripe.webhooks.generateTestHeaderString({ payload, secret: WEBHOOK_SECRET });
     const result = { status: 200 };
     const res = { status(code) { result.status = code; return this; }, json(body) { result.body = body; return this; }, send(body) { result.body = body; return this; } };
@@ -101,7 +111,7 @@ const EVENTS_UNDER_TEST = [
     status: 'requires_payment_method', last_payment_error: { message: 'Your card was declined.' }, metadata }],
   ['payment_intent.succeeded', 'PAYMENT_SUCCESS', { id: 'pi_test', object: 'payment_intent', amount: 5000, currency: 'usd',
     status: 'succeeded', metadata }],
-  ['invoice.payment_failed', 'PAYMENT_FAILED', { id: 'in_test', object: 'invoice', subscription: 'sub_test', attempt_count: 1,
+  ['invoice.payment_failed', 'PAYMENT_FAILED', { id: 'in_test', object: 'invoice', subscription: 'sub_test', attempt_count: 1, period_start: 1769904000,
     metadata: { patientId: 'test-patient', region: 'EU' } }],
 ];
 

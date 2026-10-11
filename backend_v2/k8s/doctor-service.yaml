@@ -67,6 +67,12 @@ spec:
               value: "__TABLE_EHR__"
             - name: TABLE_INVENTORY
               value: "__TABLE_INVENTORY__"
+            - name: TABLE_PRESCRIPTIONS
+              value: "__TABLE_PRESCRIPTIONS__"
+            - name: TABLE_TRANSACTIONS
+              value: "__TABLE_TRANSACTIONS__"
+            - name: TABLE_GRAPH
+              value: "__TABLE_GRAPH__"
             - name: GOOGLE_APPLICATION_CREDENTIALS
               value: "/var/run/secrets/gcp/gcp-wif-config.json"
 

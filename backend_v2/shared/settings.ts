@@ -13,6 +13,9 @@ const resourceNameSchema = z
 export type TableEnvironmentVariable =
     | "TABLE_PATIENTS"
     | "TABLE_TRANSACTIONS"
+    | "TABLE_WEBHOOK_EVENTS"
+    | "TABLE_PRESCRIPTIONS"
+    | "TABLE_GRAPH"
     | "TABLE_DRUG_INTERACTIONS"
     | "TABLE_CHAT_HISTORY"
     | "TABLE_CHAT_CONNECTIONS"
@@ -94,10 +97,52 @@ export function getCancellationRefundSettings() {
         .parse({ refundMaxPages: setting('CANCELLATION_REFUND_MAX_PAGES') });
 }
 
+/** Provider settings and bounded durable delivery recovery have one environment owner. */
+export function getWebhookSettings() {
+    return z.object({
+        claimTtlSeconds: z.coerce.number().int().positive(),
+        retentionSeconds: z.coerce.number().int().positive(),
+        parameterPath: z.string().startsWith('/'),
+        webhookParameterPath: z.string().startsWith('/'),
+    }).refine(value => value.retentionSeconds > value.claimTtlSeconds,
+        'Webhook retention must exceed the processing lease').parse({
+        claimTtlSeconds: setting('WEBHOOK_CLAIM_TTL_SECONDS'),
+        retentionSeconds: setting('WEBHOOK_EVENT_RETENTION_SECONDS'),
+        parameterPath: setting('BILLING_STRIPE_PARAMETER_PATH'),
+        webhookParameterPath: setting('WEBHOOK_STRIPE_PARAMETER_PATH'),
+    });
+}
+
+export function getStripeSettings() {
+    return z.object({
+        apiVersion: z.string().regex(/^\d{4}-\d{2}-\d{2}(?:\.[a-z]+)?$/),
+        host: z.string().regex(/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/),
+        timeoutMs: z.coerce.number().int().positive(),
+        maxNetworkRetries: z.coerce.number().int().nonnegative(),
+    }).parse({
+        apiVersion: setting('STRIPE_API_VERSION'), host: setting('STRIPE_API_HOST'),
+        timeoutMs: setting('STRIPE_REQUEST_TIMEOUT_MS'), maxNetworkRetries: setting('STRIPE_MAX_NETWORK_RETRIES'),
+    });
+}
+
+export function getSubscriptionProviderSettings() {
+    return z.object({ parameterPath: z.string().startsWith('/'), plusPricePath: z.string().startsWith('/'),
+        premiumPricePath: z.string().startsWith('/') }).parse({
+        parameterPath: setting('SUBSCRIPTION_STRIPE_PARAMETER_PATH'),
+        plusPricePath: setting('SUBSCRIPTION_PLUS_PRICE_PARAMETER_PATH'),
+        premiumPricePath: setting('SUBSCRIPTION_PREMIUM_PRICE_PARAMETER_PATH'),
+    });
+}
+
+export const BOOKING_STARTUP_ENV_NAMES = ['TABLE_PATIENTS', 'TABLE_TRANSACTIONS',
+        'CANCELLATION_CLAIM_TTL_SECONDS', 'CANCELLATION_REFUND_MAX_PAGES', 'TABLE_WEBHOOK_EVENTS',
+        'WEBHOOK_CLAIM_TTL_SECONDS', 'WEBHOOK_EVENT_RETENTION_SECONDS', 'BILLING_STRIPE_PARAMETER_PATH',
+        'WEBHOOK_STRIPE_PARAMETER_PATH', 'STRIPE_API_VERSION', 'STRIPE_API_HOST',
+        'STRIPE_REQUEST_TIMEOUT_MS', 'STRIPE_MAX_NETWORK_RETRIES'] as const;
+
 /** Validate booking resources and cancellation bounds after secret bootstrap, before listening. */
 export function getBookingStartupSettings() {
-    for (const name of ['TABLE_PATIENTS', 'TABLE_TRANSACTIONS',
-        'CANCELLATION_CLAIM_TTL_SECONDS', 'CANCELLATION_REFUND_MAX_PAGES'] as const) {
+    for (const name of BOOKING_STARTUP_ENV_NAMES) {
         const value = process.env[name];
         if (value !== undefined && (value !== value.trim() || /__[A-Z0-9_]+__/.test(value))) {
             throw new Error(`Invalid deployment configuration: ${name}`);
@@ -108,6 +153,9 @@ export function getBookingStartupSettings() {
         transactionsTable: requiredResourceName('TABLE_TRANSACTIONS'),
         ...getCancellationSettings(),
         ...getCancellationRefundSettings(),
+        webhookTable: requiredResourceName('TABLE_WEBHOOK_EVENTS'),
+        webhook: getWebhookSettings(),
+        stripe: getStripeSettings(),
     };
 }
 

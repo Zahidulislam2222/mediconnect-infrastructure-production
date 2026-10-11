@@ -120,6 +120,20 @@ for (const file of maintainedBackendFiles) {
   }
 }
 
+// Billing provider instances and pharmacy tables must remain behind their configuration owners.
+const bookingSources = walk(path.join(backendRoot, 'booking-service', 'src'), new Set(['.ts']));
+for (const file of bookingSources) {
+  if (file.endsWith(path.join('providers', 'stripe.ts'))) continue;
+  const source = fs.readFileSync(file, 'utf8');
+  if (/new Stripe\(/.test(source) || /apiVersion\s*:\s*["']/.test(source) || /WEBHOOK_EVENT_TTL_DAYS/.test(source)) {
+    failures.push(`${path.relative(repositoryRoot, file)} bypasses the billing provider configuration owner`);
+  }
+}
+const prescriptionSource = fs.readFileSync(path.join(backendRoot, 'doctor-service/src/modules/clinical/prescription.controller.ts'), 'utf8');
+if (/["']mediconnect-(?:transactions|prescriptions|graph-data)["']/.test(prescriptionSource)) {
+  failures.push('Pharmacy controller contains an environment-specific table literal');
+}
+
 const backendReferences = collectMatches(maintainedBackendFiles, [
   /process\.env\.([A-Z][A-Z0-9_]*)/g,
   /setting\(["']([A-Z][A-Z0-9_]*)["']\)/g,

@@ -16,6 +16,7 @@
 
 import { z } from 'zod';
 import { setting } from './settings';
+import policySource from './content/subscription.json';
 
 // ─── SUBSCRIPTION PLANS ─────────────────────────────────────────────────
 
@@ -44,42 +45,6 @@ export interface PlanConfig {
     chatFollowUps: boolean;
 }
 
-export const PLANS: Record<PlanId, PlanConfig> = {
-    [PlanId.FREE]: {
-        planId: PlanId.FREE,
-        name: 'Free',
-        priceMonthly: 0,
-        discountPercent: 0,
-        platformFeePercent: 15,
-        freeGpVisitsPerMonth: 0,
-        familyMaxMembers: 0,
-        priorityBooking: false,
-        chatFollowUps: false,
-    },
-    [PlanId.PLUS]: {
-        planId: PlanId.PLUS,
-        name: 'MediConnect Plus',
-        priceMonthly: 19,
-        discountPercent: 20,
-        platformFeePercent: 15,
-        freeGpVisitsPerMonth: 0,
-        familyMaxMembers: 0,
-        priorityBooking: true,
-        chatFollowUps: true,
-    },
-    [PlanId.PREMIUM]: {
-        planId: PlanId.PREMIUM,
-        name: 'MediConnect Premium',
-        priceMonthly: 39,
-        discountPercent: 30,
-        platformFeePercent: 12,
-        freeGpVisitsPerMonth: 1,
-        familyMaxMembers: 4,
-        priorityBooking: true,
-        chatFollowUps: true,
-    },
-};
-
 // ─── DOCTOR TIERS ───────────────────────────────────────────────────────
 
 export enum DoctorTier {
@@ -96,60 +61,64 @@ export interface DoctorTierConfig {
     minRating: number;          // minimum rating to qualify
 }
 
-export const DOCTOR_TIERS: Record<DoctorTier, DoctorTierConfig> = {
-    [DoctorTier.NEW]: {
-        tier: DoctorTier.NEW,
-        doctorPercentage: 80,
-        platformPercentage: 20,
-        minMonths: 0,
-        minRating: 0,
-    },
-    [DoctorTier.ESTABLISHED]: {
-        tier: DoctorTier.ESTABLISHED,
-        doctorPercentage: 85,
-        platformPercentage: 15,
-        minMonths: 6,
-        minRating: 4.0,
-    },
-    [DoctorTier.TOP]: {
-        tier: DoctorTier.TOP,
-        doctorPercentage: 88,
-        platformPercentage: 12,
-        minMonths: 12,
-        minRating: 4.8,
-    },
-};
+const percentage = z.number().finite().min(0).max(100);
+const nonnegativeInteger = z.number().int().nonnegative();
+const policySchema = z.object({
+    PLANS: z.record(z.nativeEnum(PlanId), z.object({
+        planId: z.nativeEnum(PlanId), name: z.string().min(1), priceMonthly: z.number().finite().nonnegative(),
+        discountPercent: percentage, platformFeePercent: percentage, freeGpVisitsPerMonth: nonnegativeInteger,
+        familyMaxMembers: nonnegativeInteger, priorityBooking: z.boolean(), chatFollowUps: z.boolean(),
+    }).strict()),
+    DOCTOR_TIERS: z.record(z.nativeEnum(DoctorTier), z.object({
+        tier: z.nativeEnum(DoctorTier), doctorPercentage: percentage, platformPercentage: percentage,
+        minMonths: nonnegativeInteger, minRating: z.number().min(0).max(5),
+    }).strict()),
+    MAX_RATE_INCREASE_PERCENT: percentage,
+    PAYOUT_HOLD_DAYS: nonnegativeInteger, FAMILY_MAX_MEMBERS: nonnegativeInteger,
+    FAMILY_CHANGES_PER_YEAR: nonnegativeInteger, QUARTER_DAYS: z.number().int().positive(),
+    MIN_SUBSCRIPTION_AGE: nonnegativeInteger, GRACE_PERIOD_DAYS: nonnegativeInteger,
+    GP_SPECIALTIES: z.array(z.string().min(1)).nonempty(),
+}).strict().superRefine((value, context) => {
+    for (const id of Object.values(PlanId)) {
+        if (value.PLANS[id]?.planId !== id) context.addIssue({ code: z.ZodIssueCode.custom, message: 'Missing or mismatched plan' });
+    }
+    for (const tier of Object.values(DoctorTier)) {
+        const entry = value.DOCTOR_TIERS[tier];
+        if (!entry || entry.tier !== tier || entry.doctorPercentage + entry.platformPercentage !== 100) {
+            context.addIssue({ code: z.ZodIssueCode.custom, message: 'Missing or invalid tier shares' });
+        }
+    }
+});
+export function validateSubscriptionPolicy(value: unknown) { return policySchema.parse(value); }
+const policy = validateSubscriptionPolicy(policySource);
+export const PLANS = policy.PLANS as Record<PlanId, PlanConfig>;
+export const DOCTOR_TIERS = policy.DOCTOR_TIERS as Record<DoctorTier, DoctorTierConfig>;
 
 // ─── CONSTANTS ──────────────────────────────────────────────────────────
 
 /** Max rate increase per quarter (loophole #4) */
-export const MAX_RATE_INCREASE_PERCENT = 10;
+export const MAX_RATE_INCREASE_PERCENT = policy.MAX_RATE_INCREASE_PERCENT;
 
 /** Days to hold doctor payouts after visit (loophole #8 — refund protection) */
-export const PAYOUT_HOLD_DAYS = 7;
+export const PAYOUT_HOLD_DAYS = policy.PAYOUT_HOLD_DAYS;
 
 /** Max family members on Premium plan (loophole #5) */
-export const FAMILY_MAX_MEMBERS = 4;
+export const FAMILY_MAX_MEMBERS = policy.FAMILY_MAX_MEMBERS;
 
 /** Max family member changes per year (loophole #5) */
-export const FAMILY_CHANGES_PER_YEAR = 2;
+export const FAMILY_CHANGES_PER_YEAR = policy.FAMILY_CHANGES_PER_YEAR;
 
 /** Days in a quarter for rate cap calculation */
-export const QUARTER_DAYS = 90;
+export const QUARTER_DAYS = policy.QUARTER_DAYS;
 
 /** Minimum age for subscription (loophole #14) */
-export const MIN_SUBSCRIPTION_AGE = 18;
+export const MIN_SUBSCRIPTION_AGE = policy.MIN_SUBSCRIPTION_AGE;
 
 /** Grace period days after payment failure before cancellation */
-export const GRACE_PERIOD_DAYS = 3;
+export const GRACE_PERIOD_DAYS = policy.GRACE_PERIOD_DAYS;
 
 /** GP specialty identifiers (for free GP visit on Premium) */
-export const GP_SPECIALTIES = [
-    'general_practice',
-    'family_medicine',
-    'internal_medicine',
-    'primary_care',
-];
+export const GP_SPECIALTIES = policy.GP_SPECIALTIES;
 
 // ─── DynamoDB TABLE NAMES ───────────────────────────────────────────────
 

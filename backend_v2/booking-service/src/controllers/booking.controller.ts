@@ -1,3 +1,4 @@
+import { createStripeClient } from '../providers/stripe';
 import { requestJurisdiction } from '../../../shared/region-context';
 import { Request, Response, NextFunction } from 'express';
 import { getRegionalClient, getSecret, getSSMParameter } from '../../../shared/aws-config';
@@ -45,7 +46,7 @@ const TABLE_APPOINTMENTS = setting("TABLE_APPOINTMENTS");
 const TABLE_LOCKS = setting("TABLE_LOCKS");
 const TABLE_DOCTORS = setting("TABLE_DOCTORS"); // 🟢 Replaced Postgres
 const TABLE_GRAPH = setting("TABLE_GRAPH");
-const STRIPE_SECRET_NAME = "/mediconnect/stripe/keys";
+
 const CLEANUP_SECRET_PARAM = "/mediconnect/prod/cleanup/secret";
 
 const normalizeTimeSlot = (isoString: string) => {
@@ -220,10 +221,10 @@ export const createBooking = catchAsync(async (req: Request, res: Response) => {
 
     // Skip Stripe payment for free GP visits (Premium subscription benefit)
     if (!isFreeGpVisit) {
-        const stripeKey = await getSSMParameter(STRIPE_SECRET_NAME, region, true);
+        const stripeKey = await getSSMParameter(setting("BILLING_STRIPE_PARAMETER_PATH"), region, true);
         if (!stripeKey) throw new Error("Stripe secret not found");
 
-        stripeInstance = new Stripe(stripeKey);
+        stripeInstance = createStripeClient(stripeKey);
         try {
             const paymentIntent = await stripeInstance.paymentIntents.create({
                 amount: amountToCharge,
@@ -1040,9 +1041,9 @@ async function decideRefund(docClient: DocClient, apt: Record<string, any>, regi
 
 async function refundAppointmentPayment(appointmentId: string, apt: PaymentRecord, region: string): Promise<Omit<RefundOutcome, "recordLedger">> {
     try {
-        const stripeKey = await getSSMParameter(STRIPE_SECRET_NAME, region, true);
+        const stripeKey = await getSSMParameter(setting("BILLING_STRIPE_PARAMETER_PATH"), region, true);
         if (!stripeKey || !apt.paymentId) throw new Error("Payment provider key unavailable");
-        const stripe = new Stripe(stripeKey);
+        const stripe = createStripeClient(stripeKey);
         const refund = (await listPaymentRefunds(stripe, apt.paymentId)).find(r => r.metadata?.appointmentRefund === appointmentId)
             ?? await createAppointmentRefund(stripe, apt.paymentId, appointmentId, region);
         const refundStatus = PROVIDER_REFUND_STATUS[refund.status ?? ""] ?? "REQUIRES_MANUAL_REFUND";

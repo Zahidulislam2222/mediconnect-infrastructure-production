@@ -21,6 +21,7 @@ build/
 *.pem
 *.key
 *.json
+!backend_v2/shared/content/subscription.json
 !tsconfig.json
 !app.json
 # Planning example linked from architecture docs; contains no secrets (2026-09-24)

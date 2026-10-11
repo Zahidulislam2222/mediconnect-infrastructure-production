@@ -1,7 +1,8 @@
+import { createStripeClient } from '../providers/stripe';
 import { Request, Response } from 'express';
 import Stripe from 'stripe';
 import { getRegionalClient, getSSMParameter } from '../../../shared/aws-config';
-import { TransactWriteCommand, GetCommand, PutCommand, UpdateCommand, DeleteCommand } from "@aws-sdk/lib-dynamodb";
+import { TransactWriteCommand, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { createHash } from 'crypto';
 import { pushRevenueToBigQuery, pushAppointmentToBigQuery } from './billing.controller';
 import { writeAuditLog } from '../../../shared/audit';
@@ -13,7 +14,7 @@ import {
     PLANS,
     TABLE_SUBSCRIPTIONS,
 } from '../../../shared/subscription';
-import { TABLE_NAMES, requiredResourceName, setting } from '../../../shared/settings';
+import { TABLE_NAMES, requiredResourceName, setting, getWebhookSettings } from '../../../shared/settings';
 import { REFUND_NOTICES, REFUND_WEBHOOK_COPY, type RefundStatus } from '../content/cancellation';
 import { MANUAL_REFUND_LEDGER_STATUS, refundBillId } from '../cancellation-policy';
 import { notifyPatient, patientContactEmail } from '../patient-contact';
@@ -21,174 +22,103 @@ import { PAYABLE_BILL_STATUSES } from '../../../shared/billing-status';
 import { DISPENSED_STATUSES, DISPENSE_EVIDENCE, lastHandover, observedPrescriptionCondition } from '../../../shared/prescription-handover';
 import { findPrescriptionBills } from '../../../shared/prescription-ledger';
 
-const STRIPE_SECRET_NAME = "/mediconnect/stripe/keys";
-const STRIPE_WEBHOOK_SECRET_NAME = "/mediconnect/stripe/webhook_secret";
+import { claimEvent, completeEvent, releaseEvent, eventClaimCondition, type EventClaim } from '../webhook-event';
+import { resolveAuthRegion } from '../../../shared/region-context';
 
 const TABLE_PRESCRIPTIONS = setting("TABLE_PRESCRIPTIONS");
 const TABLE_APPOINTMENTS = setting("TABLE_APPOINTMENTS");
 const TABLE_INVENTORY = TABLE_NAMES.inventory;
 
-// ─── IDEMPOTENCY FIX ───────────────────────────────────────────────────────
-// Stripe can retry webhooks up to 100x. The original code had a partial check
-// (billId status === 'PAID') but this was vulnerable to race conditions when
-// concurrent retries both see status !== 'PAID' simultaneously.
-//
-// FIX: Atomic event deduplication using DynamoDB conditional PutItem on
-// the Stripe event ID. Only the first delivery succeeds; retries get a
-// ConditionalCheckFailedException and are safely skipped.
-//
-// Table: mediconnect-webhook-events
-//   PK: eventId (Stripe event ID, e.g. "evt_1abc...")
-//   Attributes: type, processedAt, region
-//   TTL: expiresAt (30 days — Stripe retries stop after ~3 days)
-// ────────────────────────────────────────────────────────────────────────────
-const TABLE_WEBHOOK_EVENTS = setting("TABLE_WEBHOOK_EVENTS");
-const WEBHOOK_EVENT_TTL_DAYS = 30;
-
-/**
- * Atomically mark a Stripe event as processed.
- * Returns true if this is the FIRST time we've seen this event.
- * Returns false if the event was already processed (duplicate/retry).
- *
- * Uses DynamoDB conditional PutItem:
- *   - attribute_not_exists(eventId) ensures only one writer wins
- *   - ConditionalCheckFailedException = duplicate = safe to skip
- */
-async function claimWebhookEvent(
-    eventId: string,
-    eventType: string,
-    region: string,
-    regionalDb: any
-): Promise<boolean> {
-    const now = new Date().toISOString();
-    const ttl = Math.floor(Date.now() / 1000) + (WEBHOOK_EVENT_TTL_DAYS * 24 * 60 * 60);
-
-    try {
-        await regionalDb.send(new PutCommand({
-            TableName: TABLE_WEBHOOK_EVENTS,
-            Item: {
-                eventId,
-                eventType,
-                processedAt: now,
-                region,
-                expiresAt: ttl,  // DynamoDB TTL auto-cleanup
-            },
-            // ATOMIC GUARD: Fails if eventId already exists
-            ConditionExpression: "attribute_not_exists(eventId)",
-        }));
-
-        safeLog(`Webhook event claimed: ${eventId} (${eventType})`);
-        return true;  // First time — proceed with processing
-
-    } catch (err: any) {
-        if (err.name === 'ConditionalCheckFailedException') {
-            safeLog(`Webhook duplicate skipped: ${eventId} (already processed)`);
-            return false;  // Duplicate — safe to skip
-        }
-        // Unexpected error — log but allow processing to prevent lost events
-        safeError(`Webhook idempotency check error for ${eventId}: ${err.message}`);
-        return true;  // Fail-open: better to risk a duplicate than lose an event
-    }
-}
-
 export const handleStripeWebhook = async (req: Request, res: Response) => {
     let event: Stripe.Event;
 
-    let region = setting("AWS_REGION");
+    let region: string;
     try {
         const unverifiedPayload = JSON.parse(req.body.toString());
-        if (unverifiedPayload.data?.object?.metadata?.region) {
-            region = unverifiedPayload.data.object.metadata.region;
-        }
-    } catch (e) { safeLog("Could not parse unverified webhook payload"); }
-
+        region = unverifiedPayload.data?.object?.metadata?.region ?? setting('AWS_REGION');
+        resolveAuthRegion(region);
+    } catch {
+        return res.status(400).json({ received: false });
+    }
     const regionalDb = getRegionalClient(region);
-
+    let stripe: Stripe;
+    let webhookSecret: string;
     try {
-        const stripeKey = await getSSMParameter(STRIPE_SECRET_NAME, region, true);
-        const webhookSecret = await getSSMParameter(STRIPE_WEBHOOK_SECRET_NAME, region, true);
-
-        if (!stripeKey || !webhookSecret) {
-            safeError(`CRITICAL: Stripe secrets missing in SSM for region: ${region}`);
-            return res.status(500).send("Server Configuration Error");
-        }
-
-        const stripe = new Stripe(stripeKey, { apiVersion: '2023-10-16' });
+        const config = getWebhookSettings();
+        const stripeKey = await getSSMParameter(config.parameterPath, region, true);
+        const secret = await getSSMParameter(config.webhookParameterPath, region, true);
+        if (!stripeKey || !secret) throw new Error('Webhook provider configuration unavailable');
+        stripe = createStripeClient(stripeKey);
+        webhookSecret = secret;
+    } catch {
+        safeError('[WEBHOOK] Provider configuration unavailable; delivery must retry');
+        return res.status(503).json({ received: false });
+    }
+    try {
         const sig = req.headers['stripe-signature'];
-        if (!sig) return res.status(400).send("Missing Stripe Signature");
-
+        if (!sig) return res.status(400).send('Missing Stripe Signature');
         event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
-
-    } catch (err: any) {
-        safeError(`Webhook Signature Verification Failed: ${err.message}`);
-        return res.status(400).send(`Webhook Error: ${err.message}`);
+    } catch {
+        return res.status(400).send('Invalid Stripe Signature');
     }
-
-    // ─── IDEMPOTENCY GATE: Check if this Stripe event was already processed ───
-    // ORIGINAL: No event-level deduplication. Stripe retries could cause
-    // double-processing if concurrent deliveries raced past the billId check.
-    const isNewEvent = await claimWebhookEvent(event.id, event.type, region, regionalDb);
-    if (!isNewEvent) {
-        // Already processed — acknowledge to Stripe so it stops retrying
-        return res.json({ received: true, deduplicated: true });
+    let claim: EventClaim;
+    try {
+        claim = await claimEvent(regionalDb, event.id, event.type, region);
+    } catch {
+        safeError('[WEBHOOK] Claim store unavailable; delivery must retry');
+        return res.status(503).json({ received: false });
     }
-
-    if (event.type === 'payment_intent.succeeded') {
-        const paymentIntent = event.data.object as Stripe.PaymentIntent;
-        safeLog(`Payment Captured: ${paymentIntent.id} in region ${region}`);
-        try {
+    if (claim.state === 'completed') return res.json({ received: true, deduplicated: true });
+    if (claim.state === 'busy') return res.status(503).json({ received: false });
+    try {
+        if (event.type === 'payment_intent.succeeded') {
+            const paymentIntent = event.data.object as Stripe.PaymentIntent;
+            safeLog(`Payment Captured: ${paymentIntent.id} in region ${region}`);
             await handlePaymentSuccess(paymentIntent, regionalDb, region);
-        } catch {
-            // Release the claim so Stripe's redelivery is processed instead of being skipped as a duplicate.
-            await regionalDb.send(new DeleteCommand({ TableName: TABLE_WEBHOOK_EVENTS, Key: { eventId: event.id } }))
-                .catch(() => safeError(`[WEBHOOK] Could not release event ${event.id}; manual reconciliation required`));
-            safeError(`[WEBHOOK] Payment sync failed for event ${event.id}; asking Stripe to retry`);
-            return res.status(500).json({ received: false });
+        } else if (event.type === 'payment_intent.payment_failed') {
+            await handlePaymentFailure(event.data.object as Stripe.PaymentIntent, regionalDb, region);
+        } else if (event.type === 'charge.refunded') {
+            const charge = event.data.object as Stripe.Charge;
+            await handleChargeRefunded(charge, regionalDb, region);
+        } else if (['refund.updated', 'charge.refund.updated'].includes(event.type as string)) {
+            await handleRefundUpdated(event.data.object as Stripe.Refund, regionalDb, region);
+        } else if ((event.type as string) === 'refund.failed') {
+            // The pinned SDK types predate refund.failed (added to Event.type in API 2024-10-28.acacia).
+            await handleRefundFailed((event as Stripe.Event).data.object as Stripe.Refund, regionalDb, region);
+        } else if (event.type === 'charge.dispute.created') {
+            const dispute = event.data.object as Stripe.Dispute;
+            await handleDisputeCreated(dispute, regionalDb, region);
+        } else if (event.type === 'charge.dispute.closed') {
+            const dispute = event.data.object as Stripe.Dispute;
+            await handleDisputeClosed(dispute, regionalDb, region);
         }
-    } else if (event.type === 'payment_intent.payment_failed') {
-        const paymentIntent = event.data.object as Stripe.PaymentIntent;
-        try {
-            await handlePaymentFailure(paymentIntent, regionalDb, region);
-        } catch {
-            // The ledger write did not happen; release the claim so Stripe's redelivery records the failure.
-            await regionalDb.send(new DeleteCommand({ TableName: TABLE_WEBHOOK_EVENTS, Key: { eventId: event.id } }))
-                .catch(() => safeError(`[WEBHOOK] Could not release event ${event.id}; manual reconciliation required`));
-            safeError(`[WEBHOOK] Payment failure sync failed for event ${event.id}; asking Stripe to retry`);
-            return res.status(500).json({ received: false });
+        // ─── SUBSCRIPTION WEBHOOK EVENTS ──────────────────────────────────────
+        else if (event.type === 'customer.subscription.created') {
+            await handleSubscriptionCreated(event.data.object as Stripe.Subscription, regionalDb, region, { eventId: event.id, token: claim.token, created: event.created });
+        } else if (event.type === 'customer.subscription.updated') {
+            await handleSubscriptionUpdated(event.data.object as Stripe.Subscription, regionalDb, region, { eventId: event.id, token: claim.token, created: event.created });
+        } else if (event.type === 'customer.subscription.deleted') {
+            await handleSubscriptionDeleted(event.data.object as Stripe.Subscription, regionalDb, region, { eventId: event.id, token: claim.token, created: event.created });
+        } else if (event.type === 'invoice.paid') {
+            const invoice = event.data.object as Stripe.Invoice;
+            if (invoice.subscription) {
+                await handleSubscriptionInvoicePaid(invoice, regionalDb, region, { eventId: event.id, token: claim.token, created: event.created });
+            }
+        } else if (event.type === 'invoice.payment_failed') {
+            const invoice = event.data.object as Stripe.Invoice;
+            if (invoice.subscription) {
+                await handleSubscriptionInvoiceFailed(invoice, regionalDb, region, { eventId: event.id, token: claim.token, created: event.created });
+            }
         }
-    } else if (event.type === 'charge.refunded') {
-        const charge = event.data.object as Stripe.Charge;
-        await handleChargeRefunded(charge, regionalDb, region);
-    } else if ((event.type as string) === 'refund.failed') {
-        // The pinned SDK types predate refund.failed (added to Event.type in API 2024-10-28.acacia).
-        await handleRefundFailed((event as Stripe.Event).data.object as Stripe.Refund, regionalDb, region);
-    } else if (event.type === 'charge.dispute.created') {
-        const dispute = event.data.object as Stripe.Dispute;
-        await handleDisputeCreated(dispute, regionalDb, region);
-    } else if (event.type === 'charge.dispute.closed') {
-        const dispute = event.data.object as Stripe.Dispute;
-        await handleDisputeClosed(dispute, regionalDb, region);
-    }
-    // ─── SUBSCRIPTION WEBHOOK EVENTS ──────────────────────────────────────
-    else if (event.type === 'customer.subscription.created') {
-        await handleSubscriptionCreated(event.data.object as Stripe.Subscription, regionalDb, region);
-    } else if (event.type === 'customer.subscription.updated') {
-        await handleSubscriptionUpdated(event.data.object as Stripe.Subscription, regionalDb, region);
-    } else if (event.type === 'customer.subscription.deleted') {
-        await handleSubscriptionDeleted(event.data.object as Stripe.Subscription, regionalDb, region);
-    } else if (event.type === 'invoice.paid') {
-        const invoice = event.data.object as Stripe.Invoice;
-        if (invoice.subscription) {
-            await handleSubscriptionInvoicePaid(invoice, regionalDb, region);
-        }
-    } else if (event.type === 'invoice.payment_failed') {
-        const invoice = event.data.object as Stripe.Invoice;
-        if (invoice.subscription) {
-            await handleSubscriptionInvoiceFailed(invoice, regionalDb, region);
-        }
-    }
 
-    res.json({ received: true });
+        await completeEvent(regionalDb, event.id, claim.token);
+        return res.json({ received: true });
+    } catch {
+        await releaseEvent(regionalDb, event.id, claim.token)
+            .catch(() => safeError('[WEBHOOK] Claim release failed; lease recovery required'));
+        safeError('[WEBHOOK] Durable processing failed; delivery must retry');
+        return res.status(503).json({ received: false });
+    }
 };
 
 // ─── FIX #3: Payment Failure Handler ────────────────────────────────────────
@@ -350,6 +280,9 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
     }))).Item;
 
     if (existingTxItem && existingTxItem.status === 'PAID') {
+        if (existingTxItem.pharmacyStockStatus === 'PENDING') {
+            await decrementPharmacyStock(regionalDb, billId, paymentIntent.id, existingTxItem);
+        }
         safeLog(`Idempotency Check: Transaction ${billId} is already PAID. Skipping.`);
         return; // STOP EXECUTION HERE
     }
@@ -364,7 +297,8 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
             Key: { billId },
             UpdateExpression: "SET #s = :s, paymentIntentId = :pid, paidAt = :now",
             ExpressionAttributeNames: { "#s": "status" },
-            ExpressionAttributeValues: { ":s": "PAID", ":pid": paymentIntent.id, ":now": timestamp }
+            ConditionExpression: `${PAYABLE_BILL_CONDITION} AND attribute_not_exists(reviewReason)`,
+            ExpressionAttributeValues: { ":s": "PAID", ":pid": paymentIntent.id, ":now": timestamp, ...PAYABLE_BILL_VALUES }
         }
     });
 
@@ -403,6 +337,15 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
         // collection: ISSUED (first fill) or PENDING (refill, which may still carry the previous fill's PAID flag).
         transactItems[0].Update.ConditionExpression = PAYABLE_BILL_CONDITION;
         Object.assign(transactItems[0].Update.ExpressionAttributeValues, PAYABLE_BILL_VALUES);
+        const stockRx = (await regionalDb.send(new GetCommand({
+            TableName: TABLE_PRESCRIPTIONS, Key: { prescriptionId }, ConsistentRead: true,
+        }))).Item;
+        const stockDrugId = typeof stockRx?.medication === 'string' ? stockRx.medication : '';
+        const stockPharmacyId = stockRx?.pharmacyId || pharmacyId || setting('DEFAULT_PHARMACY_ID');
+        Object.assign(transactItems[0].Update.ExpressionAttributeValues, {
+            ':stockStatus': 'PENDING', ':stockDrug': stockDrugId, ':stockPharmacy': stockPharmacyId,
+        });
+        transactItems[0].Update.UpdateExpression += ', pharmacyStockStatus = :stockStatus, pharmacyStockDrugId = :stockDrug, pharmacyStockPharmacyId = :stockPharmacy';
         transactItems.push({
             Update: {
                 TableName: TABLE_PRESCRIPTIONS,
@@ -413,14 +356,15 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
                 ExpressionAttributeValues: { ":ps": "PAID", ":rs": "READY_FOR_PICKUP", ":now": timestamp, ":issued": "ISSUED", ":pending": "PENDING" }
             }
         });
-    } else if (type === 'BOOKING_FEE' && referenceId) {
+    } else if (paymentType === 'BOOKING_FEE' && (existingTxItem?.referenceId ?? referenceId)) {
         transactItems.push({
             Update: {
                 TableName: TABLE_APPOINTMENTS,
-                Key: { appointmentId: referenceId },
+                Key: { appointmentId: existingTxItem?.referenceId ?? referenceId },
                 UpdateExpression: "SET paymentStatus = :ps, #s = :confirmed",
+                ConditionExpression: "#s IN (:pending, :failed)",
                 ExpressionAttributeNames: { "#s": "status" },
-                ExpressionAttributeValues: { ":ps": "paid", ":confirmed": "CONFIRMED" }
+                ExpressionAttributeValues: { ":ps": "paid", ":confirmed": "CONFIRMED", ":pending": "PENDING_PAYMENT", ":failed": "PAYMENT_FAILED" }
             }
         });
     }
@@ -457,12 +401,47 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
             // A settled debt is a real payment, recorded below like any other; nothing is dispensed for it.
             safeLog(`[WEBHOOK] Payment ${billId} settled the unpaid bill of an already-collected fill`);
         }
-        if (!settledDebt) await decrementPharmacyStock(regionalDb, prescriptionId, pharmacyId);
+        if (!settledDebt) {
+            const recorded = (await regionalDb.send(new GetCommand({
+                TableName: requiredResourceName('TABLE_TRANSACTIONS'), Key: { billId }, ConsistentRead: true,
+            }))).Item;
+            if (!recorded) throw new Error('Recorded pharmacy payment unavailable');
+            await decrementPharmacyStock(regionalDb, billId, paymentIntent.id, recorded);
+        }
     }
 
     try {
-        // Other payment types keep their existing best-effort write.
-        if (!prescriptionId) await regionalDb.send(new TransactWriteCommand({ TransactItems: transactItems }));
+        // Record other payment types atomically; infrastructure failures request delivery retries.
+        if (!prescriptionId) {
+            try {
+                await regionalDb.send(new TransactWriteCommand({ TransactItems: transactItems }));
+            } catch (error) {
+                const codes = cancellationCodes(error);
+                if (codes[0] === 'None' && codes[1] === 'ConditionalCheckFailed' && paymentType === 'BOOKING_FEE') {
+                    // Cancellation can win after capture. Keep the clinical lifecycle closed while recording the
+                    // actual money and handing the refund decision to reconciliation. The payable condition fences
+                    // a concurrent successful settlement or refund; database failures remain retryable.
+                    try {
+                        await regionalDb.send(new UpdateCommand({
+                            TableName: requiredResourceName('TABLE_TRANSACTIONS'), Key: { billId },
+                            UpdateExpression: 'SET #s = :s, paymentIntentId = :pid, paidAt = :now, reviewReason = :reason',
+                            ConditionExpression: PAYABLE_BILL_CONDITION,
+                            ExpressionAttributeNames: { '#s': 'status' },
+                            ExpressionAttributeValues: { ':s': 'PAID', ':pid': paymentIntent.id, ':now': timestamp,
+                                ':reason': 'APPOINTMENT_NOT_PAYABLE', ...PAYABLE_BILL_VALUES },
+                        }));
+                    } catch (reviewError: unknown) {
+                        if ((reviewError as { name?: string })?.name !== 'ConditionalCheckFailedException') throw reviewError;
+                    }
+                    return;
+                }
+                if (codes[0] === 'ConditionalCheckFailed' && codes.every(code => ['None', 'ConditionalCheckFailed'].includes(code))) {
+                    safeLog('[WEBHOOK] Settlement refused for a terminal or changed ledger');
+                    return;
+                }
+                throw error;
+            }
+        }
         safeLog(`DATABASE SYNCED: Transaction ${billId} + ${type} Record`);
 
         // Push revenue to BigQuery (patientId hashed internally by pushRevenueToBigQuery)
@@ -517,6 +496,7 @@ async function handlePaymentSuccess(paymentIntent: Stripe.PaymentIntent, regiona
             });
     } catch (error) {
         safeError("CRITICAL DB ERROR: Webhook failed to write to Regional DynamoDB");
+        throw error;
     }
 }
 
@@ -579,22 +559,43 @@ function cancellationCodes(error: unknown): string[] {
         : [];
 }
 
-/** Stock is bookkeeping: a missing or empty inventory row must never un-record a captured payment. */
-async function decrementPharmacyStock(regionalDb: any, prescriptionId: string, pharmacyId?: string) {
-    try {
-        const rx = (await regionalDb.send(new GetCommand({
-            TableName: TABLE_PRESCRIPTIONS, Key: { prescriptionId }, ProjectionExpression: "medication, pharmacyId"
-        }))).Item;
-        if (!rx?.medication) return;
-        await regionalDb.send(new UpdateCommand({
-            TableName: TABLE_INVENTORY,
-            Key: { pharmacyId: rx.pharmacyId || pharmacyId || setting("DEFAULT_PHARMACY_ID"), drugId: rx.medication },
-            UpdateExpression: "SET stock = stock - :one",
-            ConditionExpression: "stock > :zero",
-            ExpressionAttributeValues: { ":one": 1, ":zero": 0 }
-        }));
-    } catch {
-        safeError(`[WEBHOOK] Pharmacy stock for ${prescriptionId} requires reconciliation`);
+/** A bill's durable stock marker makes both a lost settlement reply and a lost stock reply recoverable. */
+async function decrementPharmacyStock(regionalDb: ReturnType<typeof getRegionalClient>, billId: string,
+    paymentIntentId: string, bill: Record<string, unknown>) {
+    if (bill.pharmacyStockStatus !== 'PENDING') return;
+    const marker = (state: string) => ({
+        TableName: requiredResourceName('TABLE_TRANSACTIONS'), Key: { billId },
+        UpdateExpression: 'SET pharmacyStockStatus = :stock',
+        ConditionExpression: '#s = :paid AND paymentIntentId = :pid AND pharmacyStockStatus = :pending',
+        ExpressionAttributeNames: { '#s': 'status' },
+        ExpressionAttributeValues: { ':paid': 'PAID', ':pid': paymentIntentId, ':pending': 'PENDING', ':stock': state },
+    });
+    let needsReview = !bill.pharmacyStockDrugId || !bill.pharmacyStockPharmacyId;
+    if (!needsReview) {
+        try {
+            await regionalDb.send(new TransactWriteCommand({ TransactItems: [
+                { Update: marker('APPLIED') },
+                { Update: {
+                    TableName: TABLE_INVENTORY,
+                    Key: { pharmacyId: String(bill.pharmacyStockPharmacyId), drugId: String(bill.pharmacyStockDrugId) },
+                    UpdateExpression: 'SET stock = stock - :one', ConditionExpression: 'stock > :zero',
+                    ExpressionAttributeValues: { ':one': 1, ':zero': 0 },
+                } },
+            ] }));
+            return;
+        } catch (error) {
+            const codes = cancellationCodes(error);
+            if (codes[0] === 'ConditionalCheckFailed') return;
+            if (codes[0] !== 'None' || codes[1] !== 'ConditionalCheckFailed') throw error;
+            needsReview = true;
+        }
+    }
+    if (needsReview) {
+        try { await regionalDb.send(new UpdateCommand(marker('REVIEW'))); }
+        catch (error) {
+            if ((error as { name?: string })?.name !== 'ConditionalCheckFailedException') throw error;
+        }
+        safeError('[WEBHOOK] Captured pharmacy payment requires inventory reconciliation');
     }
 }
 
@@ -605,9 +606,24 @@ async function handleChargeRefunded(charge: Stripe.Charge, regionalDb: any, regi
     safeLog(`Charge Refunded: ${charge.id}, billId: ${billId || 'unknown'}`);
 
     // Atomic update: transaction + appointment refund status
-    const appointmentId = charge.metadata?.appointmentId || charge.metadata?.referenceId;
+    const ledger = billId ? (await regionalDb.send(new GetCommand({
+        TableName: requiredResourceName('TABLE_TRANSACTIONS'), Key: { billId }, ConsistentRead: true,
+    }))).Item : undefined;
+    if (billId && !ledger) throw new Error('Refund ledger row unavailable; reconciliation required');
+    // A prescription reference is not an appointment. Use the authoritative bill classification when present.
+    const appointmentId = ledger ? (ledger.type === 'BOOKING_FEE' ? ledger.referenceId : undefined)
+        : charge.metadata?.appointmentId;
     const refundNow = new Date().toISOString();
+    const partial = charge.refunded === false || (typeof charge.amount === 'number' && charge.amount_refunded < charge.amount);
+    const previousLedgerAmount = ledger?.refundedAmountMinor;
+    if ((typeof previousLedgerAmount === 'number' && previousLedgerAmount >= charge.amount_refunded) ||
+        (partial && ledger?.status === 'REFUNDED')) return;
 
+    const observed = appointmentId ? (await regionalDb.send(new GetCommand({
+        TableName: TABLE_APPOINTMENTS, Key: { appointmentId }, ConsistentRead: true,
+    }))).Item : undefined;
+    const previousAmount = observed?.refundedAmountMinor;
+    if (typeof previousAmount === 'number' && previousAmount >= charge.amount_refunded) return;
     try {
         const transactItems: any[] = [];
 
@@ -616,9 +632,13 @@ async function handleChargeRefunded(charge: Stripe.Charge, regionalDb: any, regi
                 Update: {
                     TableName: requiredResourceName("TABLE_TRANSACTIONS"),
                     Key: { billId },
-                    UpdateExpression: "SET #s = :s, refundedAt = :now, refundId = :rid",
+                    UpdateExpression: "SET #s = :s, refundedAt = :now, refundId = :rid, refundedAmountMinor = :amount",
                     ExpressionAttributeNames: { "#s": "status" },
-                    ExpressionAttributeValues: { ":s": "REFUNDED", ":now": refundNow, ":rid": charge.id }
+                    ConditionExpression: 'billId = :billKey AND ' + (previousLedgerAmount === undefined
+                        ? 'attribute_not_exists(refundedAmountMinor)' : 'refundedAmountMinor = :previousLedger'),
+                    ExpressionAttributeValues: { ":s": partial ? "PARTIALLY_REFUNDED" : "REFUNDED", ":now": refundNow,
+                        ":rid": charge.id, ":amount": charge.amount_refunded, ':billKey': billId,
+                        ...(previousLedgerAmount === undefined ? {} : { ':previousLedger': previousLedgerAmount }) }
                 }
             });
         }
@@ -628,9 +648,10 @@ async function handleChargeRefunded(charge: Stripe.Charge, regionalDb: any, regi
                 Update: {
                     TableName: TABLE_APPOINTMENTS,
                     Key: { appointmentId },
-                    UpdateExpression: 'SET #status = :s, paymentStatus = :ps, lastUpdated = :now',
-                    ExpressionAttributeNames: { '#status': 'status' },
-                    ExpressionAttributeValues: { ':s': 'REFUNDED', ':ps': 'refunded', ':now': refundNow }
+                    UpdateExpression: 'SET paymentStatus = :ps, lastUpdated = :now, refundedAmountMinor = :amount',
+                    ConditionExpression: previousAmount === undefined ? 'attribute_not_exists(refundedAmountMinor)' : 'refundedAmountMinor = :previous',
+                    ExpressionAttributeValues: { ':ps': partial ? 'partially_refunded' : 'refunded', ':now': refundNow, ':amount': charge.amount_refunded,
+                        ...(previousAmount === undefined ? {} : { ':previous': previousAmount }) }
                 }
             });
         }
@@ -639,7 +660,8 @@ async function handleChargeRefunded(charge: Stripe.Charge, regionalDb: any, regi
             await regionalDb.send(new TransactWriteCommand({ TransactItems: transactItems }));
         }
     } catch (err: any) {
-        safeError(`Failed atomic refund update (billId: ${billId}, appointmentId: ${appointmentId}): ${err.message}`);
+        safeError(`Failed atomic refund update (billId: ${billId}, appointmentId: ${appointmentId})`);
+        throw err;
     }
 
     // Audit log
@@ -708,8 +730,49 @@ async function handleChargeRefunded(charge: Stripe.Charge, regionalDb: any, regi
 /**
  * A failed refund's money goes back to the Stripe balance and must be returned another way (docs.stripe.com/refunds).
  * Only the refund our cancellation recorded is changed, on the appointment and its refund row together; anything else
- * is logged for a person. The event is already claimed, so this never throws.
+ * is logged for a person. Infrastructure failures propagate so the event is retried.
  */
+/** A provider reply can beat cancellation finalization. Missing local refund IDs are retryable, never receipts. */
+async function requireRefundRecords(regionalDb: ReturnType<typeof getRegionalClient>, appointmentId: string): Promise<void> {
+    const appointment = (await regionalDb.send(new GetCommand({
+        TableName: TABLE_APPOINTMENTS, Key: { appointmentId }, ConsistentRead: true,
+    }))).Item;
+    const bill = (await regionalDb.send(new GetCommand({
+        TableName: requiredResourceName('TABLE_TRANSACTIONS'), Key: { billId: refundBillId(appointmentId) }, ConsistentRead: true,
+    }))).Item;
+    if (!appointment?.refundId || !bill?.refundId) throw new Error('Cancellation refund records not finalized');
+}
+
+/** Only a matching pending cancellation refund can advance; late pending events never regress it. */
+async function handleRefundUpdated(refund: Stripe.Refund, regionalDb: ReturnType<typeof getRegionalClient>, region: string) {
+    if (refund.status === 'failed' || refund.status === 'canceled') {
+        return handleRefundFailed(refund, regionalDb, region);
+    }
+    if (refund.status !== 'succeeded' || !refund.metadata?.appointmentRefund) return;
+    const appointmentId = refund.metadata.appointmentRefund;
+    const now = new Date().toISOString();
+    const values = { ':id': refund.id, ':pending': 'PENDING', ':issued': 'ISSUED', ':now': now };
+    try {
+        await regionalDb.send(new TransactWriteCommand({ TransactItems: [
+            { Update: {
+                TableName: TABLE_APPOINTMENTS, Key: { appointmentId },
+                UpdateExpression: 'SET refundStatus = :issued, lastUpdated = :now',
+                ConditionExpression: 'refundId = :id AND refundStatus = :pending', ExpressionAttributeValues: values,
+            } },
+            { Update: {
+                TableName: requiredResourceName('TABLE_TRANSACTIONS'), Key: { billId: refundBillId(appointmentId) },
+                UpdateExpression: 'SET refundStatus = :issued, refundCompletedAt = :now',
+                ConditionExpression: 'refundId = :id AND refundStatus = :pending', ExpressionAttributeValues: values,
+            } },
+        ] }));
+    } catch (error) {
+        const codes = cancellationCodes(error);
+        if (!codes.length || codes.some(code => !['None', 'ConditionalCheckFailed'].includes(code))) throw error;
+        await requireRefundRecords(regionalDb, appointmentId);
+        safeLog('[WEBHOOK] Refund completion ignored for changed or unmatched records');
+    }
+}
+
 async function handleRefundFailed(refund: Stripe.Refund, regionalDb: ReturnType<typeof getRegionalClient>, region: string) {
     const appointmentId = refund.metadata?.appointmentRefund;
     if (!appointmentId) {
@@ -740,6 +803,9 @@ async function handleRefundFailed(refund: Stripe.Refund, regionalDb: ReturnType<
     } catch (err: unknown) {
         const reasons = (err as { CancellationReasons?: { Code?: string }[] })?.CancellationReasons?.map(r => r.Code ?? 'None').join(',');
         safeError(`Refund ${refund.id} failed but was not recorded for appointment ${appointmentId} (${err instanceof Error ? err.name : 'unknown error'}${reasons ? `: ${reasons}` : ''}); manual refund follow-up required`);
+        const codes = cancellationCodes(err);
+        if (!codes.length || codes.some(code => !['None', 'ConditionalCheckFailed'].includes(code))) throw err;
+        await requireRefundRecords(regionalDb, appointmentId);
         return;
     }
     safeError(`Refund ${refund.id} failed (${refund.failure_reason ?? 'unknown'}); appointment ${appointmentId} marked for manual refund`);
@@ -900,10 +966,54 @@ async function handleDisputeClosed(dispute: Stripe.Dispute, regionalDb: any, reg
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * customer.subscription.created — First successful payment
- * THIS is the only place a subscription becomes active (loophole #3).
+ * Creation can precede payment. Initialize without benefits; invoice.paid activates them.
+ * Replayed creation must preserve an existing allowance and family state.
  */
-async function handleSubscriptionCreated(subscription: Stripe.Subscription, regionalDb: any, region: string) {
+type SubscriptionFence = { eventId: string; token: string; created: number };
+
+function subscriptionSnapshot(current: any) {
+    const names: Record<string, string> = {}, values: Record<string, unknown> = {}, conditions: string[] = [];
+    for (const field of ['stripeSubscriptionId', 'planId', 'status', 'cycleStart', 'cycleEnd', 'benefitsPendingInvoice', 'lastRenewalInvoiceId', 'lastRenewalPeriodStart', 'lastPaidEventCreated', 'lastLifecycleEventCreated', 'lastLifecycleEventId', 'lastLifecyclePeriodStart']) {
+        const name = `#snapshot${conditions.length}`, value = `:snapshot${conditions.length}`;
+        names[name] = field;
+        if (current[field] === undefined) conditions.push(`attribute_not_exists(${name})`);
+        else { conditions.push(`${name} = ${value}`); values[value] = current[field]; }
+    }
+    return { names, values, conditions };
+}
+
+/** Status delivery must not overwrite a different subscription, newer payment, or newer worker. */
+async function applySubscriptionLifecycle(current: any, changes: Record<string, unknown>, regionalDb: any, fence: SubscriptionFence): Promise<boolean> {
+    if (!Number.isSafeInteger(fence.created) || fence.created <= 0) throw new Error('Invalid subscription event timestamp');
+    if (current.lastLifecycleEventId === fence.eventId) return true;
+    const terminal = changes.status === SubscriptionStatus.CANCELLED;
+    if (!terminal && current.lastLifecycleEventCreated !== undefined) {
+        if (!Number.isSafeInteger(current.lastLifecycleEventCreated)) throw new Error('Subscription lifecycle requires reconciliation');
+        if (current.lastLifecycleEventCreated > fence.created) return false;
+        // Stripe timestamps have second precision; equal-time conflicting deliveries need reconciliation.
+        if (current.lastLifecycleEventCreated === fence.created) throw new Error('Ambiguous subscription lifecycle order');
+    }
+    const { names, values, conditions } = subscriptionSnapshot(current);
+    const assignments: string[] = [];
+    const update = { ...changes, lastLifecycleEventCreated: Math.max(fence.created, typeof current.lastLifecycleEventCreated === 'number' ? current.lastLifecycleEventCreated : fence.created), lastLifecycleEventId: fence.eventId, updatedAt: new Date().toISOString() };
+    for (const [field, content] of Object.entries(update)) {
+        const name = `#change${assignments.length}`, value = `:change${assignments.length}`;
+        names[name] = field; values[value] = content; assignments.push(`${name} = ${value}`);
+    }
+    try {
+        await regionalDb.send(new TransactWriteCommand({ TransactItems: [
+            { ConditionCheck: eventClaimCondition(fence.eventId, fence.token) },
+            { Update: { TableName: TABLE_SUBSCRIPTIONS, Key: { patientId: current.patientId },
+                ConditionExpression: conditions.join(' AND '), UpdateExpression: 'SET ' + assignments.join(', '),
+                ExpressionAttributeNames: names, ExpressionAttributeValues: values } },
+        ] }));
+    } catch (error) {
+        const observed = (await regionalDb.send(new GetCommand({ TableName: TABLE_SUBSCRIPTIONS, Key: { patientId: current.patientId }, ConsistentRead: true }))).Item;
+        if (observed?.stripeSubscriptionId !== current.stripeSubscriptionId || observed?.lastLifecycleEventId !== fence.eventId) throw error;
+    }
+    return true;
+}
+async function handleSubscriptionCreated(subscription: Stripe.Subscription, regionalDb: any, region: string, fence: SubscriptionFence) {
     const { patientId, planId, consentTimestamp, consentTermsVersion } = subscription.metadata || {};
     if (!patientId || !planId) {
         safeError(`Subscription created without metadata: ${subscription.id}`);
@@ -919,18 +1029,30 @@ async function handleSubscriptionCreated(subscription: Stripe.Subscription, regi
     const now = new Date().toISOString();
     const cycleStart = new Date(subscription.current_period_start * 1000).toISOString();
     const cycleEnd = new Date(subscription.current_period_end * 1000).toISOString();
+    const existing = (await regionalDb.send(new GetCommand({ TableName: TABLE_SUBSCRIPTIONS, Key: { patientId }, ConsistentRead: true }))).Item;
+    if (existing?.stripeSubscriptionId === subscription.id) return;
+    // A replacement must follow a cancelled cycle. Ambiguous legacy state requires reconciliation.
+    if (existing && (existing.status !== SubscriptionStatus.CANCELLED || !Number.isFinite(Date.parse(existing.cycleEnd)) ||
+        Date.parse(cycleStart) < Date.parse(existing.cycleEnd))) throw new Error('Subscription replacement requires reconciliation');
 
-    await regionalDb.send(new PutCommand({
+    try { await regionalDb.send(new TransactWriteCommand({ TransactItems: [
+        { ConditionCheck: eventClaimCondition(fence.eventId, fence.token) },
+        { Put: {
         TableName: TABLE_SUBSCRIPTIONS,
+        ConditionExpression: existing ? 'stripeSubscriptionId = :previous AND #status = :cancelled AND cycleEnd = :previousEnd' : 'attribute_not_exists(patientId)',
+        ...(existing ? { ExpressionAttributeNames: { '#status': 'status' }, ExpressionAttributeValues: {
+            ':previous': existing.stripeSubscriptionId, ':cancelled': SubscriptionStatus.CANCELLED, ':previousEnd': existing.cycleEnd,
+        } } : {}),
         Item: {
             patientId,
             planId,
-            status: SubscriptionStatus.ACTIVE,
-            discountPercent: plan.discountPercent,
+            status: SubscriptionStatus.INCOMPLETE,
+            benefitsPendingInvoice: true,
+            discountPercent: 0,
             stripeCustomerId: subscription.customer as string,
             stripeSubscriptionId: subscription.id,
             stripePriceId: subscription.items.data[0]?.price?.id || '',
-            freeGpVisitsRemaining: plan.freeGpVisitsPerMonth,
+            freeGpVisitsRemaining: 0,
             familyMembers: [],
             familyChangesThisYear: 0,
             cycleStart,
@@ -942,21 +1064,25 @@ async function handleSubscriptionCreated(subscription: Stripe.Subscription, regi
             createdAt: now,
             updatedAt: now,
         },
-    }));
+    } } ] })); } catch (error) {
+        // A committed response may have been lost, or another delivery initialized it first.
+        const current = (await regionalDb.send(new GetCommand({ TableName: TABLE_SUBSCRIPTIONS, Key: { patientId }, ConsistentRead: true }))).Item;
+        if (current?.stripeSubscriptionId !== subscription.id) throw error;
+    }
 
     await writeAuditLog(
-        patientId, patientId, 'SUBSCRIPTION_ACTIVATED',
-        `Plan: ${plan.name}, Discount: ${plan.discountPercent}%, Cycle: ${cycleStart} to ${cycleEnd}`,
+        patientId, patientId, 'SUBSCRIPTION_INITIALIZED',
+        `Plan: ${plan.name}, payment confirmation pending, Cycle: ${cycleStart} to ${cycleEnd}`,
         { region }
     );
 
-    safeLog(`Subscription activated: ${subscription.id}, patient: ${patientId}, plan: ${planId}`);
+    safeLog(`Subscription initialized: ${subscription.id}, payment confirmation pending`);
 }
 
 /**
  * customer.subscription.updated — Status change, plan change, or cancellation pending.
  */
-async function handleSubscriptionUpdated(subscription: Stripe.Subscription, regionalDb: any, region: string) {
+async function handleSubscriptionUpdated(subscription: Stripe.Subscription, regionalDb: any, region: string, fence: SubscriptionFence) {
     const { patientId } = subscription.metadata || {};
     if (!patientId) return;
 
@@ -969,21 +1095,22 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription, regi
         unpaid: SubscriptionStatus.PAST_DUE,
     };
 
-    const newStatus = statusMap[subscription.status] || SubscriptionStatus.ACTIVE;
+    const mappedStatus = statusMap[subscription.status];
+    if (!mappedStatus) throw new Error('Unsupported subscription status requires reconciliation');
+    const current = (await regionalDb.send(new GetCommand({ TableName: TABLE_SUBSCRIPTIONS, Key: { patientId }, ConsistentRead: true }))).Item;
+    if (!current) throw new Error('Subscription update awaits creation');
+    if (current.stripeSubscriptionId !== subscription.id) return;
+    if (current.status === SubscriptionStatus.CANCELLED && current.lastLifecycleEventId !== fence.eventId) return;
+    if (mappedStatus !== SubscriptionStatus.CANCELLED && typeof current.lastPaidEventCreated === 'number' && current.lastPaidEventCreated > fence.created) return;
+    if (mappedStatus !== SubscriptionStatus.CANCELLED && typeof current.lastPaidEventCreated === 'number' && current.lastPaidEventCreated === fence.created && mappedStatus !== current.status) throw new Error('Ambiguous paid subscription status order');
+    if (!Number.isSafeInteger(subscription.current_period_start) || !Number.isSafeInteger(subscription.current_period_end)) throw new Error('Invalid subscription update period');
     const cycleEnd = new Date(subscription.current_period_end * 1000).toISOString();
-
-    await regionalDb.send(new UpdateCommand({
-        TableName: TABLE_SUBSCRIPTIONS,
-        Key: { patientId },
-        UpdateExpression: 'SET #status = :status, cancelAtPeriodEnd = :cap, cycleEnd = :ce, updatedAt = :now',
-        ExpressionAttributeNames: { '#status': 'status' },
-        ExpressionAttributeValues: {
-            ':status': newStatus,
-            ':cap': subscription.cancel_at_period_end || false,
-            ':ce': cycleEnd,
-            ':now': new Date().toISOString(),
-        },
-    }));
+    if (mappedStatus !== SubscriptionStatus.CANCELLED && (subscription.current_period_start * 1000 < Date.parse(current.cycleStart) || Date.parse(cycleEnd) < Date.parse(current.cycleEnd))) return;
+    // An active provider snapshot alone does not prove the first invoice has been applied.
+    const newStatus = mappedStatus === SubscriptionStatus.ACTIVE && current.benefitsPendingInvoice === true ? SubscriptionStatus.INCOMPLETE : mappedStatus;
+    if (!await applySubscriptionLifecycle(current, { status: newStatus, cancelAtPeriodEnd: subscription.cancel_at_period_end || false, cycleEnd, lastLifecyclePeriodStart: subscription.current_period_start,
+        ...(newStatus === SubscriptionStatus.CANCELLED ? { discountPercent: 0, freeGpVisitsRemaining: 0 } : {}),
+    }, regionalDb, fence)) return;
 
     await writeAuditLog(
         patientId, patientId, 'SUBSCRIPTION_STATUS_CHANGED',
@@ -998,21 +1125,15 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription, regi
  * customer.subscription.deleted — Subscription fully cancelled.
  * Remove discount, zero out free visits.
  */
-async function handleSubscriptionDeleted(subscription: Stripe.Subscription, regionalDb: any, region: string) {
+async function handleSubscriptionDeleted(subscription: Stripe.Subscription, regionalDb: any, region: string, fence: SubscriptionFence) {
     const { patientId } = subscription.metadata || {};
     if (!patientId) return;
 
-    await regionalDb.send(new UpdateCommand({
-        TableName: TABLE_SUBSCRIPTIONS,
-        Key: { patientId },
-        UpdateExpression: 'SET #status = :cancelled, discountPercent = :zero, freeGpVisitsRemaining = :zero, updatedAt = :now',
-        ExpressionAttributeNames: { '#status': 'status' },
-        ExpressionAttributeValues: {
-            ':cancelled': SubscriptionStatus.CANCELLED,
-            ':zero': 0,
-            ':now': new Date().toISOString(),
-        },
-    }));
+    const current = (await regionalDb.send(new GetCommand({ TableName: TABLE_SUBSCRIPTIONS, Key: { patientId }, ConsistentRead: true }))).Item;
+    if (!current) throw new Error('Subscription deletion awaits creation');
+    if (current.stripeSubscriptionId !== subscription.id) return;
+    if (current.status === SubscriptionStatus.CANCELLED && current.lastLifecycleEventId !== fence.eventId) return;
+    if (!await applySubscriptionLifecycle(current, { status: SubscriptionStatus.CANCELLED, discountPercent: 0, freeGpVisitsRemaining: 0 }, regionalDb, fence)) return;
 
     await writeAuditLog(
         patientId, patientId, 'SUBSCRIPTION_CANCELLED',
@@ -1027,7 +1148,7 @@ async function handleSubscriptionDeleted(subscription: Stripe.Subscription, regi
  * invoice.paid — Monthly renewal succeeded.
  * Reset free GP visits. Update cycle dates.
  */
-async function handleSubscriptionInvoicePaid(invoice: Stripe.Invoice, regionalDb: any, region: string) {
+async function handleSubscriptionInvoicePaid(invoice: Stripe.Invoice, regionalDb: any, region: string, fence: SubscriptionFence) {
     const subscriptionId = invoice.subscription as string;
     if (!subscriptionId) return;
 
@@ -1041,23 +1162,58 @@ async function handleSubscriptionInvoicePaid(invoice: Stripe.Invoice, regionalDb
         return;
     }
 
-    const plan = PLANS[planId as PlanId];
-    const periodStart = invoice.period_start ? new Date(invoice.period_start * 1000).toISOString() : new Date().toISOString();
-    const periodEnd = invoice.period_end ? new Date(invoice.period_end * 1000).toISOString() : new Date().toISOString();
+    // Adjustments and prorations do not buy another monthly allowance.
+    if (!['subscription_create', 'subscription_cycle'].includes(invoice.billing_reason || '')) return;
+    if (!invoice.id || !Number.isSafeInteger(invoice.period_start) || !Number.isSafeInteger(invoice.period_end) ||
+        invoice.period_start <= 0 || invoice.period_end < invoice.period_start) throw new Error('Invalid subscription invoice period');
+    const current = (await regionalDb.send(new GetCommand({ TableName: TABLE_SUBSCRIPTIONS, Key: { patientId }, ConsistentRead: true }))).Item;
+    if (!current || current.stripeSubscriptionId !== subscriptionId) throw new Error('Subscription invoice awaits matching subscription');
+    if (current.status === SubscriptionStatus.CANCELLED) return;
+    const plan = PLANS[current.planId as PlanId];
+    if (!plan || (planId && planId !== current.planId)) throw new Error('Subscription invoice plan requires reconciliation');
+    const periodStart = new Date(invoice.period_start * 1000).toISOString();
+    const periodEnd = new Date(invoice.period_end * 1000).toISOString();
+    const alreadyApplied = current.lastRenewalInvoiceId === invoice.id;
+    const existingCycleStart = Date.parse(current.cycleStart);
+    if (!Number.isFinite(existingCycleStart)) throw new Error('Subscription cycle requires reconciliation');
+    if (!alreadyApplied && (invoice.period_start * 1000 < existingCycleStart ||
+        (invoice.period_start * 1000 === existingCycleStart && current.benefitsPendingInvoice !== true))) return;
+    if (!alreadyApplied && typeof current.lastRenewalPeriodStart === 'number' && current.lastRenewalPeriodStart >= invoice.period_start) return;
+    if (!alreadyApplied && typeof current.lastLifecyclePeriodStart === 'number' && current.lastLifecyclePeriodStart > invoice.period_start) return;
+    if (!Number.isSafeInteger(fence.created) || fence.created <= 0) throw new Error('Invalid paid subscription timestamp');
+    if (!alreadyApplied && typeof current.lastLifecycleEventCreated === 'number' && current.lastLifecycleEventCreated >= fence.created &&
+        current.status !== SubscriptionStatus.ACTIVE && !(current.status === SubscriptionStatus.INCOMPLETE && current.benefitsPendingInvoice === true)) throw new Error('Paid invoice requires lifecycle reconciliation');
+    const snapshot = subscriptionSnapshot(current);
 
-    await regionalDb.send(new UpdateCommand({
+    if (!alreadyApplied) try { await regionalDb.send(new TransactWriteCommand({ TransactItems: [
+        { ConditionCheck: eventClaimCondition(fence.eventId, fence.token) },
+        { Update: {
         TableName: TABLE_SUBSCRIPTIONS,
         Key: { patientId },
-        UpdateExpression: 'SET #status = :active, freeGpVisitsRemaining = :freeGp, cycleStart = :start, cycleEnd = :end, updatedAt = :now',
-        ExpressionAttributeNames: { '#status': 'status' },
+        UpdateExpression: 'SET #status = :active, discountPercent = :discount, freeGpVisitsRemaining = :freeGp, cycleStart = :start, cycleEnd = :end, updatedAt = :now, lastRenewalInvoiceId = :invoice, lastRenewalPeriodStart = :period, benefitsPendingInvoice = :notPending, lastPaidEventCreated = :paidCreated',
+        ConditionExpression: snapshot.conditions.join(' AND ') + ' AND stripeSubscriptionId = :subscription AND planId = :plan AND #status = :observedStatus AND cycleStart = :previousStart AND (attribute_not_exists(lastRenewalPeriodStart) OR lastRenewalPeriodStart < :period) AND (attribute_not_exists(lastRenewalInvoiceId) OR lastRenewalInvoiceId <> :invoice)',
+        ExpressionAttributeNames: { ...snapshot.names, '#status': 'status' },
         ExpressionAttributeValues: {
+            ...snapshot.values,
             ':active': SubscriptionStatus.ACTIVE,
-            ':freeGp': plan?.freeGpVisitsPerMonth || 0,
+            ':discount': plan.discountPercent,
+            ':freeGp': plan.freeGpVisitsPerMonth,
             ':start': periodStart,
             ':end': periodEnd,
             ':now': new Date().toISOString(),
+            ':invoice': invoice.id, ':period': invoice.period_start, ':subscription': subscriptionId,
+            ':plan': current.planId, ':observedStatus': current.status, ':previousStart': current.cycleStart, ':notPending': false,
+            ':paidCreated': fence.created,
         },
-    }));
+    } } ] })); } catch (error) {
+        const observed = (await regionalDb.send(new GetCommand({ TableName: TABLE_SUBSCRIPTIONS, Key: { patientId }, ConsistentRead: true }))).Item;
+        if (observed?.stripeSubscriptionId !== subscriptionId) throw error;
+        if (observed.status === SubscriptionStatus.CANCELLED) return;
+        if (observed.lastRenewalInvoiceId !== invoice.id) {
+            if (typeof observed.lastRenewalPeriodStart === 'number' && observed.lastRenewalPeriodStart >= invoice.period_start) return;
+            throw error;
+        }
+    }
 
     await writeAuditLog(
         patientId, patientId, 'SUBSCRIPTION_RENEWED',
@@ -1072,23 +1228,23 @@ async function handleSubscriptionInvoicePaid(invoice: Stripe.Invoice, regionalDb
  * invoice.payment_failed — Monthly renewal failed.
  * Mark as past_due. Patient gets grace period.
  */
-async function handleSubscriptionInvoiceFailed(invoice: Stripe.Invoice, regionalDb: any, region: string) {
+async function handleSubscriptionInvoiceFailed(invoice: Stripe.Invoice, regionalDb: any, region: string, fence: SubscriptionFence) {
     const subscriptionId = invoice.subscription as string;
     const customerMetadata = (invoice as any).subscription_details?.metadata || {};
     const patientId = customerMetadata.patientId || invoice.metadata?.patientId;
 
     if (!patientId) return;
 
-    await regionalDb.send(new UpdateCommand({
-        TableName: TABLE_SUBSCRIPTIONS,
-        Key: { patientId },
-        UpdateExpression: 'SET #status = :pastDue, updatedAt = :now',
-        ExpressionAttributeNames: { '#status': 'status' },
-        ExpressionAttributeValues: {
-            ':pastDue': SubscriptionStatus.PAST_DUE,
-            ':now': new Date().toISOString(),
-        },
-    }));
+    const current = (await regionalDb.send(new GetCommand({ TableName: TABLE_SUBSCRIPTIONS, Key: { patientId }, ConsistentRead: true }))).Item;
+    if (!current) throw new Error('Failed invoice awaits subscription creation');
+    if (current.stripeSubscriptionId !== subscriptionId) return;
+    if (current.status === SubscriptionStatus.CANCELLED) return;
+    if (!Number.isSafeInteger(invoice.period_start) || invoice.period_start <= 0) throw new Error('Invalid failed invoice period');
+    if (current.lastRenewalInvoiceId === invoice.id || (typeof current.lastRenewalPeriodStart === 'number' && current.lastRenewalPeriodStart >= invoice.period_start)) return;
+    const existingCycleStart = Date.parse(current.cycleStart);
+    if (!Number.isFinite(existingCycleStart)) throw new Error('Subscription cycle requires reconciliation');
+    if (invoice.period_start * 1000 < existingCycleStart) return;
+    if (!await applySubscriptionLifecycle(current, { status: SubscriptionStatus.PAST_DUE }, regionalDb, fence)) return;
 
     await writeAuditLog(
         patientId, patientId, 'SUBSCRIPTION_PAYMENT_FAILED',

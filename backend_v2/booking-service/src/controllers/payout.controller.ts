@@ -1,3 +1,5 @@
+import { getSubscriptionProviderSettings } from '../../../shared/settings';
+import { createStripeClient } from '../providers/stripe';
 import { requestJurisdiction } from '../../../shared/region-context';
 /**
  * Doctor Payout Controller — Weekly Stripe Connect Transfers
@@ -156,9 +158,9 @@ export const executePayouts = catchAsync(async (req: Request, res: Response) => 
     }
 
     const { doctorIds } = req.body; // optional: specific doctors, or all pending
-    const stripeKey = await getSSMParameter('/mediconnect/prod/stripe/secret_key', region, true);
+    const stripeKey = await getSSMParameter(getSubscriptionProviderSettings().parameterPath, region, true);
     if (!stripeKey) throw new Error('Stripe secret not found');
-    const stripe = new Stripe(stripeKey, { apiVersion: '2023-10-16' });
+    const stripe = createStripeClient(stripeKey);
 
     const holdCutoff = new Date();
     holdCutoff.setDate(holdCutoff.getDate() - PAYOUT_HOLD_DAYS);

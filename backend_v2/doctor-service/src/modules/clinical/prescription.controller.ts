@@ -12,7 +12,7 @@ import { validateUSCore } from '../../../../shared/us-core-profiles';
 import { sendNotification } from '../../../../shared/notifications';
 import { encryptPHI, decryptPHI } from '../../../../shared/kms-crypto';
 import { publishEvent, EventType } from '../../../../shared/event-bus';
-import { TABLE_NAMES, setting } from '../../../../shared/settings';
+import { TABLE_NAMES, setting, requiredResourceName } from '../../../../shared/settings';
 import { PAYABLE_BILL_STATUSES } from '../../../../shared/billing-status';
 import { ERASED_MARKER } from '../../../../shared/erasure';
 import { DISPENSED_STATUSES, DISPENSE_EVIDENCE, lastHandover, observedPrescriptionCondition } from '../../../../shared/prescription-handover';
@@ -21,12 +21,12 @@ import { canListPrescriptions, isApprovedClinician, isApprovedPrescriber, isCond
 
 const router = Router();
 const pdfGen = new PDFGenerator();
-const TABLE_RX = "mediconnect-prescriptions";
+const prescriptionsTable = () => requiredResourceName("TABLE_PRESCRIPTIONS");
 const TABLE_DRUGS = TABLE_NAMES.drugInteractions;
-const TABLE_TRANSACTION = "mediconnect-transactions";
-const TABLE_GRAPH = "mediconnect-graph-data";
+const transactionTable = () => requiredResourceName("TABLE_TRANSACTIONS");
+const graphTable = () => requiredResourceName("TABLE_GRAPH");
 const TABLE_ALLERGIES = setting("TABLE_ALLERGIES");
-const AUDIT_TABLE = "mediconnect-audit-logs";
+
 
 const DEFAULT_PHARMACY = setting("DEFAULT_PHARMACY_ID");
 
@@ -155,7 +155,7 @@ export const createPrescription = async (req: Request, res: Response) => {
     // ─── Medication Reconciliation: Drug Class Conflict Check ────────────────
     try {
         const activeRxResult = await docClient.send(new QueryCommand({
-            TableName: TABLE_RX,
+            TableName: prescriptionsTable(),
             IndexName: "PatientIndex",
             KeyConditionExpression: "patientId = :pid",
             ExpressionAttributeValues: { ":pid": patientId },
@@ -271,9 +271,9 @@ export const createPrescription = async (req: Request, res: Response) => {
         // 🟢 ATOMIC TRANSACTION: Solves Data Integrity Violation
         await docClient.send(new TransactWriteCommand({
             TransactItems: [
-                { Put: { TableName: TABLE_TRANSACTION, Item: { billId: uuidv4(), referenceId: prescriptionId, patientId, doctorId, amount: realPrice, status: "PENDING", type: "PHARMACY", createdAt: timestamp } } },
-                { Put: { TableName: TABLE_RX, Item: { ...rxData, doctorId, patientId, signature, status: "ISSUED", pdfUrl: pdfUrl.split("?")[0], isLocked: true, resource: fhirResource } } },
-                { Put: { TableName: TABLE_GRAPH, Item: { PK: `PATIENT#${patientId}`, SK: `DRUG#${medication}`, relationship: "takesMedication", lastInteraction: timestamp } } }
+                { Put: { TableName: transactionTable(), Item: { billId: uuidv4(), referenceId: prescriptionId, patientId, doctorId, amount: realPrice, status: "PENDING", type: "PHARMACY", createdAt: timestamp } } },
+                { Put: { TableName: prescriptionsTable(), Item: { ...rxData, doctorId, patientId, signature, status: "ISSUED", pdfUrl: pdfUrl.split("?")[0], isLocked: true, resource: fhirResource } } },
+                { Put: { TableName: graphTable(), Item: { PK: `PATIENT#${patientId}`, SK: `DRUG#${medication}`, relationship: "takesMedication", lastInteraction: timestamp } } }
             ]
         }));
 
@@ -329,7 +329,7 @@ export const getPrescriptions = async (req: Request, res: Response) => {
 
     res.set('Cache-Control', 'no-store');
     try {
-        if (!await canListPrescriptions((req as any).user ?? {}, { patientId, doctorId }, extractRegion(req), TABLE_GRAPH)) {
+        if (!await canListPrescriptions((req as any).user ?? {}, { patientId, doctorId }, extractRegion(req), graphTable())) {
             return res.status(403).json({ error: "Prescription access is not authorized" });
         }
     } catch (authErr) {
@@ -338,7 +338,7 @@ export const getPrescriptions = async (req: Request, res: Response) => {
     }
 
     try {
-        const params: any = { TableName: TABLE_RX, IndexName: patientId ? "PatientIndex" : "DoctorIndex", KeyConditionExpression: patientId ? "patientId = :id" : "doctorId = :id", ExpressionAttributeValues: { ":id": patientId || doctorId } };
+        const params: any = { TableName: prescriptionsTable(), IndexName: patientId ? "PatientIndex" : "DoctorIndex", KeyConditionExpression: patientId ? "patientId = :id" : "doctorId = :id", ExpressionAttributeValues: { ":id": patientId || doctorId } };
         const data = await docClient.send(new QueryCommand(params));
         const userRegion = extractRegion(req);
         const enhancedPrescriptions = await Promise.all((data.Items || []).map(async (rx: any) => {
@@ -421,7 +421,7 @@ const planRefill = (rx: Row, bills: Row[]): RefillPlan => {
 const restoreUncollectedFill = (docClient: DocClient, rx: Row, plan: Extract<RefillPlan, { kind: "restore" }>) => {
     const pinned = observedRefillCondition(rx);
     const transactItems: NonNullable<TransactWriteCommandInput["TransactItems"]> = [{ Update: {
-        TableName: TABLE_RX, Key: { prescriptionId: rx.prescriptionId },
+        TableName: prescriptionsTable(), Key: { prescriptionId: rx.prescriptionId },
         UpdateExpression: "SET #s = :issued, paymentStatus = :paymentStatus, updatedAt = :now",
         ConditionExpression: `#s = :refillRequested AND ${pinned.expression}`,
         ExpressionAttributeNames: { "#s": "status", ...pinned.names },
@@ -431,7 +431,7 @@ const restoreUncollectedFill = (docClient: DocClient, rx: Row, plan: Extract<Ref
         },
     } }];
     transactItems.push({ ConditionCheck: {
-        TableName: TABLE_TRANSACTION, Key: { billId: plan.openBill.billId },
+        TableName: transactionTable(), Key: { billId: plan.openBill.billId },
         ConditionExpression: "#s = :observedBill",
         ExpressionAttributeNames: { "#s": "status" },
         ExpressionAttributeValues: { ":observedBill": plan.openBill.status },
@@ -446,7 +446,7 @@ export const requestRefill = async (req: Request, res: Response) => {
     const authUser = (req as any).user;
 
     try {
-        const rxRes = await docClient.send(new GetCommand({ TableName: TABLE_RX, Key: { prescriptionId }, ConsistentRead: true }));
+        const rxRes = await docClient.send(new GetCommand({ TableName: prescriptionsTable(), Key: { prescriptionId }, ConsistentRead: true }));
         const rx = rxRes.Item;
         if (!rx) return res.status(404).json({ error: "Prescription not found" });
         if (!isPrescriptionPatient(authUser, rx) && !await isApprovedPrescriber(authUser, rx, region)) {
@@ -466,7 +466,7 @@ export const requestRefill = async (req: Request, res: Response) => {
         if (rx.patientName === ERASED_MARKER) {
             return res.status(409).json({ error: "This patient's records were anonymised by an erasure request. Issue a new prescription if care continues." });
         }
-        const plan = planRefill(rx, await findPrescriptionBills(docClient, TABLE_TRANSACTION, rx.patientId, prescriptionId));
+        const plan = planRefill(rx, await findPrescriptionBills(docClient, transactionTable(), rx.patientId, prescriptionId));
         if (plan.kind === "review") return res.status(409).json({ error: plan.error });
         if (plan.kind === "restore") {
             await restoreUncollectedFill(docClient, rx, plan);
@@ -484,7 +484,7 @@ export const requestRefill = async (req: Request, res: Response) => {
         await docClient.send(new TransactWriteCommand({
             TransactItems: [
                 { Update: {
-                    TableName: TABLE_RX, Key: { prescriptionId },
+                    TableName: prescriptionsTable(), Key: { prescriptionId },
                     UpdateExpression: "SET #s = :pending, paymentStatus = :unpaid, refillsRemaining = refillsRemaining - :one, updatedAt = :now",
                     ConditionExpression: `refillsRemaining = :expected AND #s = :observed AND ${pinned.expression}`,
                     ExpressionAttributeNames: { "#s": "status", ...pinned.names },
@@ -494,7 +494,7 @@ export const requestRefill = async (req: Request, res: Response) => {
                     },
                 } },
                 { Put: {
-                    TableName: TABLE_TRANSACTION,
+                    TableName: transactionTable(),
                     Item: { billId: refillBillId(prescriptionId, remaining), referenceId: prescriptionId, patientId: rx.patientId, doctorId: rx.doctorId, amount: rx.price, status: "PENDING", type: "PHARMACY", createdAt: now },
                     ConditionExpression: "attribute_not_exists(billId)",
                 } },
@@ -521,7 +521,7 @@ export const generateQR = async (req: Request, res: Response) => {
     const pickupEligible: string[] = [RX_STATUS.ISSUED, RX_STATUS.READY_FOR_PICKUP];
 
     try {
-        const rx = (await docClient.send(new GetCommand({ TableName: TABLE_RX, Key: { prescriptionId }, ConsistentRead: true }))).Item;
+        const rx = (await docClient.send(new GetCommand({ TableName: prescriptionsTable(), Key: { prescriptionId }, ConsistentRead: true }))).Item;
         if (!rx) return res.status(404).json({ error: "Prescription not found" });
         if (!isPrescriptionPatient(authUser, rx) && !await isApprovedPrescriber(authUser, rx, region)) {
             return res.status(403).json({ error: "Only the patient or the prescribing clinician can generate this pickup code." });
@@ -538,7 +538,7 @@ export const generateQR = async (req: Request, res: Response) => {
 
         // The condition keeps a dispensed or cancelled fill from being reopened by a concurrent writer.
         await docClient.send(new UpdateCommand({
-            TableName: TABLE_RX,
+            TableName: prescriptionsTable(),
             Key: { prescriptionId },
             UpdateExpression: "SET #status = :ready",
             ConditionExpression: "paymentStatus = :paid AND #status IN (:issued, :ready)",
@@ -571,7 +571,7 @@ export const fulfillPrescription = async (req: Request, res: Response) => {
         if (!await isApprovedClinician(authUser, extractRegion(req))) {
             return res.status(403).json({ error: "Only verified, approved clinicians can dispense prescriptions." });
         }
-        const rxRes = await docClient.send(new GetCommand({ TableName: TABLE_RX, Key: { prescriptionId } }));
+        const rxRes = await docClient.send(new GetCommand({ TableName: prescriptionsTable(), Key: { prescriptionId } }));
         const rx = rxRes.Item;
 
         if (!rx) return res.status(404).json({ error: "Prescription not found" });
@@ -583,7 +583,7 @@ export const fulfillPrescription = async (req: Request, res: Response) => {
         try {
             // Dispense exactly once, even when two scanners submit the same pickup code.
             await docClient.send(new UpdateCommand({
-                TableName: TABLE_RX,
+                TableName: prescriptionsTable(),
                 Key: { prescriptionId },
                 UpdateExpression: "SET #s = :s, dispensedAt = :now, dispensedBy = :by",
                 ConditionExpression: "#s = :ready",
@@ -641,7 +641,7 @@ export const updatePrescription = async (req: Request, res: Response) => {
 
     try {
         // 🟢 HIPAA FIX: Fetch the record first to get the Patient ID for the Audit Log
-        const rxRes = await docClient.send(new GetCommand({ TableName: TABLE_RX, Key: { prescriptionId }, ConsistentRead: true }));
+        const rxRes = await docClient.send(new GetCommand({ TableName: prescriptionsTable(), Key: { prescriptionId }, ConsistentRead: true }));
         if (!rxRes.Item) return res.status(404).json({ error: "Not found" });
         if (!await isApprovedPrescriber(authUser, rxRes.Item, region)) {
             return res.status(403).json({ error: "Only the prescribing clinician can update this prescription." });
@@ -653,7 +653,7 @@ export const updatePrescription = async (req: Request, res: Response) => {
         const realPatientId = rxRes.Item.patientId;
 
         await docClient.send(new UpdateCommand({
-            TableName: TABLE_RX, Key: { prescriptionId },
+            TableName: prescriptionsTable(), Key: { prescriptionId },
             UpdateExpression: "SET #s = :status, updatedAt = :time",
             ConditionExpression: "#s = :issued",
             ExpressionAttributeNames: { "#s": "status" },
@@ -684,7 +684,7 @@ export const cancelPrescription = async (req: Request, res: Response) => {
 
     try {
         // Fetch the prescription
-        const rxRes = await docClient.send(new GetCommand({ TableName: TABLE_RX, Key: { prescriptionId }, ConsistentRead: true }));
+        const rxRes = await docClient.send(new GetCommand({ TableName: prescriptionsTable(), Key: { prescriptionId }, ConsistentRead: true }));
         if (!rxRes.Item) return res.status(404).json({ error: "Prescription not found" });
 
         const rx = rxRes.Item;
@@ -706,13 +706,13 @@ export const cancelPrescription = async (req: Request, res: Response) => {
 
         // Find the prescription's bills BEFORE the atomic write so they change together. A failed lookup aborts the
         // cancel: leaving a bill payable for a cancelled prescription is worse than asking the doctor to retry.
-        const relatedBills = await findPrescriptionBills(docClient, TABLE_TRANSACTION, rx.patientId, prescriptionId);
+        const relatedBills = await findPrescriptionBills(docClient, transactionTable(), rx.patientId, prescriptionId);
         // The index is eventually consistent. A refill's bill id is derived from the count it consumed, so the
         // current refill bill is read directly in case the index has not caught up with it yet.
         if (rx.status === RX_STATUS.PENDING && typeof rx.refillsRemaining === 'number') {
             const currentRefillBillId = refillBillId(prescriptionId, rx.refillsRemaining + 1);
             if (!relatedBills.some(bill => bill.billId === currentRefillBillId)) {
-                const refillBill = (await docClient.send(new GetCommand({ TableName: TABLE_TRANSACTION, Key: { billId: currentRefillBillId }, ConsistentRead: true }))).Item;
+                const refillBill = (await docClient.send(new GetCommand({ TableName: transactionTable(), Key: { billId: currentRefillBillId }, ConsistentRead: true }))).Item;
                 if (refillBill) relatedBills.push(refillBill);
             }
         }
@@ -721,7 +721,7 @@ export const cancelPrescription = async (req: Request, res: Response) => {
         const transactItems: any[] = [
             {
                 Update: {
-                    TableName: TABLE_RX,
+                    TableName: prescriptionsTable(),
                     Key: { prescriptionId },
                     UpdateExpression: "SET #s = :cancelled, updatedAt = :now, cancelledAt = :now, cancelledBy = :by, #res.#st = :fhirCancelled",
                     // Pinned to the state read above: a concurrent dispense, cancel or refill (which also creates a
@@ -748,7 +748,7 @@ export const cancelPrescription = async (req: Request, res: Response) => {
             if (UNPAID_BILL_STATUSES.includes(bill.status)) {
                 transactItems.push({
                     Update: {
-                        TableName: TABLE_TRANSACTION,
+                        TableName: transactionTable(),
                         Key: { billId: bill.billId },
                         UpdateExpression: "SET #s = :cancelled, updatedAt = :now",
                         ConditionExpression: "#s = :observed",
@@ -760,7 +760,7 @@ export const cancelPrescription = async (req: Request, res: Response) => {
                 // Money already captured for this fill: keep the payment record and flag it for refund review.
                 transactItems.push({
                     Update: {
-                        TableName: TABLE_TRANSACTION,
+                        TableName: transactionTable(),
                         Key: { billId: bill.billId },
                         UpdateExpression: "SET reviewReason = :reason, updatedAt = :now",
                         ConditionExpression: "#s = :paid",
@@ -776,7 +776,7 @@ export const cancelPrescription = async (req: Request, res: Response) => {
         // Clean up graph-data DRUG relationship
         try {
             await docClient.send(new DeleteCommand({
-                TableName: TABLE_GRAPH,
+                TableName: graphTable(),
                 Key: { PK: `PATIENT#${rx.patientId}`, SK: `DRUG#${rx.medication}` }
             }));
         } catch (graphErr) {

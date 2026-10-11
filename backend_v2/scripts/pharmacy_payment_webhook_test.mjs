@@ -24,8 +24,9 @@ const kms = require('./dist/shared/kms-crypto.js');
 const WEBHOOK_SECRET = 'whsec_test_secret';
 const BILLS = process.env.TABLE_TRANSACTIONS, RX = process.env.TABLE_PRESCRIPTIONS;
 const EVENTS = process.env.TABLE_WEBHOOK_EVENTS, INVENTORY = TABLE_NAMES.inventory;
+const APPOINTMENTS = process.env.TABLE_APPOINTMENTS;
 const PATIENTS = process.env.TABLE_PATIENTS, PATIENT_EMAIL = 'patient@example.test';
-const KEYS = { [BILLS]: ['billId'], [RX]: ['prescriptionId'], [EVENTS]: ['eventId'], [INVENTORY]: ['pharmacyId', 'drugId'], [PATIENTS]: ['patientId'] };
+const KEYS = { [APPOINTMENTS]: ['appointmentId'], [BILLS]: ['billId'], [RX]: ['prescriptionId'], [EVENTS]: ['eventId'], [INVENTORY]: ['pharmacyId', 'drugId'], [PATIENTS]: ['patientId'] };
 
 // Evaluates only the expression forms the webhook uses; anything else throws so it cannot silently pass.
 const resolve = (path, names = {}) => path.startsWith('#') ? names[path] : path;
@@ -56,20 +57,22 @@ function apply(item, expression, names = {}, values = {}) {
 const cancelled = codes => Object.assign(new Error('Transaction cancelled'), {
   name: 'TransactionCanceledException', CancellationReasons: codes.map(Code => ({ Code })) });
 
-function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, withoutRx = false, withoutBill = false, failBillPuts = 0, beforeBillPut,
-  beforeConditionCheck, otherBills = [], billPageSize = Infinity, beforeFlag } = {}) {
+function harness({ rx = {}, bill = {}, appointment, failTransactions = 0, failBillReads = 0, withoutRx = false, withoutBill = false, failBillPuts = 0, beforeBillPut,
+  beforeConditionCheck, otherBills = [], billPageSize = Infinity, beforeFlag, loseTransactionReplies = 0, loseStockReplies = 0, failStockWrites = 0 } = {}) {
   const rows = new Map();
   const key = (table, item) => `${table}|${KEYS[table].map(k => item[k]).join('|')}`;
   const put = (table, item) => rows.set(key(table, item), structuredClone(item));
   const get = (table, k) => rows.get(key(table, k));
   if (!withoutBill) put(BILLS, { billId: 'test-bill', referenceId: 'test-rx', patientId: 'test-patient', amount: 12, status: 'PENDING', type: 'PHARMACY', ...bill });
   if (!withoutRx) put(RX, { prescriptionId: 'test-rx', patientId: 'test-patient', medication: 'test-med', status: 'ISSUED', paymentStatus: 'UNPAID', ...rx });
+  if (appointment) put(APPOINTMENTS, { appointmentId: 'test-apt', patientId: 'test-patient', ...appointment });
   for (const other of otherBills) put(BILLS, { referenceId: 'test-rx', patientId: 'test-patient', amount: 12, type: 'PHARMACY', ...other });
   put(INVENTORY, { pharmacyId: 'test-pharmacy', drugId: 'test-med', stock: 5 });
   // Payment notices go to the KMS-encrypted email on the patient profile (F3b).
   put(PATIENTS, { patientId: 'test-patient', email: `phi:kms:${PATIENT_EMAIL}` });
   mock.method(kms, 'decryptPHI', async fields => Object.fromEntries(Object.entries(fields).map(([k, v]) => [k, String(v).replace(/^phi:kms:/, '')])));
   let transactionFailures = failTransactions, billReadFailures = failBillReads, billPutFailures = failBillPuts;
+  let lostTransactions = loseTransactionReplies, lostStock = loseStockReplies, stockFailures = failStockWrites;
   mock.method(aws, 'getSSMParameter', async name => name.includes('webhook') ? WEBHOOK_SECRET : 'sk_test_key');
   const effects = { audit: mock.method(audit, 'writeAuditLog', async () => {}), notify: mock.method(notifications, 'sendNotification', async () => {}),
     revenue: mock.method(billing, 'pushRevenueToBigQuery', async () => {}), errors: mock.method(logger, 'safeError', () => {}) };
@@ -115,6 +118,8 @@ function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, 
       apply(item, input.UpdateExpression, input.ExpressionAttributeNames, input.ExpressionAttributeValues); return {};
     }
     if (kind === 'TransactWriteCommand') {
+      const stockTransaction = input.TransactItems.some(entry => entry.Update?.TableName === INVENTORY);
+      if (stockTransaction && stockFailures-- > 0) throw cancelled(input.TransactItems.map(() => 'ThrottlingError'));
       if (transactionFailures > 0) { transactionFailures--; throw cancelled(input.TransactItems.map(() => 'ThrottlingError')); }
       // Runs once, before a transaction that checks a row without writing it, to model a competing writer.
       if (beforeConditionCheck && input.TransactItems.some(entry => entry.ConditionCheck)) {
@@ -132,6 +137,8 @@ function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, 
       const writes = staged.filter(s => s.op === 'Update');
       const copies = writes.map(s => { const copy = structuredClone(s.item); apply(copy, s.spec.UpdateExpression, s.spec.ExpressionAttributeNames, s.spec.ExpressionAttributeValues); return copy; });
       writes.forEach((s, i) => put(s.spec.TableName, copies[i]));
+      if ((!stockTransaction && lostTransactions-- > 0) || (stockTransaction && lostStock-- > 0))
+        throw Object.assign(new Error('committed but reply lost'), { name: 'TimeoutError' });
       return {};
     }
     throw new Error(`Unexpected command ${kind}`);
@@ -149,7 +156,7 @@ function harness({ rx = {}, bill = {}, failTransactions = 0, failBillReads = 0, 
     return result;
   }
   return { deliver, effects, bill: () => get(BILLS, { billId: 'test-bill' }), other: billId => get(BILLS, { billId }), rx: () => get(RX, { prescriptionId: 'test-rx' }),
-    stock: () => get(INVENTORY, { pharmacyId: 'test-pharmacy', drugId: 'test-med' }).stock, events: () => [...rows.keys()].filter(k => k.startsWith(`${EVENTS}|`)) };
+    appointment: () => get(APPOINTMENTS, { appointmentId: 'test-apt' }), stock: () => get(INVENTORY, { pharmacyId: 'test-pharmacy', drugId: 'test-med' }).stock, events: () => [...rows.keys()].filter(k => k.startsWith(`${EVENTS}|`)) };
 }
 
 test('a bill paid through /billing/pay makes its prescription ready for pickup', async () => {
@@ -215,7 +222,7 @@ test('a dispensed prescription is not reopened by a late payment', async () => {
 test('a transient database failure is retried by Stripe instead of being marked processed', async () => {
   try {
     const h = harness({ failTransactions: 1 });
-    assert.equal((await h.deliver(undefined, 'evt_test_retry')).status, 500);
+    assert.equal((await h.deliver(undefined, 'evt_test_retry')).status, 503);
     assert.equal(h.rx().status, 'ISSUED');
     assert.equal(h.events().length, 0, 'the event claim is released so the retry is processed');
     assert.equal((await h.deliver(undefined, 'evt_test_retry')).status, 200);
@@ -248,7 +255,7 @@ test('paying a legacy untyped refill bill makes the refill collectable', async (
 test('an unreadable ledger row is retried by Stripe instead of skipping the prescription', async () => {
   try {
     const h = harness({ failBillReads: 1 });
-    assert.equal((await h.deliver(BILLING_PAY_METADATA, 'evt_test_read')).status, 500);
+    assert.equal((await h.deliver(BILLING_PAY_METADATA, 'evt_test_read')).status, 503);
     assert.equal(h.bill().status, 'PENDING'); assert.equal(h.rx().status, 'ISSUED');
     assert.equal(h.events().length, 0);
     assert.equal((await h.deliver(BILLING_PAY_METADATA, 'evt_test_read')).status, 200);
@@ -315,11 +322,11 @@ test('concurrent deliveries for a missing bill row record it once and both succe
 test('a reconciliation write is only treated as done when the row that exists records this payment', async () => {
   try {
     const throttled = harness({ withoutBill: true, failBillPuts: 1 });
-    assert.equal((await throttled.deliver(BILLING_PAY_METADATA)).status, 500, 'V5: a failed write is retried by Stripe, not acknowledged');
+    assert.equal((await throttled.deliver(BILLING_PAY_METADATA)).status, 503, 'V5: a failed write is retried by Stripe, not acknowledged');
     assert.equal(throttled.bill(), undefined);
     mock.restoreAll();
     const other = harness({ withoutBill: true, beforeBillPut: put => put(BILLS, { billId: 'test-bill', status: 'PAID', paymentIntentId: 'pi_other' }) });
-    assert.equal((await other.deliver(BILLING_PAY_METADATA)).status, 500, 'V5: a row recording a different payment is not this payment');
+    assert.equal((await other.deliver(BILLING_PAY_METADATA)).status, 503, 'V5: a row recording a different payment is not this payment');
     assert.equal(other.bill().paymentIntentId, 'pi_other');
   } finally { mock.restoreAll(); }
 });
@@ -492,5 +499,56 @@ test('a bill flagged for refund review after it was read is never settled as a d
     assert.equal(h.bill().reviewReason, 'PRESCRIPTION_NOT_PAYABLE');
     assert.equal(h.effects.revenue.mock.callCount(), 0, 'not recorded as a settled debt');
     assert.equal(h.bill().status, 'PAID', 'captured money recorded'); assert.equal(h.bill().paymentIntentId, 'pi_test', 'this payment recorded for review');
+  } finally { mock.restoreAll(); }
+});
+
+for (const [label, options] of [
+  ['payment commit reply lost', { loseTransactionReplies: 1 }],
+  ['inventory commit reply lost', { loseStockReplies: 1 }],
+  ['inventory temporarily unavailable', { failStockWrites: 1 }],
+]) {
+  test(`pharmacy stock recovers exactly once after ${label}`, async () => {
+    try {
+      const h = harness(options);
+      assert.equal((await h.deliver(BILLING_PAY_METADATA, 'evt_test_lost')).status, 503);
+      assert.equal((await h.deliver(BILLING_PAY_METADATA, 'evt_test_lost')).status, 200);
+      assert.equal(h.bill().status, 'PAID');
+      assert.equal(h.bill().pharmacyStockStatus, 'APPLIED');
+      assert.equal(h.stock(), 4);
+      assert.equal((await h.deliver(BILLING_PAY_METADATA, 'evt_test_other')).status, 200);
+      assert.equal(h.stock(), 4);
+    } finally { mock.restoreAll(); }
+  });
+}
+
+test('late non-pharmacy success cannot reopen a refunded CPT ledger row', async () => {
+  try {
+    const h = harness({ bill: { type: 'CPT_CHARGE', status: 'REFUNDED' } });
+    assert.equal((await h.deliver({ ...BILLING_PAY_METADATA, type: 'CPT_CHARGE' })).status, 200);
+    assert.equal(h.bill().status, 'REFUNDED');
+    assert.equal(h.effects.notify.mock.callCount(), 0);
+  } finally { mock.restoreAll(); }
+});
+
+// A captured booking payment must remain accounted for when cancellation won the race.
+test('late booking capture records refund review without reopening a cancelled appointment', async () => {
+  try {
+    const h = harness({ bill: { type: 'BOOKING_FEE', referenceId: 'test-apt', status: 'CANCELLED' }, appointment: { status: 'CANCELLED', paymentStatus: 'unpaid' } });
+    const metadata = { billId: 'test-bill', type: 'BOOKING_FEE', region: 'EU' };
+    assert.equal((await h.deliver(metadata)).status, 200);
+    assert.equal(h.bill().status, 'PAID');
+    assert.equal(h.bill().reviewReason, 'APPOINTMENT_NOT_PAYABLE');
+    assert.equal(h.bill().paymentIntentId, 'pi_test');
+    assert.equal(h.appointment().status, 'CANCELLED');
+    assert.equal((await h.deliver(metadata)).status, 200);
+  } finally { mock.restoreAll(); }
+});
+
+test('booking settlement derives the appointment from its authoritative ledger', async () => {
+  try {
+    const h = harness({ bill: { type: 'BOOKING_FEE', referenceId: 'test-apt' }, appointment: { status: 'PENDING_PAYMENT' } });
+    assert.equal((await h.deliver({ billId: 'test-bill', type: 'BOOKING_FEE', region: 'EU' })).status, 200);
+    assert.equal(h.bill().status, 'PAID');
+    assert.equal(h.appointment().status, 'CONFIRMED');
   } finally { mock.restoreAll(); }
 });

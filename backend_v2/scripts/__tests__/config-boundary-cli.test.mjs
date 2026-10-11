@@ -19,6 +19,7 @@ function fixture(t, frontend = false) {
   write('backend/backend_v2/.env.example', 'TEST_API_SETTING=test-value\n');
   write('backend/backend_v2/shared/example.ts', 'setting("TEST_API_SETTING");');
   write('backend/backend_v2/shared/settings.ts', 'export const SDK_ENVIRONMENT_NAMES = [] as const;');
+  write('backend/backend_v2/doctor-service/src/modules/clinical/prescription.controller.ts', '// configured pharmacy');
   mkdirSync(path.join(root, 'backend/legacy_lambdas'), { recursive: true });
   for (const service of ['patient', 'doctor', 'booking', 'communication', 'staff']) {
     write(`backend/backend_v2/${service}-service/src/index.ts`, 'getApiBrowserPolicy();');
@@ -99,4 +100,20 @@ test('unknown, incomplete and empty scope arguments fail', t => {
   for (const args of [['--unknown'], ['--frontend-root'], ['--frontend-root', ''], ['--frontend-root', f.frontendRoot, 'extra']]) {
     assert.notEqual(f.run(...args).status, 0, JSON.stringify(args));
   }
+});
+
+test('billing controllers cannot recreate a provider outside its configured factory', t => {
+  const f = fixture(t);
+  f.write('backend/backend_v2/booking-service/src/controllers/bypass.ts', "new Stripe('test-key');");
+  const result = f.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /bypasses the billing provider configuration owner/);
+});
+
+test('pharmacy cannot reintroduce a deployment-specific transaction table', t => {
+  const f = fixture(t);
+  f.write('backend/backend_v2/doctor-service/src/modules/clinical/prescription.controller.ts', 'const table = "mediconnect-transactions";');
+  const result = f.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /environment-specific table literal/);
 });

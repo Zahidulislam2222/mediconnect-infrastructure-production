@@ -1,3 +1,4 @@
+import { controllerHttpHarness } from './helpers/controller-http.mjs';
 // Exercise the actual controller with isolated database/Stripe boundaries. No provider requests.
 import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
@@ -52,11 +53,9 @@ function harness(options = {}) {
       },
     };
   });
+  const invoke = controllerHttpHarness();
   async function request(user = { sub: 'test-patient', region: 'us-east-1' }) {
-    const result = { status: 200, body: undefined };
-    const res = { status(code) { result.status = code; return this; }, json(body) { result.body = body; return this; } };
-    await payBill({ body: { billId: 'test-bill', patientId: 'test-patient', paymentMethodId: 'pm_test' }, user, headers: {} }, res);
-    return result;
+    return invoke(payBill, { body: { billId: 'test-bill', patientId: 'test-patient', paymentMethodId: 'pm_test' }, user });
   }
   return { request, calls };
 }

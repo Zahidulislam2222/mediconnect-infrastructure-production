@@ -7,6 +7,15 @@ const cli = fileURLToPath(new URL('../verify_booking_startup_settings.mjs', impo
 const valid = {
   TABLE_PATIENTS: 'test-patients',
   TABLE_TRANSACTIONS: 'test-transactions',
+  TABLE_WEBHOOK_EVENTS: 'test-webhook-events',
+  WEBHOOK_CLAIM_TTL_SECONDS: '300',
+  WEBHOOK_EVENT_RETENTION_SECONDS: '2592000',
+  BILLING_STRIPE_PARAMETER_PATH: '/test/keys',
+  WEBHOOK_STRIPE_PARAMETER_PATH: '/test/webhook',
+  STRIPE_API_VERSION: '2023-10-16',
+  STRIPE_API_HOST: 'api.example.test',
+  STRIPE_REQUEST_TIMEOUT_MS: '80000',
+  STRIPE_MAX_NETWORK_RETRIES: '0',
   CANCELLATION_CLAIM_TTL_SECONDS: '137',
   CANCELLATION_REFUND_MAX_PAGES: '7',
 };

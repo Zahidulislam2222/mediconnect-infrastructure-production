@@ -335,7 +335,7 @@ dynamodb:
 
   - name: mediconnect-webhook-events
     tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
-    app_files: [backend_v2/booking-service/src/controllers/webhook.controller.ts]
+    app_files: [backend_v2/booking-service/src/controllers/webhook.controller.ts, backend_v2/booking-service/src/webhook-event.ts]
     env_var: TABLE_WEBHOOK_EVENTS
     status: ACTIVE_REGIONAL
     live_verification: "Owner-authorized creation completed in both regions; all120 native table-contract checks passed; follow-up targeted plan zero changes"
@@ -1184,3 +1184,16 @@ phase2_booking_role_access_20261009:
   status: APPLIED_OWNER_EXCEPTION_NATIVE_VERIFIED
   proof: Live policy equals reviewed proposal;38 required permissions allowed; targeted follow-up plan zero changes
   trust_or_admin_permissions_changed: false
+
+phase3_booking_billing_pharmacy_20261009:
+  status: LOCAL_REVIEW_APPROVED_NOT_DEPLOYED
+  resource_references: [TABLE_WEBHOOK_EVENTS, TABLE_PRESCRIPTIONS, TABLE_TRANSACTIONS, TABLE_GRAPH, TABLE_SUBSCRIPTIONS]
+  resources_added: false
+  configuration: Typed Stripe provider API host/version/timeout/retries and secret parameter paths; webhook lease/retention; doctor pharmacy tables use existing regional resource variables; maintained subscription policy JSON
+  behavior: Leased webhook receipts acknowledge only completed work; ambiguous legacy receipts retry pending reconciliation; durable atomic pharmacy stock recovery; late booking captures flagged for refund review; monotonic partial/full refunds and early cancellation-refund delivery retries
+  discovery: AWS645 complete indexed rows; GCP778; Azure2; free billing metadata; live booking118 and historical doctor96 compiled hashes verified before edits
+  live_legacy_rows: NOT_VERIFIED_scans_rejected_pending_fresh_cost_approval
+  provider_sandbox: Payment/refund/idempotency five checks PASS livemode_false; existing webhook endpoint disabled; live delivery not verified
+  deployment: Four existing doctor/booking regional targets prepared; no cloud mutation or website activation performed
+  verification: Full backend and frontend607 tests, types, lint, config and builds PASS on inspected snapshots; browser10 PASS after local connection retry; final frozen Node22 and image hash/runtime gates PASS; stable security/publication checks underway
+  subscription_followup: "27 signed HTTP cases PASS; existing regional subscription rows own invoice/period and lifecycle/payment markers; no new resources. Independent business-source and deployment-delta reviews APPROVE; full frozen Node22 tests/builds/types/lint, workflow7 and config200 PASS; deployment remains pending."

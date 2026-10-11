@@ -1,3 +1,4 @@
+import { createStripeClient } from '../providers/stripe';
 /**
  * Subscription Controller — Discount Pass Model (Cash-Pay Only)
  *
@@ -17,7 +18,7 @@ import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { getRegionalClient, getSSMParameter } from '../../../shared/aws-config';
 import { writeAuditLog } from '../../../shared/audit';
 import { safeLog, safeError } from '../../../shared/logger';
-import { setting } from '../../../shared/settings';
+import { setting, getSubscriptionProviderSettings } from '../../../shared/settings';
 import { requestJurisdiction } from '../../../shared/region-context';
 import {
     PlanId,
@@ -33,14 +34,14 @@ import {
 // ─── HELPERS ────────────────────────────────────────────────────────────
 
 async function getStripe(region: string): Promise<Stripe> {
-    const secretKey = await getSSMParameter('/mediconnect/prod/stripe/secret_key', region);
-    return new Stripe(secretKey!, { apiVersion: '2023-10-16' });
+    const secretKey = await getSSMParameter(getSubscriptionProviderSettings().parameterPath, region);
+    if (!secretKey) throw new Error('Subscription provider unavailable');
+    return createStripeClient(secretKey);
 }
 
 async function getStripePriceId(planId: PlanId, region: string): Promise<string> {
-    const paramName = planId === PlanId.PLUS
-        ? '/mediconnect/prod/stripe/plus_price_id'
-        : '/mediconnect/prod/stripe/premium_price_id';
+    const config = getSubscriptionProviderSettings();
+    const paramName = planId === PlanId.PLUS ? config.plusPricePath : config.premiumPricePath;
     const priceId = await getSSMParameter(paramName, region);
     if (!priceId) throw new Error(`Stripe price ID not configured for plan: ${planId}`);
     return priceId;

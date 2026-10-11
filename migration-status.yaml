@@ -593,3 +593,17 @@ phase2_booking_role_access_20261009:
   required_live_permission_checks_passed: 38
   post_apply_targeted_plan_changes: 0
   application_rollout: VERIFIED_TWO_REGION_BOOKING_RELEASE
+
+phase3_booking_billing_pharmacy_20261009:
+  status: LOCAL_REVIEW_APPROVED_NOT_DEPLOYED
+  infrastructure_changes: false
+  application_changes: true
+  local_evidence: memory/phase-3-20261009 in private umbrella workspace
+  legacy_decisions: Pending bounded read approval; legacy claim receipts fail closed without explicit completion
+  provider_acceptance: Isolated sandbox five checks PASS; endpoint disabled and application delivery unverified
+  release: Not pushed or deployed; source reviews approved, final publication checks and monetary authorization pending
+  continuation_date: "2026-10-11"
+  subscription_regressions: "27 signed HTTP cases PASS after replay, legacy-cycle, lifecycle, terminal and concurrent-snapshot corrections; independent source and final deployment delta reviews APPROVE; full frozen Node22 tests/builds/types/lint PASS, config200 and workflow7 PASS"
+  frontend_current: "607 unit and 10 browser cases PASS; types, lint, configuration and release build PASS"
+  privacy_followup: "Local privacy HTTP regressions PASS; isolated cancellation UI 615 unit and 4 browser cases PASS with narrow source approval; broader live privacy acceptance open"
+  cms_followup: "90 tests, types, build and isolated admin/content/media restart/restore PASS with narrow source approval; live routing, storage and content migration open; general lint unavailable"

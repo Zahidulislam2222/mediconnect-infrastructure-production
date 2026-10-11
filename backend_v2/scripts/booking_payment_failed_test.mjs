@@ -79,6 +79,12 @@ function harness({ bill = {}, withoutBill = false, failTransactions = 0, failCod
       put(input.TableName, input.Item); return {};
     }
     if (kind === 'DeleteCommand') { rows.delete(key(input.TableName, input.Key)); return {}; }
+    if (kind === 'UpdateCommand' && input.TableName === EVENTS) {
+      const item = get(EVENTS, input.Key);
+      if (!item || !holds(item, input.ConditionExpression, input.ExpressionAttributeNames, input.ExpressionAttributeValues))
+        throw Object.assign(new Error('conditional'), { name: 'ConditionalCheckFailedException' });
+      apply(item, input.UpdateExpression, input.ExpressionAttributeNames, input.ExpressionAttributeValues); return {};
+    }
     if (kind === 'TransactWriteCommand') {
       if (transactionFailures > 0) { transactionFailures--; throw cancelled(input.TransactItems.map((_, i) => failCodes[i] ?? 'None')); }
       const staged = input.TransactItems.map(entry => {
@@ -174,7 +180,7 @@ test('a payment failure whose ledger write is lost is retried by Stripe, not hal
   for (const [label, failCodes] of [['throttled', ['ThrottlingError', 'ThrottlingError']], ['appointment conflict', ['None', 'TransactionConflict']]]) {
     try {
       const h = harness({ failTransactions: 1, failCodes });
-      assert.equal((await h.deliver('evt_test_retry')).status, 500, `${label}: Stripe is asked to retry`);
+      assert.equal((await h.deliver('evt_test_retry')).status, 503, `${label}: Stripe is asked to retry`);
       assert.equal(h.claimed('evt_test_retry'), false, `${label}: the claim is released`);
       assert.equal(h.bill().status, 'PENDING', label);
       assert.equal(h.effects.notify.mock.callCount(), 0, `${label}: no notice for an unrecorded failure`);

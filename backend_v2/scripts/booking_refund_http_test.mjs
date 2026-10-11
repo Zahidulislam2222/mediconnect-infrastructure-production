@@ -1,3 +1,4 @@
+import { controllerHttpHarness } from './helpers/controller-http.mjs';
 // Drives the real booking controllers (patient cancel, doctor cancel, no-show cleanup, booking compensation) with an
 // in-memory DynamoDB that evaluates conditions and a Stripe double that models idempotency keys. No provider requests.
 import { test, mock } from 'node:test';
@@ -219,13 +220,7 @@ function harness({ region = 'US', appointments = [appointment()], refund = 'succ
   } }; });
 
   const controller = require('./dist/booking-service/src/controllers/booking.controller.js');
-  // catchAsync does not return the handler promise, so a call settles on the response or on next(error).
-  const invoke = (handler, req) => new Promise(done => {
-    const result = { status: 200 };
-    const res = { status(code) { result.status = code; return this; }, json(body) { result.body = body; done(result); return this; },
-      send(body) { result.body = body; done(result); return this; } };
-    handler({ headers: {}, ip: '127.0.0.1', params: {}, ...req }, res, error => { result.status = 500; result.error = error; done(result); });
-  });
+  const invoke = controllerHttpHarness();
   const user = (sub, extra = {}) => ({ sub, region, email: `${sub}@example.test`, ...extra });
   return {
     stripe, notices, receipts, regions, decryptRegions, loggedErrors,

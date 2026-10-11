@@ -29,7 +29,7 @@ test('startup settings validate with the documented example values', () => {
   validateStartupSettings();
 });
 
-for (const name of ['CANCELLATION_CLAIM_TTL_SECONDS', 'CANCELLATION_REFUND_MAX_PAGES']) {
+for (const name of ['CANCELLATION_CLAIM_TTL_SECONDS', 'CANCELLATION_REFUND_MAX_PAGES', 'WEBHOOK_CLAIM_TTL_SECONDS', 'WEBHOOK_EVENT_RETENTION_SECONDS', 'STRIPE_REQUEST_TIMEOUT_MS']) {
   for (const [label, value] of [['missing', undefined], ['not a positive integer', '0'], ['not a number', 'many']]) {
     test(`startup is refused when ${name} is ${label}`, () => {
       assert.equal(typeof validateStartupSettings, 'function');
@@ -88,4 +88,8 @@ test('SSM bootstrap validates the same patient table that regional requests cons
     for (const name of Object.keys(process.env)) if (!(name in previous)) delete process.env[name];
     Object.assign(process.env, previous);
   }
+});
+
+test('webhook retention must exceed its recovery lease', () => {
+  withSetting('WEBHOOK_EVENT_RETENTION_SECONDS', '1', () => assert.throws(() => validateStartupSettings()));
 });

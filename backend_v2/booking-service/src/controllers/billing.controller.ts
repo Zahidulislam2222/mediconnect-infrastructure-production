@@ -1,3 +1,4 @@
+import { createStripeClient } from '../providers/stripe';
 import { requestJurisdiction } from '../../../shared/region-context';
 import { Request, Response } from 'express';
 import { getRegionalClient, getSSMParameter } from '../../../shared/aws-config';
@@ -115,7 +116,7 @@ export const payBill = async (req: Request, res: Response) => {
         }
         const stripeKey = await getSSMParameter(config.parameterPath, region, true);
         if (!stripeKey) throw new Error('Stripe unavailable');
-        const stripe = new Stripe(stripeKey);
+        const stripe = createStripeClient(stripeKey);
         let intent: Stripe.PaymentIntent;
         if (bill.paymentIntentId) {
             intent = await stripe.paymentIntents.retrieve(bill.paymentIntentId);
