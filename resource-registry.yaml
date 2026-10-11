@@ -115,7 +115,7 @@ dynamodb:
 
   - name: mediconnect-transactions
     tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
-    app_files: [backend_v2/booking-service]
+    app_files: [backend_v2/booking-service, backend_v2/doctor-service, backend_v2/k8s/booking-service.yaml, backend_v2/k8s/doctor-service.yaml, .github/workflows/deploy.yml]
     env_var: TABLE_TRANSACTIONS
     status: OK
 
@@ -211,13 +211,13 @@ dynamodb:
 
   - name: mediconnect-prescriptions
     tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
-    app_files: [backend_v2/doctor-service, backend_v2/patient-service/src/modules/clinical/cda.controller.ts, legacy_lambdas/mediconnect-prescription-service]
+    app_files: [backend_v2/doctor-service, backend_v2/patient-service/src/modules/clinical/cda.controller.ts, legacy_lambdas/mediconnect-prescription-service, backend_v2/k8s/doctor-service.yaml, .github/workflows/deploy.yml]
     env_var: TABLE_PRESCRIPTIONS
     status: OK
 
   - name: mediconnect-graph-data
     tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
-    app_files: [backend_v2/patient-service, legacy_lambdas/mediconnect-graph-service]
+    app_files: [backend_v2/patient-service, legacy_lambdas/mediconnect-graph-service, backend_v2/doctor-service, backend_v2/k8s/doctor-service.yaml, .github/workflows/deploy.yml]
     env_var: TABLE_GRAPH
     status: OK
 
@@ -335,7 +335,7 @@ dynamodb:
 
   - name: mediconnect-webhook-events
     tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
-    app_files: [backend_v2/booking-service/src/controllers/webhook.controller.ts, backend_v2/booking-service/src/webhook-event.ts]
+    app_files: [backend_v2/booking-service/src/controllers/webhook.controller.ts, backend_v2/booking-service/src/webhook-event.ts, backend_v2/k8s/booking-service.yaml, .github/workflows/deploy.yml]
     env_var: TABLE_WEBHOOK_EVENTS
     status: ACTIVE_REGIONAL
     live_verification: "Owner-authorized creation completed in both regions; all120 native table-contract checks passed; follow-up targeted plan zero changes"
@@ -1186,7 +1186,7 @@ phase2_booking_role_access_20261009:
   trust_or_admin_permissions_changed: false
 
 phase3_booking_billing_pharmacy_20261009:
-  status: LOCAL_REVIEW_APPROVED_NOT_DEPLOYED
+  status: SOURCE_PUBLISHED_LIVE_ACCEPTANCE_OPEN
   resource_references: [TABLE_WEBHOOK_EVENTS, TABLE_PRESCRIPTIONS, TABLE_TRANSACTIONS, TABLE_GRAPH, TABLE_SUBSCRIPTIONS]
   resources_added: false
   configuration: Typed Stripe provider API host/version/timeout/retries and secret parameter paths; webhook lease/retention; doctor pharmacy tables use existing regional resource variables; maintained subscription policy JSON
@@ -1195,5 +1195,18 @@ phase3_booking_billing_pharmacy_20261009:
   live_legacy_rows: NOT_VERIFIED_scans_rejected_pending_fresh_cost_approval
   provider_sandbox: Payment/refund/idempotency five checks PASS livemode_false; existing webhook endpoint disabled; live delivery not verified
   deployment: Four existing doctor/booking regional targets prepared; no cloud mutation or website activation performed
-  verification: Full backend and frontend607 tests, types, lint, config and builds PASS on inspected snapshots; browser10 PASS after local connection retry; final frozen Node22 and image hash/runtime gates PASS; stable security/publication checks underway
+  verification: Full backend and frontend607 tests, types, lint, config and builds PASS on inspected snapshots; browser10 PASS after local connection retry; final frozen Node22 and image hash/runtime gates PASS; stable hook/Gitleaks/Bandit and supplemental Semgrep PASS; source publication exact remote SHAs verified
   subscription_followup: "27 signed HTTP cases PASS; existing regional subscription rows own invoice/period and lifecycle/payment markers; no new resources. Independent business-source and deployment-delta reviews APPROVE; full frozen Node22 tests/builds/types/lint, workflow7 and config200 PASS; deployment remains pending."
+
+  publication_proof:
+    commit_format: "12-character Git commit references; exact full remote SHA parity retained in private release receipts"
+    backend_application_commit: "1483d819df2b"
+    backend_security_commit: "4f593bb83d25"
+    frontend_phase3_head: "169da2b144fc"
+    frontend_phase4_head: "560599e521aa"
+    cms_head: "396c9ea61aa5"
+    phase3_complete: false
+    phase4_complete: false
+    phase5_complete: false
+    deployment_performed: false
+    limits: "Live legacy reconciliation, application sandbox delivery, broader identity/privacy and CMS routing/persistence/editorial migration remain open; historical credential revocation and dependency debt are not cleared"

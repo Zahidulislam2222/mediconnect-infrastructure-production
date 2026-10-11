@@ -595,15 +595,28 @@ phase2_booking_role_access_20261009:
   application_rollout: VERIFIED_TWO_REGION_BOOKING_RELEASE
 
 phase3_booking_billing_pharmacy_20261009:
-  status: LOCAL_REVIEW_APPROVED_NOT_DEPLOYED
+  status: SOURCE_PUBLISHED_LIVE_ACCEPTANCE_OPEN
   infrastructure_changes: false
   application_changes: true
   local_evidence: memory/phase-3-20261009 in private umbrella workspace
   legacy_decisions: Pending bounded read approval; legacy claim receipts fail closed without explicit completion
   provider_acceptance: Isolated sandbox five checks PASS; endpoint disabled and application delivery unverified
-  release: Not pushed or deployed; source reviews approved, final publication checks and monetary authorization pending
-  continuation_date: "2026-10-11"
+  release: Reviewed source pushed; exact feature-branch remote SHAs verified; not deployed; live acceptance and monetary authorization pending
+  continuation_date: "2026-10-12"
   subscription_regressions: "27 signed HTTP cases PASS after replay, legacy-cycle, lifecycle, terminal and concurrent-snapshot corrections; independent source and final deployment delta reviews APPROVE; full frozen Node22 tests/builds/types/lint PASS, config200 and workflow7 PASS"
   frontend_current: "607 unit and 10 browser cases PASS; types, lint, configuration and release build PASS"
-  privacy_followup: "Local privacy HTTP regressions PASS; isolated cancellation UI 615 unit and 4 browser cases PASS with narrow source approval; broader live privacy acceptance open"
+  privacy_followup: "Local privacy HTTP regressions PASS; merged cancellation branch 616 unit and 14 browser cases PASS, types/config/lint/build PASS with narrow source approval; initial 13/1 browser timeout retained, unchanged serial retry passed; broader live privacy acceptance open"
   cms_followup: "90 tests, types, build and isolated admin/content/media restart/restore PASS with narrow source approval; live routing, storage and content migration open; general lint unavailable"
+
+  publication_proof:
+    commit_format: "12-character Git commit references; exact full remote SHA parity retained in private release receipts"
+    backend_application_commit: "1483d819df2b"
+    backend_security_commit: "4f593bb83d25"
+    frontend_phase3_head: "169da2b144fc"
+    frontend_phase4_head: "560599e521aa"
+    cms_head: "396c9ea61aa5"
+    phase3_complete: false
+    phase4_complete: false
+    phase5_complete: false
+    deployment_performed: false
+    limits: "Live legacy reconciliation, application sandbox delivery, broader identity/privacy and CMS routing/persistence/editorial migration remain open; historical credential revocation and dependency debt are not cleared"
