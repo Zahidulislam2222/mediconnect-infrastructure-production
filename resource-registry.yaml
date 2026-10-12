@@ -17,8 +17,8 @@
 # native inventory proves them live.
 # ============================================================================
 
-last_updated: "2026-10-11T20:06:42.956261+00:00"
-last_verified_by: "Identity before/after app-IaC177/0/0; offline Node22 full tests/types/lint/five builds PASS on327 frozen sources;20 identity cases and independent source review APPROVE; not deployed"
+last_updated: "2026-10-12"
+last_verified_by: "Four backend revisions active:258 provider hashes/24candidate+8active HTTP PASS; two confirmation hooks exact ZIP/configuration and6no-op/denial PASS; full phase exits remain open"
 
 operations_continuation_20260928:
   status: "LOCAL_VERIFIED_INDEPENDENT_REVIEW_DEFERRED_BY_OWNER"
@@ -1191,14 +1191,15 @@ phase3_booking_billing_pharmacy_20261009:
   status: SOURCE_PUBLISHED_LIVE_ACCEPTANCE_OPEN
   resource_references: [TABLE_WEBHOOK_EVENTS, TABLE_PRESCRIPTIONS, TABLE_TRANSACTIONS, TABLE_GRAPH, TABLE_SUBSCRIPTIONS]
   resources_added: false
+  bounded_rollout_20261012: "Approved1USD one-time and1USD/month retention; two remote digests and additive KEEP verified;959892270newbytes modeled0.09112USD/month; fourapplicationservices active; no newresource/IAM/scaling change; actualbillunknown"
   configuration: Typed Stripe provider API host/version/timeout/retries and secret parameter paths; webhook lease/retention; doctor pharmacy tables use existing regional resource variables; maintained subscription policy JSON
   behavior: Leased webhook receipts acknowledge only completed work; ambiguous legacy receipts retry pending reconciliation; durable atomic pharmacy stock recovery; late booking captures flagged for refund review; monotonic partial/full refunds and early cancellation-refund delivery retries
   discovery: AWS645 complete indexed rows; GCP778; Azure2; free billing metadata; live booking118 and historical doctor96 compiled hashes verified before edits
   live_legacy_rows: BOUNDED_AGGREGATES_VERIFIED_NO_PENDING_SELECTED_LEGACY_CATEGORIES; no cross-table atomic snapshot or future-write guarantee
   provider_sandbox: Payment/refund/idempotency five checks PASS livemode_false; existing webhook endpoint disabled; live delivery not verified
-  deployment: Four existing doctor/booking regional targets prepared; no cloud mutation or website activation performed
+  deployment: "Both immutable images published; four existing regional doctor/booking revisions active100percent with258providercompiledhashmatches and rollbackhealth200; frontend/provider acceptance remains open"
   verification: Full backend and frontend607 tests, types, lint, config and builds PASS on inspected snapshots; browser10 PASS after local connection retry; final frozen Node22 and image hash/runtime gates PASS; stable hook/Gitleaks/Bandit and supplemental Semgrep PASS; source publication exact remote SHAs verified
-  subscription_followup: "27 signed HTTP cases PASS; existing regional subscription rows own invoice/period and lifecycle/payment markers; no new resources. Independent business-source and deployment-delta reviews APPROVE; full frozen Node22 tests/builds/types/lint, workflow7 and config200 PASS; deployment remains pending."
+  subscription_followup: "27 signed HTTP cases PASS; existing regional subscription rows own invoice/period and lifecycle/payment markers; no new resources. Independent business-source and deployment-delta reviews APPROVE; full frozen Node22 tests/builds/types/lint, workflow7 and config200 PASS; application source is deployed; provider delivery acceptance remains open."
 
   publication_proof:
     commit_format: "12-character Git commit references; exact full remote SHA parity retained in private release receipts"
@@ -1210,18 +1211,24 @@ phase3_booking_billing_pharmacy_20261009:
     phase3_complete: false
     phase4_complete: false
     phase5_complete: false
-    deployment_performed: false
+    deployment_performed: true
+    public_activation_performed: true
+    public_activation_scope: "Four existing doctor/booking regional services only"
+    open_live_exits: [native_Cognito_MFA, privacy, provider_delivery, CMS, connected_frontend]
     limits: "Application sandbox delivery, broader identity/privacy and CMS routing/persistence/editorial migration remain open; bounded legacy aggregate verification completed; historical credential revocation and dependency debt are not cleared"
 
+  historical_startup_failure: "Initial doctor candidate missing LOG_LEVEL fixed through exact-environment startup/CORS gates; historical private failed receipts preserved"
+  candidate_progress_20261012: "All4R3candidate gates PASS258hashes/24HTTP; all4active gates PASS258hashes/8HTTP; originalrollbackhealth200; canonicalwebsite CORS/auth verified; failed metadata-only attempt preserved and fresh read-only retry passed"
+
 phase4_cognito_confirmation_20261012:
-  status: LOCAL_GATES_REVIEW_PASSED_PUBLICATION_PENDING
+  status: LIMITED_HOOK_ROLLOUT_VERIFIED_BROADER_PHASE_ACCEPTANCE_OPEN
   branch: fix/phase4-privileged-signup-20261011
-  drift: Both deployed hook packages match an older Git ancestor; local is ahead and the local privileged-client enrollment defect is not deployed
+  drift: "Original two hook ZIPs/full environments backed up; additive canonical settings and reviewed self-contained ZIP deployed with RevisionId guards; exact provider ZIP parity verified in bothregions"
   source_fix: Only explicitly configured patient and doctor clients enroll; privileged and unknown signup clients reject; password recovery preserves roles; assignment errors propagate without event or username logging
   configuration: Canonical regional pool and patient/doctor clients plus explicit SDK max attempts; no legacy fallback, new resources or dependencies
-  verification: Expanded20 handler/replay/workflow cases PASS; offline Node22 full tests, workspace and Lambda strict types, lint and five builds PASS on327 hash-matched sources; config202 PASS; independent source review APPROVE; final security/publication pending
+  verification: Expanded20 handler/replay/workflow cases PASS; offline Node22 full tests, workspace and Lambda strict types, lint and five builds PASS on327 hash-matched sources; config202 PASS; independent source review APPROVE; scoped source hook/Gitleaks/Bandit/Semgrep121-file gates PASS with0findings/0errors and exact remote source SHA verified; broader security/native workflow acceptance remains open; deterministic self-contained ZIP211198bytes/6compiledNode24behaviors/2hashes/0providerrequests and packaging source review APPROVE
   generic_workflow: Cognito excluded from generic Lambda deployment because inventoried pool hooks have different names and require reviewed canonical settings
-  runtime: Existing functions report nodejs24.x; provider invocation and deployed parity not verified
+  runtime: "Existing nodejs24.x preserved; provider Auto runtime patch verified; exact211198byte ZIP match2/2, config preservation2/2, actual no-op/denial checks6/6PASS; no signup/account/group writes"
   infrastructure_changes: false
-  deployment_performed: false
+  deployment_performed: true
   broader_privacy_complete: false
