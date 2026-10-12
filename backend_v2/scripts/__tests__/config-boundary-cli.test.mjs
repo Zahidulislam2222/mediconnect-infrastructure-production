@@ -19,6 +19,7 @@ function fixture(t, frontend = false) {
   write('backend/backend_v2/.env.example', 'TEST_API_SETTING=test-value\n');
   write('backend/backend_v2/shared/example.ts', 'setting("TEST_API_SETTING");');
   write('backend/backend_v2/shared/settings.ts', 'export const SDK_ENVIRONMENT_NAMES = [] as const;');
+  write('backend/backend_v2/shared/runtime/federation-settings.mjs', '// no deployment-specific fixture settings');
   write('backend/backend_v2/doctor-service/src/modules/clinical/prescription.controller.ts', '// configured pharmacy');
   mkdirSync(path.join(root, 'backend/legacy_lambdas'), { recursive: true });
   for (const service of ['patient', 'doctor', 'booking', 'communication', 'staff']) {
@@ -42,6 +43,14 @@ test('standalone backend checkout audits its own variables without another repos
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /1 backend/);
   assert.match(result.stdout, /frontend audit not requested/);
+});
+
+test('federation runtime settings require documented configuration', t => {
+  const f = fixture(t);
+  f.write('backend/backend_v2/shared/runtime/federation-settings.mjs', "text('FEDERATION_HTTP_TIMEOUT_MS');");
+  const result = f.run();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /backend .env.example is missing FEDERATION_HTTP_TIMEOUT_MS/);
 });
 
 test('explicit frontend root is audited, including paths containing spaces', t => {

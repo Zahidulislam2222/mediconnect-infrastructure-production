@@ -1,4 +1,9 @@
 # ============================================================================
+# Patient runtime candidate2026-10-12: existing EU/US patient services only.
+# No resource created or deployed. New shared/runtime modules own five required
+# FEDERATION_* environment settings; AWS_WEB_IDENTITY_TOKEN_FILE remains SDK configuration.
+# Locked Node22/nonroot source image is local; original revisions remain live.
+# Exact provider drift/config/parity and native privacy acceptance are still open.
 # Resource Registry — Single Source of Truth
 # ============================================================================
 # Maps every cloud resource the app code references to its Terraform file

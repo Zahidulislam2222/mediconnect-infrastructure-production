@@ -10,12 +10,14 @@
   ],
   "main": "verify_consolidation.js",
   "scripts": {
-    "test": "npm run test:config && npm run test:config:cli && npm test --workspaces --if-present && node scripts/auth_region_http_test.mjs && node scripts/phi_failure_http_test.mjs && node scripts/fhir_http_test.mjs && node scripts/socket_ticket_test.mjs && node scripts/socket_ticket_http_test.mjs && node scripts/chat_identity_http_test.mjs && node scripts/patient_data_access_http_test.mjs && node scripts/browser_policy_test.mjs && node scripts/monitoring_socket_test.mjs && node scripts/sensitive_operation_mfa_http_test.mjs && node scripts/vitals_disclosure_http_test.mjs && node scripts/iot_analytics_transport_test.mjs && node scripts/care_plan_access_http_test.mjs && node scripts/clinical_route_access_http_test.mjs && node scripts/pharmacy_access_http_test.mjs && node scripts/pharmacy_payment_webhook_test.mjs && node scripts/cognito_post_confirmation_test.mjs",
+    "test": "npm run test:config && npm run test:config:cli && npm test --workspaces --if-present && node scripts/auth_region_http_test.mjs && node scripts/phi_failure_http_test.mjs && node scripts/fhir_http_test.mjs && node scripts/socket_ticket_test.mjs && node scripts/socket_ticket_http_test.mjs && node scripts/chat_identity_http_test.mjs && node scripts/patient_data_access_http_test.mjs && node scripts/browser_policy_test.mjs && node scripts/monitoring_socket_test.mjs && node scripts/sensitive_operation_mfa_http_test.mjs && node scripts/vitals_disclosure_http_test.mjs && node scripts/iot_analytics_transport_test.mjs && node scripts/care_plan_access_http_test.mjs && node scripts/clinical_route_access_http_test.mjs && node scripts/pharmacy_access_http_test.mjs && node scripts/pharmacy_payment_webhook_test.mjs && node scripts/cognito_post_confirmation_test.mjs && npm run test:federation",
     "test:config": "node scripts/verify_config_boundary.mjs",
-    "lint": "eslint \"*-service/src/**/*.ts\" \"shared/**/*.ts\" \"ws-authorizer/*.mjs\" \"scripts/verify_config_boundary.mjs\" \"scripts/verify_booking_startup_settings.mjs\" \"scripts/__tests__/*.mjs\" \"cognito-triggers/*.mjs\" \"scripts/cognito_post_confirmation_test.mjs\"",
+    "lint": "eslint \"*-service/src/**/*.ts\" \"shared/**/*.ts\" \"shared/runtime/*.mjs\" \"ws-authorizer/*.mjs\" \"scripts/verify_config_boundary.mjs\" \"scripts/verify_booking_startup_settings.mjs\" \"scripts/__tests__/*.mjs\" \"cognito-triggers/*.mjs\" \"scripts/cognito_post_confirmation_test.mjs\"",
     "test:config:cli": "node scripts/__tests__/config-boundary-cli.test.mjs",
     "test:cognito": "node scripts/cognito_post_confirmation_test.mjs",
-    "typecheck:cognito": "tsc --project cognito-triggers/tsconfig.json --noEmit"
+    "typecheck:cognito": "tsc --project cognito-triggers/tsconfig.json --noEmit",
+    "test:federation": "node --test scripts/__tests__/federation-runtime.test.mjs",
+    "typecheck:federation": "tsc --noEmit --allowJs --checkJs --strict --skipLibCheck --target ES2022 --module nodenext --types node shared/runtime/*.mjs"
   },
   "keywords": [],
   "author": "",

@@ -144,6 +144,10 @@ const backendReferences = collectMatches(maintainedBackendFiles, [
   // configuration names even when the helper call receives a variable.
   /["'](MODEL_[A-Z0-9_]+)["']/g,
 ]);
+const federationSettingsSource = fs.readFileSync(path.join(backendRoot, 'shared/runtime/federation-settings.mjs'), 'utf8');
+for (const match of federationSettingsSource.matchAll(/["'](FEDERATION_[A-Z0-9_]+)["']/g)) {
+  backendReferences.add(match[1]);
+}
 const settingsSource = fs.readFileSync(path.join(backendRoot, "shared", "settings.ts"), "utf8");
 const sdkInventory = settingsSource.match(/export const SDK_ENVIRONMENT_NAMES\s*=\s*\[([^\]]*)\]\s*as const/);
 if (!sdkInventory) {

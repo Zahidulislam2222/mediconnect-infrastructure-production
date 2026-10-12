@@ -9,6 +9,16 @@
 last_updated: "2026-10-12"
 last_verified_by: "Four backend revisions active:258 provider hashes/24candidate+8active HTTP PASS; two confirmation hooks exact ZIP/configuration and6no-op/denial PASS; full phase exits remain open"
 
+patient_privacy_release_20261012:
+  status: "LOCAL_CANDIDATE_NOT_DEPLOYED"
+  scope: "Existing patient source, pinned Node22/npm-ci/nonroot image and configured atomic federation bootstrap"
+  live_before: "Both existing regional patient services still serve April revisions; old compiled-source drift classification remains pending"
+  resources_added: false
+  deployed: false
+  local_verification: "Full offline Node22 tests/types/lint/five builds PASS; 332 source hashes unchanged; image nonroot/runtime4hashes/65compiledfiles and5safe HTTP flows PASS"
+  acceptance_open: "Exact regional deployment configuration, final security/publication, live-source drift/parity, native MFA and synthetic privacy acceptance"
+  owner_restrictions: "No patient rollout or third retained image is covered by previous doctor/booking approval; fresh bounded authorization required"
+
 operations_continuation_20260928:
   status: "LOCAL_VERIFIED_INDEPENDENT_REVIEW_DEFERRED_BY_OWNER"
   rag_recovery: "Configured online SQLite snapshots, atomic integrity/hash manifest, backup-wide lock and exact-source restores"
