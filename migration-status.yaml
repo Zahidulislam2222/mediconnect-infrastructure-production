@@ -640,3 +640,10 @@ phase4_cognito_confirmation_20261012:
   infrastructure_changes: false
   deployment_performed: true
   broader_privacy_complete: false
+
+cms_media_runtime_identity_20261012:
+  status: LOCAL_OPTIONAL_IAC_PREPARED_NOT_APPLIED
+  default: Disabled through null typed input; existing infrastructure unchanged
+  intended_scope: Existing CMS media bucket only, one global IAM user and one inline policy; no access-key resource or secret output
+  owner_gate: No apply/create/key issuance without fresh scoped owner authorization; CMS request/storage costs separately bounded
+  verification: "Terraform fmt/validate PASS; default-zero/enabled-two and three invalid-input offline cases PASS; targeted actual read-only plan exactly two creates/zero updates/deletes; native policy simulation eight cases PASS; app-IaC and showcase migration gates PASS (live cloud parity intentionally skipped); installed hook/Gitleaks/Bandit PASS; fresh source-only review APPROVE; no apply/key issuance"

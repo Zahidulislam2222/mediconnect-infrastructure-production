@@ -1,0 +1,8 @@
+# Copy to an ignored private .tfvars file only after owner review.
+# The default null input creates no IAM resources.
+cms_media_identity = {
+  user_name   = "cms-media-example"
+  policy_name = "cms-media-example-bucket"
+  path        = "/service/"
+  bucket_name = "replace-with-cms-media-bucket"
+}

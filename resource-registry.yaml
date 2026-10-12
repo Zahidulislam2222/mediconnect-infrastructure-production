@@ -1232,3 +1232,12 @@ phase4_cognito_confirmation_20261012:
   infrastructure_changes: false
   deployment_performed: true
   broader_privacy_complete: false
+
+cms_media_runtime_identity_20261012:
+  status: LOCAL_OPTIONAL_IAC_PREPARED_NOT_APPLIED
+  source: environments/prod/cms_media_identity.tf
+  configuration: Typed nullable cms_media_identity input owns user_name/policy_name/path/existing bucket_name; null creates zero identities
+  resources: One global IAM user and one bucket-scoped inline policy when explicitly enabled; no bucket/compute/console/other-service privileges
+  credential_recovery: Access-key creation intentionally outside Terraform; secret remains in ignored runtime environment and credential recovery only
+  verification: "Terraform fmt/validate PASS; default-zero/enabled-two and three invalid-input offline cases PASS; targeted actual read-only plan exactly two creates/zero updates/deletes; native policy simulation eight cases PASS; app-IaC and showcase migration gates PASS (live cloud parity intentionally skipped); installed hook/Gitleaks/Bandit PASS; fresh source-only review APPROVE; no apply/key issuance"
+  deployed: false
