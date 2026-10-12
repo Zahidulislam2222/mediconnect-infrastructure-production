@@ -3,7 +3,10 @@ import { Request, Response, NextFunction } from 'express';
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import { COGNITO_CONFIG } from '../../../shared/aws-config';
 import { safeLog, safeError } from '../../../shared/logger';
-import { getSensitiveOperationSettings } from '../../../shared/settings';
+import { getNativeMfaSettings, getSensitiveOperationSettings } from '../../../shared/settings';
+import { createHash } from 'node:crypto';
+import { readNativeMfa } from '../../../shared/native-mfa-proof';
+import { nativeMfaDependencies } from './native-mfa.middleware';
 
 // Cache verifiers in memory
 const verifiers: Record<string, any> = {};
@@ -40,6 +43,8 @@ const getVerifier = async (userRegion: string) => {
         throw new Error(`Failed to initialize Auth for ${regionKey}`, { cause: error });
     }
 };
+
+export const verifyNativeMfaToken = async (token: string, region: string) => (await getVerifier(region)).verify(token);
 
 export const authMiddleware = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -80,6 +85,9 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
                          payload.amr.every((method: unknown) => typeof method === 'string') &&
                          payload.amr.includes('mfa'),
             authTime: payload.auth_time,
+            clientId: payload.aud,
+            username: payload['cognito:username'],
+            sessionTokenHash: createHash('sha256').update(token).digest('hex'),
         };
 
         next();
@@ -97,7 +105,7 @@ export const authMiddleware = async (req: Request, res: Response, next: NextFunc
  * Native Cognito session-amr issuance/step-up must be established before enabling these flows.
  * Pool MFA settings, enrollment and remembered devices do not establish this per-session claim.
  */
-export const requireMFA = (req: Request, res: Response, next: NextFunction) => {
+export const requireMFA = async (req: Request, res: Response, next: NextFunction) => {
     const user = (req as any).user;
     if (!user) {
         return res.status(401).json({ error: 'Unauthorized: Authentication required' });
@@ -109,6 +117,22 @@ export const requireMFA = (req: Request, res: Response, next: NextFunction) => {
         return res.status(503).json({ error: 'SENSITIVE_OPERATION_CONFIGURATION_UNAVAILABLE' });
     }
     const now = Math.floor(Date.now() / 1000);
+    const issuerMfaFresh = user.mfaVerified === true && typeof user.authTime === 'number' &&
+        Number.isSafeInteger(user.authTime) && user.authTime > 0 && user.authTime <= now &&
+        now - user.authTime <= maxAuthAgeSeconds;
+    if (!issuerMfaFresh && user.sessionTokenHash) {
+        try {
+            if (getNativeMfaSettings().enabled) {
+                const proofTime = await readNativeMfa(user, nativeMfaDependencies(verifyNativeMfaToken));
+                if (proofTime !== undefined) {
+                    user.mfaVerified = true;
+                    user.authTime = proofTime;
+                }
+            }
+        } catch {
+            return res.status(503).json({ error: 'NATIVE_MFA_PROOF_UNAVAILABLE' });
+        }
+    }
     if (user.mfaVerified !== true || typeof user.authTime !== 'number' ||
         !Number.isSafeInteger(user.authTime) || user.authTime <= 0 || user.authTime > now ||
         now - user.authTime > maxAuthAgeSeconds) {

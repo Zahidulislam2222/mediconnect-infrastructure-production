@@ -9,6 +9,16 @@
 last_updated: "2026-10-12"
 last_verified_by: "Four backend revisions active:258 provider hashes/24candidate+8active HTTP PASS; two confirmation hooks exact ZIP/configuration and6no-op/denial PASS; full phase exits remain open"
 
+native_mfa_repair_20261012:
+  status: "LOCAL_GATES_AND_SOURCE_REVIEW_PASSED_NOT_DEPLOYED"
+  resource_reference: "Reuse existing TABLE_SESSIONS appointmentId key in both regions; no new infrastructure"
+  proof_contract: "Server-verified native SOFTWARE_TOKEN_MFA, same subject/client/region, recent auth time, original bearer SHA256 binding and TTL"
+  verification: "21 focused cases including stale-MFA HTTP retry; full offline Node22 tests/types/lint/five builds PASS, 335 source files unchanged"
+  review: "Fresh source re-review APPROVE after stale issuer MFA fallback and completion cancellation repairs; live acceptance remains open"
+  enabled_by_default: false
+  cloud_mutations: false
+  deployed: false
+
 patient_privacy_release_20261012:
   status: "LOCAL_CANDIDATE_NOT_DEPLOYED"
   scope: "Existing patient source, pinned Node22/npm-ci/nonroot image and configured atomic federation bootstrap"

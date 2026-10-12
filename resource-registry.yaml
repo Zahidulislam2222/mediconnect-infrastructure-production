@@ -126,7 +126,7 @@ dynamodb:
 
   - name: mediconnect-video-sessions
     tf_file: environments/prod/dynamodb_us.tf + dynamodb_eu.tf
-    app_files: [backend_v2/communication-service, legacy_lambdas/mediconnect-cleanup-recordings]
+    app_files: [backend_v2/communication-service, backend_v2/patient-service/src/middleware/native-mfa.middleware.ts, backend_v2/shared/native-mfa-proof.ts, legacy_lambdas/mediconnect-cleanup-recordings]
     env_var: TABLE_SESSIONS
     status: OK
 

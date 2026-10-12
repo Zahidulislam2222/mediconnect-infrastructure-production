@@ -42,6 +42,10 @@ export function getSensitiveOperationSettings() {
         .parse({ maxAuthAgeSeconds: setting('SENSITIVE_OPERATION_AUTH_MAX_AGE_SECONDS') });
 }
 
+export function getNativeMfaSettings() {
+    return { enabled: z.enum(['true', 'false']).parse(setting('NATIVE_MFA_PROOF_ENABLED')) === 'true' };
+}
+
 export function getMonitoringSettings() {
     return z.object({ maxSessionSeconds: z.coerce.number().int().positive().max(2147483),
         highHeartRateThreshold: z.coerce.number().finite().positive() })

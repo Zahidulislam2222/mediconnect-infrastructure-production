@@ -19,7 +19,8 @@ import { uploadDicom } from '../modules/clinical/imaging.controller';
 import multer from 'multer';
 
 // 🟢 BOTH MIDDLEWARES IMPORTED HERE
-import { authMiddleware, requireMFA } from '../middleware/auth.middleware';
+import { authMiddleware, requireMFA, verifyNativeMfaToken } from '../middleware/auth.middleware';
+import { completeNativeMfaHandler } from '../middleware/native-mfa.middleware';
 import { requireIdentityVerification } from '../middleware/verification.middleware';
 import { writeAuditLog } from '../../../shared/audit';
 import { getConsent, updateConsent, withdrawConsent } from '../modules/gdpr/consent.controller';
@@ -148,6 +149,7 @@ router.post('/fhir/token', smartToken);
 // The "Security Guard" checks everyone who passes this line
 router.use((_req, res, next) => { res.set('Cache-Control', 'no-store'); next(); });
 router.use(authMiddleware);
+router.post('/me/mfa/complete', completeNativeMfaHandler(verifyNativeMfaToken));
 router.get('/fhir/Patient/:id', readFhirPatient);
 router.post('/privacy/erasure/:patientId/review', requireMFA, reviewErasure);
 router.post('/privacy/erasure/:patientId/resume', requireMFA, (req, res, next) => {
