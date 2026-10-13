@@ -1,44 +1,41 @@
-# AI safety and governance
+# Knowledge and AI governance
 
-Last reviewed: 2026-09-24
+Reviewed 2026-10-13. MediConnect's knowledge assistant is intended to provide general information grounded in approved sources. It must not independently diagnose, prescribe, authorize care, change records, execute payments or decide access. Clinical functions require their own intended-use assessment and activation approval.
 
-MediConnect contains two AI features: a **knowledge assistant** (chatbot) that answers questions from
-a curated knowledge base (LightRAG, in the `mediconnect-rag` repository), and a **symptom checker**
-in the clinical backend. Neither is operating as a live service today.
+## Accountability and source lifecycle
 
-## 1. Non-negotiable rules
+Assign an accountable product owner, qualified health-content reviewer and security/privacy reviewer before release. Keep an inventory of model/provider version and license, prompts/templates, knowledge corpus, embedding configuration, evaluation dataset and deployment revision. Each source needs permission/license, provenance, review date, owner and retirement policy.
 
-1. **AI never diagnoses, prescribes or triages on its own.** Clinical decisions are made by licensed clinicians.
-2. **Always disclosed.** Users are told they are talking to an AI system (EU AI Act transparency duties apply from 2 August 2026).
-3. **Honest failure.** When a model is unavailable or its output fails validation, the product says "the assistant is unavailable". It must never substitute a made-up risk level or reassuring advice. (Earlier fallback behaviour that did this was removed and is documented in [architecture/RETIRED-AI-FALLBACKS.md](../architecture/RETIRED-AI-FALLBACKS.md).)
-4. **Emergency language.** Any mention of emergency symptoms shows local emergency guidance first.
-5. **Grounded answers.** The knowledge assistant answers from approved, dated content and shows its source.
-6. **Privacy.** No identifiable health data is sent to a model provider without a signed BAA/DPA; personal identifiers are scrubbed from prompts and logs.
-7. **Bounded cost and load.** Per-tier quotas, concurrency caps and caching. AI is never on the critical path of booking or records.
+Medical public content and developer codebase content use separate workspaces and access boundaries. Exclude credentials, private operational detail and identifiable patient material from the public corpus. Review changes before ingestion. Deleting a source must also address derived chunks, entities, embeddings and cached answers.
 
-## 2. Regulatory position (engineering assessment, not legal advice)
+## Runtime behavior
 
-| Framework | Assessment | Action before launch |
-|---|---|---|
-| FDA device rules and CDS guidance (revised January 2026) | The knowledge assistant provides general information. The symptom checker could become a medical device if it steers diagnosis or treatment. | Keep it informational, show its basis, or pursue regulatory clearance. |
-| EU MDR Rule 11 | Software informing diagnostic or therapeutic decisions is usually class IIa or higher. | Qualification assessment for the symptom checker. |
-| EU AI Act | Transparency duties apply now. If the symptom checker became a medical device, it would be high-risk (AI in regulated products: obligations from 2 August 2028). | Classify each feature; keep technical documentation and logs. |
-| UK DUAA 2025 | Significant solely-automated decisions using health data stay restricted. | No automated decisions with legal or similar effects. |
-| California ADMT rules (from 1 January 2027) | Notice, opt-out and access rights if automated decision-making technology makes significant decisions. | Not used for significant decisions by design. |
+- Authenticate and authorize before retrieval. Model output never grants a role or expands the caller's scope.
+- Treat document instructions and tool-like output as data; do not execute them.
+- Return attributable sources with answers and make uncertainty/limitations understandable.
+- Decline unsupported claims and provide an appropriate human route when evidence is missing.
+- Keep emergency guidance explicit and localizable; the assistant is not an emergency response service.
+- Bound input, retrieval, generation, queue size and deadlines; propagate cancellation and fail safely when dependencies are unavailable.
+- Keep provider execution explicit. No paid fallback, external data transfer or training reuse is implied by a local-model deployment.
 
-## 3. Evaluation before any release
+## Evaluation and acceptance
 
-| Evaluation | Pass condition (TARGET) |
+| Area | Required cases and measurements |
 |---|---|
-| Grounding: answers supported by retrieved sources | ≥ 95% on a reviewed question set |
-| Safety: emergency and self-harm prompts route to emergency guidance | 100% |
-| Refusal: requests for diagnosis or dosing are declined and redirected to a clinician | 100% |
-| Privacy: identifiers in prompts are scrubbed before provider calls and logs | 100% on the test set |
-| Prompt injection: retrieved content cannot override system rules | No critical failures on the adversarial set |
-| Clinical review | Sign-off by a licensed clinician on the knowledge base and test results |
+| Retrieval | Curated answerable/unanswerable queries, relevance, source coverage, citation accuracy, stale/deleted content and empty corpus |
+| Grounding | Claim support against source passages, contradiction handling, appropriate abstention and reviewer agreement |
+| Health safety | Emergency language, contraindication-sensitive questions, unsupported diagnosis/prescription requests and escalation |
+| Security | Prompt injection, poisoned documents, malicious links, cross-workspace keys/tokens, data exfiltration and oversized inputs |
+| Privacy | Minimization, sensitive text in request/log/error paths, retention/deletion, provider boundaries and consent where applicable |
+| Fairness/accessibility | Representative language/readability and user needs, with reviewed failure analysis |
+| Operations | Actual generation, embedding dimensions, ingestion completion, repeatability, cancellation, queue saturation, restart, backup and restore |
 
-## 4. Monitoring
+Define numeric thresholds, corpus size, reviewer rubric and release-blocking conditions before a run. Keep controlled datasets and content-specific decisions private where necessary; publish the method and aggregate accepted results. An automated judge cannot replace qualified review of clinical risks.
 
-Log question category, source documents, latency, refusal and unavailability rates, with no
-personal data. Review a sample of conversations with clinician oversight, and keep a channel for
-users to report harmful answers.
+The current source/local runtime checks cover processor failure semantics, authentication, isolation, request logging, deadlines and container recreation. Actual selected-model output, embedding dimension, grounded retrieval and live VPS acceptance remain open. Passing a model health endpoint or returning plausible text is insufficient.
+
+## Change and incident management
+
+Re-evaluate after changes to models, provider, prompts, corpus, parsers, authorization or intended use. Use versioned releases and rollback criteria. Monitor aggregate availability, latency, abstention/escalation and safety reports without retaining unnecessary conversation content. Suspend a feature when safety, privacy or legal prerequisites fail. Record affected revisions, containment, correction and the evaluation/gate added after an incident.
+
+See [law](COMPLIANCE-AND-LAW.md), [privacy](PRIVACY-AND-DATA.md), [scaling](SCALABILITY.md) and [operations](OPERATIONS.md). The [European Commission AI Act guidance](https://digital-strategy.ec.europa.eu/en/policies/regulatory-framework-ai) and [FDA clinical decision support guidance](https://www.fda.gov/regulatory-information/search-fda-guidance-documents/clinical-decision-support-software) inform the intended-use review; neither establishes approval of this release.

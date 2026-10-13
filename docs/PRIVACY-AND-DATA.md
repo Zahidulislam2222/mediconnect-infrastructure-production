@@ -1,84 +1,47 @@
-# Privacy and data flow
+# Privacy and data lifecycle
 
-Last reviewed: 2026-09-24 · Legal context: [COMPLIANCE-AND-LAW.md](COMPLIANCE-AND-LAW.md)
+Reviewed 2026-10-13. [Release status](RELEASE-STATUS.md) defines the accepted public scope. This is the platform data-handling specification; the operator's public privacy notice must reflect the services actually activated.
 
-The public showcase at <https://mediconnect.zahidul-islam.com> collects **no** personal or health
-data. It has no sign-in, no forms that submit anywhere and only fictional example records. This
-document describes how the full platform is designed to handle data once it runs as a real service.
+## Data boundaries
 
-## 1. Data categories
-
-| Category | Examples | Sensitivity | Storage protection |
-|---|---|---|---|
-| Health data (PHI / GDPR special category) | Diagnoses, prescriptions, lab results, images, vitals, consultation notes, symptom-checker input | Highest | Field-level KMS envelope encryption, audit on every access |
-| Identity | Name, date of birth, email, phone, address, ID verification images | High | Encrypted at rest, role-restricted |
-| Communications | Chat messages, video session metadata | High | Encrypted at rest; recordings only with consent |
-| Payment | Stripe customer and payment references (no card numbers) | Medium | Card data never touches MediConnect servers |
-| Operational | Logs, metrics, rate-limit counters | Low (masked) | Personal data masked before writing |
-| Analytics | Pseudonymised events (salted hash IDs) | Low | Separate dataset, deleted on erasure |
-| Public content | Articles, FAQs, doctor public profiles | Public | — |
-
-## 2. Where data lives
-
-| Region | Users | Data stores (design) |
+| Data class | Permitted destination | Required controls |
 |---|---|---|
-| United States | US patients and clinicians | AWS `us-east-1` (DynamoDB, S3, KMS, Cognito) |
-| European Union | EU patients and clinicians | AWS `eu-central-1` (DynamoDB, S3, KMS, Cognito) |
+| Published health articles and approved public knowledge | Public CMS delivery and public knowledge workspace | Editorial approval, provenance/review dates, licensed media, no patient identifiers |
+| Account and workforce identity | Approved identity service and regional account services | SDK-managed sessions, least privilege, MFA where required, minimal claims and access lifecycle |
+| Patient records, messages, prescriptions and consultation metadata | Authorized regional clinical services | Purpose/role/ownership checks, encryption, controlled exports, audit and retention |
+| Payment information | Approved payment processor; backend retains necessary references/status | Keep card secrets out of platform logs/storage; verify processor contracts and signed webhooks |
+| AI prompts, retrieved passages and output | Approved knowledge/model boundary only | Classify before submission, minimize, workspace isolation, configured retention, no unauthorized training reuse |
+| Security and reliability telemetry | Approved regional monitoring destination | Field allowlist, pseudonymous correlation, bounded retention; no credentials, bodies or patient narratives |
+| Recovery material | Approved encrypted private backup destination | Separate key custody, least privilege, integrity manifest and tested restoration |
 
-Region is chosen at registration and taken from the validated account context on every request.
-Services never read EU health data from a US region or the other way round.
+The CMS holds public editorial material, not patient records. Medical and codebase knowledge use separate workspaces, credentials, storage and networks. Codebase knowledge must not contain keys, private infrastructure detail or patient information. A local model does not remove the need for authorized purposes and access controls.
 
-## 3. Data flow (design)
+## Collection and processing
 
-```text
-Patient device ─TLS─► Regional API ─► validation ─► auth + ownership check ─► encrypt health fields ─► regional database
-                                                                  └─► audit event (append-only)
-                                                                  └─► event queue ─► notifications / analytics (pseudonymised)
-```
+Collect only fields needed for a declared purpose. Record the lawful basis and, for health data, the applicable additional condition. Keep consent version, scope, time and withdrawal state where consent is used. Validate tenant, subject, role and trusted region on the server for every protected operation. Client-provided region or resource identifiers are not authorization.
 
-## 4. Retention (design defaults, operator to confirm per jurisdiction)
+Do not place health information in URLs, browser analytics, error trackers, issue reports or general support email. Public support should request only the minimum information needed to route the request and provide an approved secure channel when sensitive records are required.
 
-| Data | Default retention | Basis |
-|---|---|---|
-| Clinical records, prescriptions, lab results, images | Per **state or national medical-record law** (commonly 6–10 years for adults, longer for minors) | State/national law. HIPAA itself does not set a medical-record retention period. |
-| HIPAA-required documentation (policies, risk analyses, required records of actions) | 6 years from creation or last effective date | 45 CFR §164.530(j)(2) |
-| Audit log | At least 6 years | HIPAA documentation duties, security investigations |
-| Consent ledger | For as long as needed to prove consent, then archived | GDPR Art. 7(1) |
-| Payment and tax records | Per tax law (commonly 7 years) | Tax law |
-| Chat and video metadata | Until account deletion, unless part of the clinical record | Data minimisation |
-| Operational logs | 30–90 days | Security operations |
-| Rate-limit counters, booking locks | Minutes | Operational |
+## Storage, transfers and vendors
 
-The earlier [data-retention-policy.md](../compliance/data-retention-policy.md) is preserved with
-correction notes where it attributed a 7-year medical-record rule to HIPAA.
+Maintain a data-flow inventory covering application stores, object storage, media, exports, queues, caches, logs, backups, subprocessors and remote support. Map every destination to an approved region, owner, purpose, retention rule and agreement. Prevent automatic cross-region failover of regulated data unless the legal and technical design explicitly permits it.
 
-## 5. Patient rights (design)
+Use transport encryption and approved encryption/key management at rest. Browser-side encryption cannot protect a secret that is distributed in the client bundle. Vendor activation requires documented security/privacy review and applicable BAA/DPA/transfer arrangements. Never infer vendor eligibility from a product logo or a successful API request.
 
-| Right | How | Where implemented |
-|---|---|---|
-| Access and portability | Download a FHIR Bundle (JSON) of own data; bulk FHIR export | patient-service |
-| Rectification | Edit profile; clinical corrections through the treating clinician | patient-service, doctor-service |
-| Erasure | Request deletion with a grace period, then cascade across stores; records the law requires to keep are retained and restricted | patient-service |
-| Consent | Granular, purpose-based, withdrawable, append-only record | patient-service, web consent UI |
-| Restriction and objection | Account restriction by admin; opt-outs per purpose | admin-service |
+## Rights and retention
 
-Requests are answered within one month (GDPR) or the applicable US timeline, after identity verification.
+Before live personal-data processing, approve a schedule per data class and jurisdiction. It must define retention trigger/duration, legal holds, deletion method, backup expiry and accountable owner. Medical-record obligations may constrain erasure; explain the applicable decision to the requester rather than promising unconditional deletion.
 
-## 6. Subprocessors (design; to be contracted before real data)
+Rights handling must verify identity with proportionate checks, locate data across stores/processors, enforce scope, provide accessible responses, log the decision safely and meet applicable deadlines. Exports need ownership checks, encryption/access expiry and integrity verification. Deletion must cover derived indexes, embeddings, caches and downstream processors, with backup handling and legal holds documented. Test the entire flow and processor acknowledgements before claiming completion.
 
-| Subprocessor | Purpose | Health data? | Contract needed |
-|---|---|---|---|
-| Amazon Web Services | Hosting, database, storage, keys, identity, video (Chime SDK), AI (Bedrock) | Yes | BAA + DPA |
-| Google Cloud | Scale-to-zero compute, pseudonymised analytics, AI fallback | Pseudonymised or none by design | BAA + DPA |
-| Microsoft Azure | Retained backup compute definitions | Only if re-enabled | BAA + DPA |
-| Stripe | Payments and subscriptions | No | DPA; PCI handled by Stripe |
-| Cloudflare | DNS, TLS and proxy in front of the public site | No (public static content only) | DPA before any personal data passes through it |
-| Operator VPS | Static showcase today; the CMS and knowledge service are designed to be self-hosted here but are **not deployed** | Not today | Hosting DPA if health data is ever placed there |
-| Language-model provider for the knowledge service | Answers from public knowledge base | Must not receive health data unless under BAA/DPA | Provider terms review |
+## Cookies and browser requests
 
-## 7. Privacy by design rules
+Inventory scripts, requests, storage and cookies for each public and authenticated route. Permit only approved essential behavior by default; obtain and honor other choices where required. Test initial navigation, reload, withdrawal and region/device variants. Content security policy is a control, not proof that no injection or attempted tracking occurs.
 
-1. Collect only what a feature needs. No health data in analytics, URLs, logs or third-party scripts.
-2. No advertising trackers or tracking pixels on any authenticated or health-related page.
-3. The AI assistant must not receive identifiable health data unless the provider is under a signed BAA/DPA.
-4. Test data is synthetic. Production exports never enter a repository.
+The current live external-request acceptance remains open because browser responses still produced analytics requests after a host-specific configuration change was reported. Keep that acceptance open until a fresh browser network trace demonstrates the intended policy. See [release status](RELEASE-STATUS.md).
+
+## Verification and ownership
+
+Every release with a data-flow change needs a privacy review, negative authorization tests, request/log inspection, regional checks and an updated inventory/notice. Assign accountable privacy and security owners before service activation. Record requests and incident decisions in access-controlled systems; publish only scrubbed status and lessons.
+
+See [law and activation](COMPLIANCE-AND-LAW.md), [security](SECURITY-ARCHITECTURE.md), [operations](OPERATIONS.md) and [AI governance](AI-GOVERNANCE.md).

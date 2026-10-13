@@ -1,98 +1,85 @@
-# Architecture
+# Platform architecture
 
-Last reviewed: 2026-09-24. Status labels (CURRENT, RETAINED, PLANNED, TARGET) are defined in the
-[documentation index](README.md).
+Reviewed 2026-10-13. Delivery state is recorded in [release status](RELEASE-STATUS.md); the cell architecture in [scalability](SCALABILITY.md) is a future deployment design.
 
-## 1. What MediConnect does
+## Product and roles
 
-MediConnect connects four kinds of users around one care journey, from a clinic visit to follow-up at home:
+MediConnect coordinates care access, appointment and billing state, clinical information, communication and public health content. Authorization distinguishes patients, practitioners, clinic staff and administrators. Pharmacy-related actions belong to explicit backend permissions and workflow contracts; a navigation link alone grants no access.
 
-| Role | Main jobs |
-|---|---|
-| Patient | Register, verify identity, book and pay for visits, video consultations, messages, prescriptions and pharmacy, health records, data export and erasure, consent. |
-| Doctor | Patient queue, electronic health record (ICD-10/11, SNOMED CT, LOINC), e-prescribing (RxNorm), lab orders, referrals, clinical decision support, earnings. |
-| Staff | Shifts, tasks, announcements, directory, front-desk support. |
-| Admin | User management, audit log review, system health, platform analytics. |
+| Role | Main responsibilities | Boundary |
+|---|---|---|
+| Patient | Own profile, appointments, consent, records, communications and billing | Own resources and approved care relationships |
+| Practitioner | Schedule, clinical context, prescriptions, referrals and consultation | Verified role, relationship, purpose and region |
+| Clinic staff | Shifts, tasks, announcements and directory | Staff permissions; no inherited clinical/admin privilege |
+| Administrator | User operations, audit and platform health | Explicit permissions and audited actions; no unrestricted patient-data bypass |
 
-## 2. What is running today (CURRENT, 2026-09-24)
+## Components
 
-```text
-Browser ──HTTPS──► Cloudflare (DNS and proxy) ──► mediconnect.zahidul-islam.com (operator VPS, Caddy reverse proxy)
-                          │
-                          └─► Nginx container serving the compiled static showcase
-                              (no login, no payments, no backend calls; fictional demo data only)
+```mermaid
+flowchart TD
+    Public[Public website] --> CMS[Published editorial content]
+    Client[Authenticated web or native client] --> Identity[Configured regional identity provider]
+    Client --> API[Regional service APIs]
+    API --> Auth[Token, role, ownership, purpose and region checks]
+    Auth --> Domain[Patient / doctor / booking / communication / staff]
+    Auth --> Python[Administration / DICOM]
+    Domain --> Data[Regional transactional and object stores]
+    Domain --> Events[Events and background workers]
+    Domain --> Knowledge[Approved knowledge service]
+    Domain --> Providers[Approved payment, video and notification providers]
+    Domain --> Audit[Privacy-safe audit and metrics]
 ```
 
-- The public site is a **static showcase** (release `20260915-pharmacy-01`). Browser security policy
-  on that host restricts connections to the same origin, so it cannot reach the retained backend.
-- The full React application, backend services, CMS, AI knowledge service and native apps exist in
-  source and have local test evidence, but **no live clinical service is operated**.
-- An earlier Firebase Hosting deployment (`askme-82f72.web.app`) is **retired**. Its automatic
-  deployment workflow is kept for reference and disabled.
+This diagram describes service relationships. Each provider and route needs its own activation and operating acceptance; no third-party service is activated by drawing it here.
 
-## 3. Full platform design (RETAINED implementation)
+## Seven backend domains
 
-```text
-                 ┌──────────────────────────── Clients ────────────────────────────┐
-                 │ React web app │ Capacitor app │ Android (Compose) │ iOS (SwiftUI) │
-                 └───────┬───────────────────────────────────────────────────────────┘
-                         │ HTTPS + Cognito JWT + x-user-region (US | EU)
-                         ▼
-          ┌──────────── Regional API layer (one per data region) ────────────┐
-          │ patient  doctor  booking  communication  staff   (Node.js / TS)   │
-          │ admin  dicom                                   (Python / FastAPI) │
-          └───┬──────────┬───────────┬──────────────┬─────────────┬──────────┘
-              │          │           │              │             │
-         DynamoDB      S3 + KMS    SQS / Kafka    Chime SDK    LightRAG (AI)
-        (regional)   (regional)    (events)       (video)      + model providers
-              │
-        Cognito user pools (US, EU) · Stripe (payments) · BigQuery (pseudonymised analytics)
-```
-
-### Backend services
-
-| Service | Stack | Responsibility |
+| Service | Source stack | Responsibility |
 |---|---|---|
-| patient-service | Node.js / TypeScript | Registration, profile, vitals, FHIR Patient, allergies, immunisations, care plans, master patient index, bulk export, consent, erasure, export |
-| doctor-service | Node.js / TypeScript | EHR, e-prescriptions, terminology, lab orders, CDS Hooks, medication reconciliation, referrals, C-CDA, public-health reporting, emergency access |
-| booking-service | Node.js / TypeScript | Appointments, Stripe billing, subscriptions, prior authorisation, insurance eligibility, calendar sync |
-| communication-service | Node.js / TypeScript | WebSocket chat, video sessions, AI assistant routing |
-| staff-service | Node.js / TypeScript | Shifts, tasks, announcements, directory |
-| admin-service | Python / FastAPI | User management, audit viewer, system health, analytics |
-| dicom-service | Python / FastAPI | Medical image upload, DICOM de-identification (PS3.15 Annex E), PACS forwarding, FHIR ImagingStudy |
+| Patient | Node.js/TypeScript | Registration, own profile, vitals, allergies, immunizations, care plans, patient matching, consent, export and erasure |
+| Doctor | Node.js/TypeScript | Practitioner data, EHR, prescribing, terminology, labs, referrals, medication reconciliation and clinical access |
+| Booking | Node.js/TypeScript | Appointment lifecycle, conflict/idempotency handling, billing, subscriptions, insurance and calendar coordination |
+| Communication | Node.js/TypeScript | Messaging, real-time access, consultation coordination and AI routing |
+| Staff | Node.js/TypeScript | Staff shifts, tasks, announcements and directory |
+| Administration | Python/FastAPI | Administrative operations, audit, health and analytics |
+| DICOM | Python/FastAPI | Imaging validation, de-identification, storage/PACS and FHIR imaging references |
 
-### Key design decisions
+FHIR R4, HL7, SMART on FHIR, CDS Hooks and DICOM are interoperability contracts in the retained implementation. Partner conformance, clinical terminology licensing and production exchange require separate verification.
 
-| Decision | Why |
+## Request and data path
+
+1. The client obtains the current session through its authentication SDK.
+2. The web API boundary selects the configured service family and region and applies cancellation/deadline handling.
+3. The server verifies token signature/issuer/audience/expiry, authorization and resource ownership, then validates the request.
+4. Regional context is checked against trusted account/resource context. A request header cannot independently change the patient's data region.
+5. Sensitive data uses shared encryption and privacy-safe audit helpers. Side effects use the domain's idempotency/event contract.
+6. Errors return bounded, actionable responses; provider failure does not become an apparent successful write or clinical answer.
+
+See [API contracts](API-CONTRACTS.md) for route families, retries, uploads and real-time requirements.
+
+## Public website and CMS
+
+The public application serves maintained content and CMS articles without requiring an account. Authentication dependencies are loaded only when a protected request needs them. Public CMS reads carry no account bearer token or account cookie, and media URLs are validated against the configured CMS origin and upload path.
+
+The existing-host CMS release uses Strapi, a durable database mount and durable upload storage. Public readers and editors have different permissions. Complete media recovery and an application-consistent off-host restore remain operational gates.
+
+## Knowledge service
+
+The isolated local-model release has separate medical and codebase stores, accounts, API keys and signing secrets. Each RAG service joins only its own internal network; Ollama joins both. A credential-free ingress proxy exposes the authenticated services only on host loopback. Dynamic DNS and separate subnets protect workspace routing during replacement.
+
+The reviewed runtime enforces local provider origins, embedding deadlines, bounded resources and privacy-safe Python logging. The optional multimodal document CLI has separate provider/configuration and approval requirements. Retrieval quality, source grounding, clinical review and end-to-end application integration are additional gates.
+
+## Decisions and tradeoffs
+
+| Decision | Reason and consequence |
 |---|---|
-| Separate US and EU data planes, selected from validated user context | Keeps EU health data in the EU and US data in the US; required for GDPR transfer rules and customer contracts. |
-| Microservices split by clinical domain | Each domain scales, deploys and fails independently; audit scope stays small. |
-| Field-level envelope encryption for health data (KMS) | Database administrators and backups see ciphertext, not diagnoses. |
-| Append-only audit events in FHIR AuditEvent format | Supports HIPAA audit controls and incident investigation. |
-| FHIR R4, HL7 v2, DICOM, SMART on FHIR, CDS Hooks | Interoperability with hospitals and EHR vendors instead of a closed data silo. |
-| Infrastructure as code (Terraform) and Kubernetes manifests | Reproducible environments and reviewable change history. |
-| Deploy workflows need manual approval and a cost acknowledgement | Prevents accidental cloud spend and unreviewed production changes. |
-| Static showcase separated from the clinical app | The public demo cannot leak real data or start paid services. |
+| Separate public and authenticated entry paths | Public content can remain available while account/provider services are unavailable |
+| Regional data planes | Supports residency and transfer obligations; every dependent store, worker and provider must follow the same policy |
+| Domain services and shared security helpers | Limits service responsibility while keeping authorization, encryption, configuration and audit behavior consistent |
+| Typed configuration and maintained content files | Provider/model/endpoint/limit changes do not require business-logic edits |
+| Immutable, local-first releases | Produces reproducible artifacts and auditable source/live parity; deployment is a verification step |
+| Measured regional cells for future scale | Limits failure impact and growth per cell; requires routing, quotas, operating ownership and load evidence |
 
-## 4. Request path (RETAINED design)
+## Future growth
 
-1. The client signs in with Amazon Cognito and obtains a short-lived token through the SDK (never stored raw in local storage).
-2. `src/lib/api.ts` in the web app adds the token and the region header and selects the regional endpoint.
-3. The service verifies the token against the pool's public keys, checks role and resource ownership, and validates the body with Zod or Pydantic.
-4. Health data fields are encrypted before storage; each access writes an audit event.
-5. Side effects (notifications, analytics, erasure cascades) are published as events and handled by consumers.
-
-## 5. Supporting systems
-
-| System | Repository | Status |
-|---|---|---|
-| Strapi 5 CMS for articles, diseases, drugs, FAQs, health tips and wellness programmes | mediconnect-cms | Local build verified; not deployed |
-| LightRAG knowledge graph with Nginx, Authelia 2FA, Prometheus, Grafana, Loki, Jaeger | mediconnect-rag | Self-hosted stack; app integration not accepted |
-| Security CI (Gitleaks, Semgrep, Bandit) on every repository | all | CURRENT, passing on all four repositories; the frontend history scan is report-only ([open work](SECURITY-ARCHITECTURE.md)) |
-| Terraform for AWS, GCP and Azure; Kubernetes manifests with probes, HPA, PDB and network policy | this repository | RETAINED |
-
-## 6. Where to go next
-
-- How this design grows to one million or more simultaneous users: [SCALABILITY.md](SCALABILITY.md)
-- Uptime and recovery design: [RELIABILITY.md](RELIABILITY.md)
-- Threats and controls: [SECURITY-ARCHITECTURE.md](SECURITY-ARCHITECTURE.md)
+The existing VPS footprint serves the current scoped application needs. Reaching 1M+ simultaneous users requires the independently sized edge, identity, API, data, real-time, media and AI capacity in [SCALABILITY.md](SCALABILITY.md), together with the operating controls in [RELIABILITY.md](RELIABILITY.md).

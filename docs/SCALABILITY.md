@@ -1,118 +1,98 @@
-# Scalability: designing for 1,000,000+ concurrent users
+# Capacity roadmap: 1,000,000+ simultaneous users
 
-Last reviewed: 2026-09-24 · Status: **TARGET / PLANNED design**
+Reviewed 2026-10-13 · Future engineering objective. Capacity is accepted only for a measured release, configuration, workload and failure envelope.
 
-> One million simultaneous users is the **future design target**. It has **not** been load-tested.
-> Every number in this document marked *illustrative* is an assumption for planning, not a measurement.
-> The phases that get there are in the [roadmap](ROADMAP.md). The earlier detailed gate list is kept in
-> [architecture/CAPACITY-AND-RELIABILITY.md](../architecture/CAPACITY-AND-RELIABILITY.md).
+## Define the workload
 
-## 1. Define the load before sizing anything
+The target is **at least one million concurrent users**, not one million accounts or monthly visitors. Define the observation interval, connected-session lifetime, active interactions and regional split before sizing infrastructure.
 
-"1M users" can mean three very different things. Each is measured separately.
+| Measurement | Required definition |
+|---|---|
+| Registered accounts and monthly active users | Identity/storage/support demand; counted separately from concurrency |
+| Concurrent sessions | Open sessions at the same instant; include session duration and reconnect behavior |
+| Active API traffic | Endpoint mix, requests per session, read/write ratio, payload sizes and burst distribution |
+| Real-time traffic | Connections, messages per second, room size, fan-out and reconnect storms |
+| Media traffic | Consultation participants/minutes, bitrate and provider quotas |
+| AI traffic | Questions per second, retrieved context, generated tokens, queue depth and inference latency |
+| Regional/tenant distribution | US/EU split, large clinics, popular practitioners and skewed partition keys |
 
-| Measure | Definition | Why it matters |
+A starting session allocation for planning is below. The shares total 100%; they must be replaced or confirmed using measured demand. A user's primary activity category is counted once, while secondary API/media actions are measured separately.
+
+| Primary session activity | Planning share | Principal capacity |
 |---|---|---|
-| Registered accounts | Identities stored | Storage, identity-provider pricing, erasure workload |
-| Monthly active users (MAU) | Distinct users active in 30 days | Identity pricing tiers, support load |
-| **Concurrent users (the target)** | Users with an open session at the same moment | Connections, request rate, database throughput, cost |
+| Public content and discovery | 60% | CDN requests, cache misses and CMS publication refresh |
+| Authenticated dashboards and own records | 25% | Identity refresh, authorized API reads and regional data |
+| Messaging/waiting room | 7% | Long-lived connections and message fan-out |
+| Appointment/billing actions | 4% | Transactional writes, conflicts and provider events |
+| Consultation | 3% | Media participants and connection establishment |
+| Knowledge assistance | 1% | Bounded retrieval/inference workers and queues |
 
-A concurrent-user target also needs a **workload model**. The planning model below is *illustrative*:
+## Demand arithmetic
 
-| Activity (share of 1M concurrent) | Illustrative share | Load it creates |
-|---|---|---|
-| Browsing content, articles, doctor search | 60% | Mostly cacheable reads (CDN) |
-| Signed in, dashboard and records | 30% | Authenticated reads, some writes |
-| Booking or paying | 3% | Strongly consistent writes, payment calls |
-| Chat or waiting room (WebSocket) | 5% | Long-lived connections, fan-out |
-| Live video consultation | 1–2% | Media traffic through a media provider (not the API) |
-| AI assistant queries | 1% | Expensive, rate-limited model calls |
+For each endpoint family, derive request demand from active users and interaction frequency. Convert public edge traffic to origin demand using measured cache behavior; never cache authenticated health data in a shared public cache.
 
-*Illustrative request math:* if an active session averages one API call every 30 seconds, 1M
-sessions produce about 33,000 requests per second. Planning for a 3× peak gives about **100,000
-requests per second** at the edge, most of which must be served from cache.
+`requests/second = active users × requests per user per minute ÷ 60`
 
-## 2. Target architecture: regional cells
+`in-flight operations = arrival rate × mean operation time`
 
-Scaling one giant shared backend makes every failure global. MediConnect's target shape is
-**cells**: independent, identical copies of the stack, each with a hard size limit.
+The checked-in [capacity input](../architecture/capacity-plan.example.json) is a separate API demand envelope: 1,000,000 users at six requests/minute gives 100,000 requests/second; its 1.5 headroom factor gives 150,000. Session mix and per-service request fractions are different quantities and must not be substituted for one another.
 
-```text
-                     Global DNS + CDN + WAF  (static assets, cached content, bot/DDoS filtering)
-                                   │
-                 ┌─────────────────┴──────────────────┐
-             US region                            EU region            ← data never crosses
-          ┌──────┴──────┐                     ┌──────┴──────┐
-        Cell US-1   Cell US-2 …             Cell EU-1   Cell EU-2 …    ← each cell ≤ N users
-   (API pods, WebSocket pods, workers, cache, queues; own quotas and limits)
-                 │                                   │
-     Regional data layer (DynamoDB, S3, KMS, Cognito, Redis) with per-cell partition keys
+```bash
+node scripts/capacity-plan.mjs architecture/capacity-plan.example.json
 ```
 
-- A thin **cell router** maps each tenant or user to a cell inside the user's legal data region.
-- Cells are sized from load-test results (for example *illustratively* 100,000 concurrent users per
-  cell, so 1M needs about 10 cells plus spare capacity).
-- A bad deploy or overload affects one cell, not every user. New releases go to one cell first.
-- Adding capacity means adding cells, not making one system ever bigger.
+The offline calculator exits with status 2 while per-replica throughput is missing, leaves replica estimates unset and provisions no resources. Supply measured sustainable throughput at the required latency/error budget before using replica arithmetic. A calculated replica count alone does not prove capacity.
 
-Status: **PLANNED**. Today's Kubernetes templates (1–5 replicas per service) are a small historical
-footprint and are **not** million-user sizing.
+## Target deployment: regional cells
 
-## 3. Layer by layer
+```mermaid
+flowchart TD
+    Edge[CDN / WAF / public content] --> Router[Region and cell routing]
+    Router --> US[US data plane]
+    Router --> EU[EU data plane]
+    US --> USC[Independent US cells]
+    EU --> EUC[Independent EU cells]
+    USC --> USD[US stores / queues / caches / audit]
+    EUC --> EUD[EU stores / queues / caches / audit]
+```
 
-| Layer | Target design | Main bottleneck to watch |
+Each cell has an explicitly measured maximum workload and contains bounded API, worker, connection, cache and queue capacity. Account/tenant placement is stable inside its authorized region. Expansion adds tested cells and reserves enough capacity for a cell or zone failure; it does not depend on a universal users-per-cell assumption.
+
+Cell routing, quotas, orchestration and multi-zone failure behavior are future operating work. The current isolated VPS knowledge footprint is not the million-user serving tier.
+
+## Scale each layer
+
+| Layer | Required design | Validation and limiting metric |
 |---|---|---|
-| Edge | CDN for the web app, images, video posters and published CMS content; WAF and rate limits at the edge; HTTP/2 and HTTP/3; long cache lifetimes for hashed assets | Cache hit ratio. Every miss becomes origin load. |
-| Identity | Cognito regional user pools; token verification locally using cached public keys (no network call per request) | Identity-provider API request-rate quotas for sign-in and token refresh must be raised ahead of launches. |
-| API compute | Stateless containers on Kubernetes with horizontal autoscaling on request rate and latency, not only CPU; spread across three availability zones | Per-pod throughput (must be benchmarked), cold start and connection pools. |
-| Real-time | Dedicated WebSocket tier separate from REST pods; connection draining on deploy; shared pub/sub for fan-out; heartbeats and idle timeouts | Connections per pod and memory. *Illustrative:* 25,000 connections per pod → about 40 pods for 1M plus headroom. |
-| Video | Managed WebRTC media service (Amazon Chime SDK in the retained code); API only issues join tokens | Media-provider concurrency quotas and cost per participant-minute. |
-| Data | DynamoDB on-demand with high-cardinality partition keys (user or tenant ID); no table scans on hot paths; pagination everywhere; conditional writes for bookings | Hot partitions. A single partition key serves about 3,000 reads and 1,000 writes per second, so popular doctors' calendars need sharded keys. |
-| Caching | Redis cluster per cell for sessions, rate-limit counters, doctor availability and AI answer cache (tenant-safe keys, no PHI in shared cache keys) | Cache stampede on expiry. Use request coalescing and jittered TTLs. |
-| Async work | SQS or Kafka between services; idempotent consumers; dead-letter queues; bounded retries with backoff | Queue age and consumer lag alarms. |
-| Search | Dedicated search index for doctors and articles instead of database scans | Index refresh lag. |
-| AI | Per-tier quotas, concurrency caps, response caching, graceful "assistant unavailable" state, never a fake answer | Provider rate limits and cost. AI must never be on the critical path of booking or records. |
-| Payments | Stripe with idempotency keys on every write and webhook replay protection | Duplicate charges under retries. Needs a transactional outbox and reconciliation job. |
-| Files and imaging | Direct-to-S3 pre-signed uploads, virus scanning, asynchronous DICOM processing | Large uploads must never pass through API pods. |
+| Edge/content | Cache public immutable assets; bounded publication invalidation and origin protection | Hit ratio, origin RPS, cache stampedes, invalidation lag and regional user latency |
+| Identity | Local JWT verification with bounded key caching; distinct sign-in/refresh quotas | Sign-in bursts, refresh synchronization, key rotation, revocation and provider limits |
+| API | Stateless workers, bounded connection pools, horizontal scaling and admission control | Sustainable per-replica RPS at p95/p99 latency, CPU/memory, bootstrap and dependency limits |
+| Real-time | Dedicated connection workers, drain/reconnect controls and tenant-aware fan-out | Connections/worker, messages/second, memory/connection and reconnect storms |
+| Transactional data | High-cardinality ownership/region keys, conditional writes and paginated access | Item size/consistency cost, hot keys, conflict rates, throttling and lock contention |
+| Cache/search | Tenant/region-safe keys, coalesced fills, expiry jitter and searchable indexes | Hit ratio, stale reads, eviction, index freshness and privacy isolation |
+| Background work | Durable queues, idempotent consumers, bounded retries and dead-letter handling | Oldest queue age, lag, duplicate processing, retry storms and recovery throughput |
+| Payments | Provider idempotency, signed/replay-safe events, reconciliation and controlled refunds | Sandbox lost-reply/duplicate/reordered-event tests and provider request quotas |
+| Files/imaging | Authorized direct upload, quarantine/scanning and asynchronous processing | Size limits, upload rates, object access, scan backlog and malware/de-identification gates |
+| Video | Separate approved media plane and short-lived authorized join grants | Participant concurrency, reconnects, regional handling, bandwidth and participant-minute cost |
+| Knowledge/AI | Independent retrieval/inference workers, bounded queues and per-tenant fairness | Context/token budgets, model memory, throughput/latency, grounding, refusal and queue saturation |
 
-## 4. Rules that make scaling safe
+Use [official DynamoDB partition guidance](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/bp-partition-key-design.html) when sizing data access; item size and consistency change capacity consumption. Do not translate capacity units directly into arbitrary application request rates.
 
-1. **Stateless services.** No user session in pod memory. Any pod can serve any request in its cell.
-2. **Idempotency everywhere.** Every create, pay or book operation takes a client operation key and is safe to retry.
-3. **Backpressure, not collapse.** When a dependency is slow, shed low-priority load (analytics, AI) first and return clear "try again" responses.
-4. **Timeouts and circuit breakers** on every outbound call, with budgets smaller than the caller's timeout.
-5. **No cross-region data calls** on the request path. EU requests are served entirely in the EU.
-6. **Priority order under stress:** sign-in and records access, then booking, then messaging, then content, then AI.
+## Progressive proof
 
-## 5. Proving it: the load-test plan
-
-Capacity is only claimed after these tests pass on the same release and configuration that will run in production.
-
-| Test | Goal | Pass condition (TARGET) |
+| Milestone | Exercise | Acceptance |
 |---|---|---|
-| Per-service benchmark | Find sustainable requests per second per pod | p95 < 300 ms, p99 < 800 ms, error rate < 0.1% at the measured rate |
-| Ramp to 1 cell | Validate a full cell at its design size | All SLOs held for 60 minutes |
-| Multi-cell 1M soak | Run the full workload model at 1M concurrent for 4+ hours | SLOs held; no memory growth; queue age bounded |
-| Spike | 3× traffic within 60 seconds | Autoscaling reacts; shedding protects critical journeys |
-| Failure injection | Kill a zone, a cell, the cache, and the AI provider | Critical journeys stay within SLO; no data loss; no duplicate bookings or charges |
-| Regional isolation | Force EU traffic with US-only failures | EU users unaffected; no cross-region data flow |
+| Service baseline | Each endpoint and background worker under controlled concurrency | Repeatable throughput, p95/p99, memory/CPU, validation and privacy results |
+| 1,000 concurrent | Full journey mix with controlled data | Auth/ownership/region correctness, no duplicate mutations and bounded queues |
+| 10,000 concurrent | Identity refresh, connections and skewed practitioner demand | SLOs held; throttling, dependency quotas and admission behavior verified |
+| 100,000 concurrent | Complete regional cell and cell-router expansion | Measured cell limit, no cross-tenant/region access and safe canary/rollback |
+| 1,000,000+ concurrent | Multiple cells and independent load generators; at least four-hour soak | Journey SLOs, stable memory, bounded lag, no lost/duplicate transactions and recorded cost |
+| Failure envelope | Zone/cell/cache/identity/media/AI loss at target demand | Critical journeys protected, regional handling preserved and recovery objectives met |
 
-Tools: k6 or Locust for HTTP and WebSocket load, synthetic users and synthetic data only, and a
-separate load-generator fleet so the test tool is not the bottleneck. The offline calculator in
-`scripts/capacity-plan.mjs` converts measured per-pod throughput into replica counts; it refuses to
-guess when a measurement is missing.
+Planning latency objectives for API benchmarks are p95 below 300 ms and p99 below 800 ms for endpoints whose workload permits them; journey-specific objectives in [reliability](RELIABILITY.md) govern actual acceptance. Record payload distribution and provider latency rather than hiding slow journeys inside an aggregate.
 
-## 6. Cost awareness
+## Cost, quotas and operating ownership
 
-Running 1M concurrent users is a large, continuous cloud bill (compute, data transfer, identity,
-video minutes, AI tokens). No cost figure is published here because none has been measured. Before
-any scale test, the operator produces a priced plan from current provider pricing and approves it
-explicitly. Scale-to-zero development environments and per-cell budgets keep idle cost bounded.
+Before provisioning or a large load test, produce a priced plan from current provider pricing and verified account allowances. Include compute, storage, transfer, identity, media, notifications, AI, observability and the load generators. Set hard budgets and a stop procedure, obtain explicit approval, and test the generator's own capacity.
 
-## 7. Current gaps before any scale claim
-
-- No load test of any kind has been run against the backend.
-- Per-service throughput is unmeasured, so replica counts cannot be calculated yet.
-- Booking and payment idempotency, outbox and reconciliation are open work items.
-- The rate limiter falls back to per-process memory if Redis is unavailable. That must change before multi-pod production.
-- Cell routing, per-cell quotas and search are not implemented.
+No quota increase, paid inference, scale-out deployment or cloud creation is authorized by this document. Prioritize correctness and recovery before higher traffic. See the [roadmap](ROADMAP.md) and [AWS scalability testing guidance](https://docs.aws.amazon.com/wellarchitected/latest/framework/rel_testing_resiliency_test_non_functional.html).

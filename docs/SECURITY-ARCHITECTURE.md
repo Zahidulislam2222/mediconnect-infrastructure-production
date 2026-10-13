@@ -1,74 +1,51 @@
-# Security architecture
+# Security architecture and verification
 
-Last reviewed: 2026-09-24. To report a vulnerability, see [SECURITY.md](../SECURITY.md). Please do
-not open a public issue.
+Reviewed 2026-10-13. Controls have scoped verification evidence; no audit certification or absence of vulnerabilities is implied. See [release status](RELEASE-STATUS.md) for remaining activation gates and each repository's `SECURITY.md` for private reporting.
 
-## 1. What we protect
+## Trust boundaries and threat model
 
-| Asset | Why it matters |
+Treat browsers, native clients, incoming webhooks, uploads, retrieved documents and model output as untrusted. Separate public delivery, identity, regional clinical services, editorial administration, knowledge workspaces and operator access.
+
+| Threat | Required prevention and detection |
 |---|---|
-| Health data (diagnoses, prescriptions, images, messages, vitals) | Special-category data under GDPR and protected health information under HIPAA; harm if exposed or altered |
-| Identity and credentials | Account takeover gives access to health data |
-| Payment state | Fraud, double charges |
-| Audit log | Needed to prove who accessed what |
-| Encryption keys and cloud credentials | Compromise of everything above |
-| Clinical integrity | Wrong patient, wrong drug or silently altered records can cause physical harm |
+| Broken object/tenant/role authorization | Validate current identity and server-side ownership/tenant/role on every protected read/write; test cross-user, cross-role and cross-region denial |
+| Credential theft/session abuse | SDK-managed tokens, issuer/audience/signature/expiry checks, MFA policy, short-lived credentials, revocation/recovery drills and rate limits |
+| Injection and unsafe input | Schema validation, parameterized queries, bounded parsing, safe file handling, output encoding and no unsafe deserialization |
+| Payment/webhook replay | Signature verification on original bytes, bounded timestamp policy, durable event uniqueness and idempotent state transitions |
+| Cross-workspace knowledge access | Distinct credentials/storage/networks, fail-closed proxy routing, cross-key/token denial and container-recreation tests |
+| Prompt injection or poisoned source | Approved provenance, instruction/data separation, no model authority over access control, retrieval evaluation and human escalation |
+| Secret/source/supply-chain exposure | Current-tree and history triage, locked dependencies, immutable images, provenance, layered scans and reviewed changes |
+| Resource exhaustion or dependency failure | Positive resource caps, request/queue bounds, cancellation/deadlines, backpressure and isolation |
+| Recovery compromise | Encrypted off-device backups, separate key custody, least privilege, integrity checks and isolated restore exercises |
 
-## 2. Threat model (STRIDE summary)
+## Application controls
 
-| Threat | Example | Main controls |
-|---|---|---|
-| Spoofing | Stolen password, forged token | Cognito sign-in with MFA (TOTP or email), token signature verification against the pool's public keys, short token lifetime |
-| Tampering | Changing another patient's record, replaying a payment | Server-side role **and** ownership checks on every route, request schema validation, idempotency keys, Stripe webhook signature verification |
-| Repudiation | Denying a record access | Append-only audit events (FHIR AuditEvent) with actor, patient, action and time |
-| Information disclosure | Cross-patient data leak, EU data in the US, secrets in logs | Regional data routing from validated context, field-level encryption, log masking, no raw tokens in browser storage |
-| Denial of service | Request floods, expensive AI calls | Edge rate limiting, per-tier quotas, AI concurrency caps, load shedding |
-| Elevation of privilege | Patient reaching doctor or admin APIs | Route guards in the client **and** enforced authorisation on the server; break-glass emergency access is time-limited and audited |
+Backend services validate protected requests explicitly; UI route guards are an additional usability boundary. Derive routing from validated regional context. Mutation retries require documented idempotency and failure semantics. Use PII-safe logging and minimal structured audit events. Never include tokens, patient narratives, uploaded documents or raw provider errors in ordinary logs.
 
-## 3. Controls by layer
+Frontend calls use the shared API client and SDK session boundary. Profile data uses the maintained secure-storage boundary. Keep sensitive state out of URL parameters and ordinary browser storage; clear session-derived state on logout/recovery. Native clients must satisfy their own storage, lifecycle and provider tests.
 
-| Layer | Control | Status |
-|---|---|---|
-| Identity | Amazon Cognito regional user pools, MFA options, role groups, session timeout after 15 minutes of inactivity | Implemented in source |
-| Authorisation | Per-endpoint role guard plus resource-ownership checks | Implemented; full authenticated route test coverage is open work |
-| Input | Zod (Node) and Pydantic (Python) validation | Implemented |
-| Encryption in transit | HTTPS on the public site; target is TLS 1.2+ everywhere, HSTS and a strict content-security policy | Partial. Verified on the showcase host: HTTPS through Cloudflare, `X-Frame-Options: DENY`, and a content-security policy limited to `connect-src`, `frame-src`, `form-action`, `object-src` and `base-uri`. **No HSTS header yet**, and the policy has no `default-src` or `script-src` (open work). |
-| Encryption at rest | Cloud-managed disk/database encryption plus KMS envelope encryption of health fields | Implemented in source |
-| Browser storage | Profile data via Web Crypto AES-GCM wrapper; tokens obtained from the auth SDK, not stored raw | Implemented. Note: a key shipped to the browser does not protect against an attacker with script access; the real protection is server-side. |
-| Secrets | Environment variables and cloud secret stores; no secrets in source; `.env.example` holds placeholders only | Enforced by scanners |
-| Logging | Personal data masking (email, phone, national IDs, passwords, base64 blobs) before writing | Implemented |
-| Breach detection | Rate-based anomaly detection on health-data operations and security events, alerting to the security contact | Implemented in source; not operated live |
-| Files | Pre-signed uploads, DICOM de-identification | Implemented; malware scanning PLANNED |
-| Network | Kubernetes network policies, namespace isolation, strict CORS allow-list | RETAINED templates |
-| Cloud | Keyless CI deployment through OIDC workload identity; GuardDuty and Security Hub definitions | RETAINED |
+The isolated knowledge runtime uses a nonroot derived image, separate internal workspace networks and storage, workspace authentication, positive configured resource limits, and loopback-only ingress. Model/backend processes have no normal internet egress. Ingress request logs are disabled; the Python logging boundary strips messages, arguments and exception/stack payloads. These controls do not establish that every third-party console write is content-free or authorize processing PHI.
 
-## 4. Software supply chain
+## Configuration and key management
 
-- Every repository runs a **security workflow** on push and pull request: Gitleaks (current files
-  and full history), Semgrep and Bandit. Findings fail the build; suppressions are not allowed.
-- Local pre-commit hooks run the same scanners before code leaves the developer's machine.
-- Dependencies are pinned through lockfiles; container images should be pinned by digest before production (PLANNED).
-- Planned: signed build provenance (SLSA-style attestations), software bill of materials (SBOM)
-  per release, and Dependabot or Renovate update policy.
+Central typed settings own environment-specific endpoints, model identifiers, versions, deadlines, feature switches and operational limits. Maintained content belongs in validated data/templates. Environment examples contain safe examples only. Do not embed private credentials in client builds or container layers.
 
-## 5. Known open security work (honest list)
+Keep current credentials and recovery instructions in the approved private secret/recovery store. Apply least privilege, separate environments and workspace keys, document rotation/expiry, and test revocation without printing values. Treat a confirmed exposed credential as compromised: revoke/rotate at its issuer, update dependencies and recovery records, and verify old access fails. Removing a string from the latest file does not revoke it or remove history.
 
-| Item | Status |
-|---|---|
-| History scan: some early commits contain credentials or credential-shaped values that were later removed from the current tree. Each must be confirmed revoked or rotated at the provider. Removing a file does not revoke a key. | Open, operator action |
-| Several scanner matches are known false positives (vendored library test vectors, infrastructure identifiers, test fixtures). They are triaged but not suppressed. | Triaged |
-| Immutable build provenance for previously deployed backend images | Open |
-| Booking and refund idempotency under retries | Open |
-| Malware scanning of uploads | Planned |
-| Independent penetration test | Planned before any real patient data |
-| Branch protection and required reviews on default branches | To configure |
-| Add HSTS and a complete content-security policy (`default-src`, `script-src`, `style-src`) to the public host | Open |
-| Security CI on the default branches (2026-09-24): **all four repositories pass.** First run: the CMS passed. The frontend failed only its full-history secret scan. The backend's Semgrep and Bandit failed only on third-party libraries vendored into two retired Lambda bundles. The knowledge service's Semgrep flagged one Nginx header setting. Fixes: the Nginx setting was corrected; the vendored library folders are excluded from scanning, while MediConnect's own handler code is still scanned; the frontend's history scan now **reports without blocking**, because its findings are in old commits that cannot be removed without rewriting history | History-scan findings stay open until each old credential is confirmed revoked; then the history scan goes back to blocking |
+## Delivery gates
 
-## 6. Security rules for contributors
+1. Written acceptance criteria and threat/data-flow assessment.
+2. Minimal local implementation and regression tests for meaningful failure paths.
+3. Tests, explicit type checks, lint, security scans and build; missing gates reported.
+4. Real HTTP/UI/CLI behavior with controlled data, including negative authorization and failure states.
+5. Independent fresh-context review against the criteria.
+6. Exact source/configuration/image identification, pre-deploy drift check and rollback plan.
+7. Local/live artifact parity, remote Git SHA, runtime isolation and changed-flow verification.
 
-1. Never commit secrets, real patient data or production exports. Use obviously fake test values.
-2. Every new endpoint needs authentication, an authorisation check and request validation. No exceptions.
-3. Health data goes through the shared encryption and audit helpers only.
-4. Region comes from the validated request context, never from a hard-coded value.
-5. Do not weaken or suppress a scanner finding to make CI pass. Fix it or document why it is a false positive.
+Security tooling includes Gitleaks, Bandit and Semgrep where applicable, plus dependency/container and infrastructure checks. A tool's configured presence or wrapper exit is not a successful scan: inspect its actual output, scope and findings. Historical exposure triage and upstream vulnerabilities require explicit disposition; do not hide them behind a green latest-diff result.
+
+## Vulnerability and incident response
+
+Report privately using the repository's security policy. Keep exploit details and credentials out of public issues. Triage impact, affected versions/data and containment; preserve restricted evidence; rotate credentials when indicated; verify the fix and add the missing gate. Coordinate notification and disclosure with the responsible operator. Publish a scrubbed advisory when appropriate.
+
+See [operations](OPERATIONS.md), [privacy](PRIVACY-AND-DATA.md) and [roadmap](ROADMAP.md) for recovery and remaining acceptance work.

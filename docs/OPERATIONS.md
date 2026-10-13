@@ -1,52 +1,57 @@
-# Operations runbook
+# Release, monitoring and recovery operations
 
-Last reviewed: 2026-09-24
+Reviewed 2026-10-13. These procedures define required operation. Staffing, alert delivery, off-host recovery and sustained SLO performance require their own evidence; they are not established by this document.
 
-## 1. Environments
+## Release procedure
 
-| Environment | Where | Status |
-|---|---|---|
-| Local development | Developer machine; synthetic data only | CURRENT |
-| Public showcase | Operator VPS, Docker Compose (Nginx) behind Caddy, <https://mediconnect.zahidul-islam.com> | CURRENT |
-| Staging | Kubernetes namespace or Cloud Run services from Terraform | RETAINED, not running |
-| Production | Regional cells ([SCALABILITY.md](SCALABILITY.md)) | PLANNED |
-| Retired Firebase Hosting (`askme-82f72.web.app`) | Historical frontend host | Retired; workflow kept disabled for reference |
+1. Write acceptance criteria and identify source, public configuration and affected data/resources.
+2. Inventory the actual target and capture drift, capacity, service state and neighboring workloads.
+3. Reconcile live-ahead drift locally before editing. Keep an auditable before snapshot.
+4. Implement and pass affected tests, typing, lint, scans, build and independent review.
+5. Freeze source/configuration/image manifests; verify publisher identity, Git target and workflow effects.
+6. Confirm backup/rollback, current capacity and applicable approvals; stage only the allowlisted payload.
+7. Deploy the application locally-built artifact to its exclusive target. Avoid unrelated/shared-stack changes.
+8. Verify every touched artifact hash, active source/image/configuration, real flow, access controls, resource caps and sibling health.
+9. Record exact Git/active release references, results and remaining gates. Preserve failed attempts and update recovery records.
 
-## 2. Change rules
+A successful branch push, build or health endpoint alone does not complete deployment. Recheck remote SHA and workflow results separately. Infrastructure/state changes require native inventory, a reviewed plan and operator execution. Paid actions require a separate explicit cost approval.
 
-1. **Local first.** Every change is made and tested locally, then deployed. The live server is never edited by hand.
-2. **Check drift before deploying.** Compare the live files with the local release (hashes). If live is ahead, stop and reconcile first.
-3. **Prove parity after deploying.** Re-hash every deployed file and confirm local equals live.
-4. **Keep the previous release** on the server for instant rollback.
-5. **Paid actions need explicit approval.** Cloud deployment workflows require manual dispatch and a typed cost acknowledgement. Nothing provisions paid resources on a push.
-6. **Infrastructure changes** go through `terraform plan` review. `apply`, `destroy` and `import` are run manually by the owner after review.
+## Monitoring and ownership
 
-## 3. Deploying the static showcase
+| Signal | Required action path |
+|---|---|
+| Public/critical journey success and latency | Regional synthetic and user-visible metrics; route to the assigned service owner |
+| Error-budget consumption | Multi-window burn-rate alerts and release policy from [reliability](RELIABILITY.md) |
+| Authentication/authorization anomalies | Rate-limit and deny metrics; security triage without logging credentials |
+| Queue depth, saturation, CPU/RAM/disk | Backpressure/capacity action before exhaustion; avoid uncontrolled scaling |
+| Database/object/index integrity and replication | Owner escalation, reconciliation and recovery decision |
+| Model ingestion/search readiness | Dependency, queue, source freshness and grounded-response checks |
+| Backups, certificate expiry and dependency advisories | Timely renewal/repair with verification and recorded owner |
 
-Full steps: [mediconnect-hub/deploy/shared-vps/README.md](https://github.com/Zahidulislam2222/mediconnect-hub/blob/main/deploy/shared-vps/README.md).
-In short: run the tests, type check and lint; build with `node deploy/shared-vps/build-showcase.mjs`;
-validate the container locally; upload a versioned release; switch; verify HTTPS and browser checks;
-then confirm hash parity.
+Before sustained service activation, assign primary/secondary on-call owners, coverage, severity levels, acknowledgment/escalation targets and an accessible status/communication channel. Exercise actual alert delivery and an operator response; installed dashboards do not prove monitoring coverage.
 
-## 4. CI/CD workflows
+Telemetry must use approved destinations, field allowlists and retention. Keep PHI, document bodies, keys and provider error payloads out of ordinary logs. Use bounded synthetic inputs for external availability checks. See [privacy](PRIVACY-AND-DATA.md).
 
-| Repository | Workflow | Trigger | Effect |
-|---|---|---|---|
-| all | `security.yml` | Push to default branch, pull requests | Secret, SAST and Python security scans. No deployment. |
-| mediconnect-hub | `frontend-deploy.yml` | **Manual only.** Automatic push and pull-request triggers are disabled and kept as comments. | Build and quality checks. Its Firebase deploy jobs are retired. |
-| mediconnect-hub | `native-ios.yml` | Manual or `verify/native-ios/**` branches | macOS build and tests on public-repository runners |
-| infrastructure-production | `deploy.yml` | Manual with typed cost acknowledgement; cloud targets default off | Multi-cloud build and deploy (RETAINED) |
+## Backup inventory and consistency
 
-## 5. Monitoring and on-call (PLANNED for production)
+Back up configuration/release manifests and necessary application data: regional stores, approved uploads, CMS database plus referenced media, knowledge stores/indexes, source/provenance inventory and required recovery material. Record model/image digests and a reproducible recovery path; model weights may be restored from verified licensed sources if that meets recovery objectives. Inventory any generated service identity as well.
 
-- SLO dashboards and burn-rate alerts per journey ([RELIABILITY.md](RELIABILITY.md)).
-- Paging for SEV-1 and SEV-2 only; everything else goes to a ticket queue.
-- Weekly review of error budgets, capacity headroom, security findings and cost.
-- Quarterly restore drills and failure-injection game days.
+Use an application-consistent checkpoint: quiesce writes or use supported transactional snapshots, flush/finalize indexes and capture related stores at a known point. Produce an integrity manifest, encrypt before transfer, verify the authorized off-device destination and separate the recovery key from the encrypted backup. Restrict access and retention; do not bundle unrelated project credentials.
 
-## 6. Access management
+The owner confirmed on 2026-10-13 that the recovery key is stored separately offline. This is custody confirmation; it does not establish successful decryption/restoration or an independent physical audit. Consistent live CMS/RAG backup and off-host restoration remain open.
 
-- Least privilege; named accounts only; MFA everywhere.
-- Production data access is time-limited, justified and audited (break-glass).
-- Leavers lose access the same day; keys and tokens they used are rotated.
-- Credentials live in the secret store and the operator's private credential register, never in Git.
+## Restore exercise
+
+Restore into an isolated environment with fresh network/authentication controls. Verify backup authenticity/integrity, decrypt without exposing keys, restore all related stores, and reconcile record/media/index counts. Exercise representative reads/writes, permissions, cross-workspace denial and search. Check that deleted/held records follow policy. Measure data loss and recovery time against [RPO/RTO objectives](RELIABILITY.md).
+
+Record backup identifier/time, source/configuration/image references, destination class, consistency method, integrity results, measured RPO/RTO and operator sign-off. A copied archive or successful local file extraction is not full application recovery.
+
+## Incidents and rollback
+
+For an incident, assign an owner and severity, contain the affected boundary, preserve restricted evidence and determine customer/data impact. Use the jurisdiction-specific notification matrix from [law](COMPLIANCE-AND-LAW.md). Communicate verified facts and the next update time through the approved channel.
+
+Rollback to a previously verified artifact only after checking data/schema compatibility and configuration. Pause irreversible writes when necessary; reconcile partially completed payments/jobs rather than replaying blindly. Verify restored service, privacy and neighboring workloads. Add escaped defects and the missing preventive gate to the defect record, and retain the incident lesson.
+
+## Recovery from interrupted maintenance
+
+Maintain a durable active checkpoint before work, at each milestone and during long gates. Include exact unfinished edits, commands, last verified results, evidence paths, next action and restrictions. Use atomic writes and preserve earlier checkpoints. The next operator must inspect actual process/target state before resuming; never automatically repeat an uncertain upload, activation or mutation.

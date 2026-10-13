@@ -1,69 +1,47 @@
 # MediConnect platform documentation
 
-Last reviewed: **2026-09-24** · Operator: **MediConnect** · Public site: <https://mediconnect.zahidul-islam.com>
+Reviewed 2026-10-13 · Maintainer: Zahidul Islam · Public website: https://mediconnect.zahidul-islam.com
 
-MediConnect is an open-source (MIT) telemedicine platform for patients, clinicians, clinic staff
-and administrators, designed for United States and European Union data residency. This folder is
-the single platform-wide documentation set. Each repository's README covers only that component
-and links back here.
+This is the shared documentation for the website, regional backend, CMS and knowledge service. Read the current delivery status before using operational instructions. Feature source, a local test, a deployed artifact and a clinically accepted service are separate milestones.
 
-## Read this first: status labels
-
-Every document uses the same labels so a reader never has to guess whether something is running.
-
-| Label | Meaning |
-|---|---|
-| **CURRENT** | Exists today and was checked on the date shown. |
-| **RETAINED** | Source code or infrastructure definitions are kept and reviewable, but the paid cloud runtime was intentionally switched off to control cost. |
-| **PLANNED** | Future design. Not built or not yet proven. |
-| **TARGET** | A number we are designing towards (for example users or uptime). Not a measured result. |
-
-Today the public website is a **static showcase** served from the operator's own server. The
-clinical backend, CMS, AI knowledge service and native mobile apps are implemented to different
-degrees and are **not** operating as a live clinical service. Nothing in this documentation is a
-certification, legal opinion, uptime guarantee or medical claim.
-
-## Documents
+## Navigation
 
 | Document | What it answers |
 |---|---|
-| [Architecture](ARCHITECTURE.md) | What the system is made of, how the pieces talk, and what is running now. |
-| [Scalability to 1M+ concurrent users](SCALABILITY.md) | The future design for one million or more simultaneous users, the bottlenecks, and how each layer scales. |
-| [Reliability, SLOs and disaster recovery](RELIABILITY.md) | Uptime targets (99.9% then 99.95%), error budgets, backups, failover, incident response. |
-| [Security architecture](SECURITY-ARCHITECTURE.md) | Threat model, identity, encryption, secrets, supply chain, open security work. |
-| [Law and compliance map](COMPLIANCE-AND-LAW.md) | Which US, EU and UK laws apply, what each requires, which platform control answers it, and what is still open. |
-| [Privacy and data flow](PRIVACY-AND-DATA.md) | What personal and health data exists, where it lives, how long it is kept, and patient rights. |
-| [AI safety and governance](AI-GOVERNANCE.md) | Rules for the chatbot and symptom checker: disclosure, clinical limits, privacy, evaluation. |
-| [Accessibility](ACCESSIBILITY.md) | WCAG 2.2 AA target and the accessibility laws that apply. |
-| [Roadmap](ROADMAP.md) | Phased plan from today's showcase to a scaled, audited service. |
-| [Operations runbook](OPERATIONS.md) | Deploy rules, environments, monitoring, on-call and change control. |
+| [Release status](RELEASE-STATUS.md) | What has been reviewed, published, deployed and exercised, and which activation gates remain |
+| [Getting started](GETTING-STARTED.md) | Repository map, supported tooling, local setup, configuration and verification commands |
+| [Architecture](ARCHITECTURE.md) | Roles, service boundaries, request/data paths and decisions |
+| [API contracts](API-CONTRACTS.md) | Authentication, ownership, region, validation, errors, idempotency, uploads and real-time access |
+| [Scalability](SCALABILITY.md) | Future 1M+ concurrent-user workload, regional cells, bottlenecks and staged proof |
+| [Reliability](RELIABILITY.md) | Availability/latency objectives, measurement, error budgets, incident response and disaster recovery |
+| [Security architecture](SECURITY-ARCHITECTURE.md) | Threats, controls, secrets, scanning and release security gates |
+| [Law and compliance](COMPLIANCE-AND-LAW.md) | US/EU applicability, operating responsibilities and official references |
+| [Privacy and data](PRIVACY-AND-DATA.md) | Data classification, lawful handling, regional flow, retention, rights and processors |
+| [AI governance](AI-GOVERNANCE.md) | Informational scope, approved knowledge, privacy, evaluation and release decisions |
+| [Accessibility](ACCESSIBILITY.md) | WCAG 2.2 AA objective and functional checks |
+| [Operations](OPERATIONS.md) | Local-first release, drift/parity, monitoring, backup/restore, rollback and access |
+| [Roadmap](ROADMAP.md) | Current phase exits and progression from service acceptance to 1M+ concurrent users |
 
-Existing detailed records (preserved, with status notes added where they were out of date):
+## Status vocabulary
 
-- [Reviewer guide](../REVIEWER-GUIDE.md) and [showcase status](../SHOWCASE-STATUS.md)
-- [Capacity and reliability design](../architecture/CAPACITY-AND-RELIABILITY.md) and the offline capacity calculator
-- [Disaster recovery runbook](../compliance/disaster-recovery.md), [DPIA](../compliance/dpia.md),
-  [BAA readiness](../compliance/baa-readiness.md), [data retention](../compliance/data-retention-policy.md)
-- [DICOM conformance](../backend_v2/dicom-service/docs/CONFORMANCE.md) and [software lifecycle](../backend_v2/dicom-service/docs/SOFTWARE_LIFECYCLE.md)
+| Label | Required evidence |
+|---|---|
+| Source implemented | The capability exists in an identified revision |
+| Locally verified | Named tests or real local flows passed for that source/configuration |
+| Published | The intended remote Git commit matches the local commit |
+| Deployed and verified | Active artifact/image and configuration match the release; stated live flows passed |
+| Accepted | Every criterion for the stated feature, region and operating scope passed |
+| Future target | Engineering objective with prerequisites and a validation plan |
+| Open gate | Required evidence or operating decision is still outstanding |
 
-## Repositories
+Point-in-time health checks do not establish a month of availability. Local model tests do not establish clinical quality. These documents attach each assertion to its actual scope and date.
 
-| Repository | Role | Status |
-|---|---|---|
-| [mediconnect-hub](https://github.com/Zahidulislam2222/mediconnect-hub) | React web app, static showcase, Capacitor app, native Android (Kotlin/Compose) and iOS (Swift/SwiftUI) clients | Showcase CURRENT; full app RETAINED; native apps in progress |
-| [mediconnect-infrastructure-production](https://github.com/Zahidulislam2222/mediconnect-infrastructure-production) | Backend microservices, Terraform, Kubernetes, CI/CD, platform docs | RETAINED; locally tested |
-| [mediconnect-cms](https://github.com/Zahidulislam2222/mediconnect-cms) | Strapi 5 content management for articles and health content | Local build verified; not deployed |
-| [mediconnect-rag](https://github.com/Zahidulislam2222/mediconnect-rag) | LightRAG knowledge service, monitoring, security scanning, backups | Self-hosted stack; integration with the app not accepted |
+## Future operating objectives
 
-## Licence
+The capacity roadmap targets **1,000,000+ simultaneous users** through measured regional cells and bounded services. Critical journeys target **99.9% availability at launch**, rising to **99.95% at scale**. Cost, provider quotas, regional controls, workload measurements and failure recovery are explicit gates before capacity expansion.
 
-Source code in all four repositories is released under the [MIT Licence](../LICENSE). Third-party
-components keep their own licences. Generated media and design assets are listed separately in each
-repository's `THIRD-PARTY-NOTICES.md`.
+## Documentation maintenance
 
-## Disclaimer
+Update the affected document when a release, contract, legal assessment or operating decision changes. Keep release status and roadmap consistent, validate links and commands, and review documentation with the related change. Publish only public-safe architecture and evidence summaries; credentials, patient data, deployment access details and private incident records remain outside Git.
 
-MediConnect documentation is engineering documentation, not legal, regulatory or medical advice.
-Before handling real patient data, an operator needs its own legal entity, contracts (including
-HIPAA Business Associate Agreements and GDPR data processing agreements), a documented risk analysis,
-qualified legal review and clinical governance.
+General support: **muhammadzahidulislam2222@gmail.com**. Security reporting uses the repository's [security policy](../SECURITY.md).

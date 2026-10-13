@@ -17,7 +17,7 @@
     "test:cognito": "node scripts/cognito_post_confirmation_test.mjs",
     "typecheck:cognito": "tsc --project cognito-triggers/tsconfig.json --noEmit",
     "test:federation": "node --test scripts/__tests__/federation-runtime.test.mjs",
-    "typecheck:federation": "tsc --noEmit --allowJs --checkJs --strict --skipLibCheck --target ES2022 --module nodenext --types node shared/runtime/*.mjs"
+    "typecheck:federation": "tsc --project shared/runtime/tsconfig.json"
   },
   "keywords": [],
   "author": "",

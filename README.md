@@ -1,673 +1,74 @@
-# MediConnect — backend, infrastructure and platform documentation
+# MediConnect — healthcare services and platform engineering
 
-![Licence: MIT](https://img.shields.io/badge/licence-MIT-2563EB)
-![Cloud runtime](https://img.shields.io/badge/cloud_runtime-retained%2C_not_running-64748B)
-![Scale target](https://img.shields.io/badge/scale_target-1M%2B_concurrent_%28planned%29-8B5CF6)
-![SLO target](https://img.shields.io/badge/SLO_target-critical_journeys_99.9%25_%E2%86%92_99.95%25-22C55E)
-![Security CI](https://img.shields.io/badge/security_CI-Gitleaks_%7C_Semgrep_%7C_Bandit-06B6D4)
+MediConnect connects patient, practitioner, clinic staff and administrator workflows across a React website, regional APIs, editorial content and an AI knowledge service. This repository owns the backend and the platform documentation.
 
-**Live showcase:** <https://mediconnect.zahidul-islam.com> · **Frontend:** [mediconnect-hub](https://github.com/Zahidulislam2222/mediconnect-hub) · **CMS:** [mediconnect-cms](https://github.com/Zahidulislam2222/mediconnect-cms) · **AI knowledge:** [mediconnect-rag](https://github.com/Zahidulislam2222/mediconnect-rag)
+**Public website:** https://mediconnect.zahidul-islam.com · **Maintainer:** [Zahidul Islam](https://github.com/Zahidulislam2222) · **Documentation reviewed:** 2026-10-13
 
-This repository holds MediConnect's seven backend services (Node.js/TypeScript and Python/FastAPI),
-the Terraform and Kubernetes definitions for AWS, Google Cloud and Azure, the CI/CD pipeline, and the
-**platform-wide documentation** in [`docs/`](docs/README.md).
+## Current delivery
 
-## Status (2026-09-24)
+The public website and its CMS-backed article journeys are deployed. Scoped doctor and booking application revisions have been verified in both configured regions. Clinical service activation, patient-data deployment, identity-provider journeys, payment-provider acceptance and operational recovery have additional release gates. The public website explains which services are currently unavailable.
 
-| Area | Status |
+The knowledge service has reviewed document-processing and isolated local-model runtime implementations. Local authentication, workspace isolation, request privacy and container-replacement checks pass; live models, retrieval quality and operational acceptance are tracked separately. See [release status](docs/RELEASE-STATUS.md) for the evidence boundary.
+
+## Repository responsibilities
+
+| Area | Responsibility |
 |---|---|
-| Backend services (patient, doctor, booking, communication, staff, admin, DICOM) | Implemented in source with local tests. **Not operating** as a live clinical service. |
-| Cloud infrastructure (Terraform, Kubernetes, multi-cloud CI/CD) | **Retained** as reviewable engineering work. Costly cloud resources were intentionally switched off to control cost. |
-| Deployment workflow | Manual only, with a typed cost acknowledgement. Nothing deploys on push. |
-| Scale and uptime | 1M+ concurrent users and 99.9%/99.95% SLOs are **future targets** with a written design and test plan, not measured results. |
-| Compliance | Controls for HIPAA and GDPR are implemented in source. **No certification or legal sign-off.** See the compliance map. |
+| `backend_v2/` | Five Node.js/TypeScript workspaces: patient, doctor, booking, communication and staff services; shared configuration, authentication, regional, encryption and audit utilities |
+| Python services | Administration and DICOM processing; framework and entry points belong to each service's configuration |
+| Infrastructure definitions | Terraform, deployment definitions, regional resources and migration verification |
+| `docs/` | Architecture, API/configuration contracts, law/privacy, security, reliability, operations and roadmap |
+| `architecture/` | Capacity planning and engineering decisions |
 
-## Platform documentation
+## Read the platform documentation
 
-| Document | Summary |
+| Topic | Document |
 |---|---|
-| [Documentation index](docs/README.md) | Start here; status labels explained |
-| [Architecture](docs/ARCHITECTURE.md) | Components, request path, key design decisions |
-| [Scalability](docs/SCALABILITY.md) | Cell-based design for 1M+ concurrent users, bottlenecks, load-test plan |
-| [Reliability](docs/RELIABILITY.md) | SLOs, error budgets, disaster recovery targets, incident response |
-| [Security architecture](docs/SECURITY-ARCHITECTURE.md) | Threat model, controls, supply chain, open work |
-| [Law and compliance](docs/COMPLIANCE-AND-LAW.md) | US, EU and UK law mapped to controls, with sources |
-| [Privacy and data](docs/PRIVACY-AND-DATA.md) | Data categories, residency, retention, patient rights, subprocessors |
-| [AI governance](docs/AI-GOVERNANCE.md) | Rules and evaluation for the assistant and symptom checker |
-| [Accessibility](docs/ACCESSIBILITY.md) | WCAG 2.2 AA target and legal drivers |
-| [Roadmap](docs/ROADMAP.md) | Phases from showcase to 1M+ concurrent |
-| [Operations](docs/OPERATIONS.md) | Environments, change rules, workflows, access |
-| [Reviewer guide](REVIEWER-GUIDE.md) | How to read the evidence in this repository |
-
-## Quick start
-
-```bash
-cd backend_v2 && npm install && npm test --workspaces --if-present
-bash verify_app_vs_iac.sh     # application-to-Terraform coverage check (read-only)
-terraform validate            # never apply from this repository without review and cost approval
-```
-
-## Contributing, security and licence
-
-- [CONTRIBUTING.md](CONTRIBUTING.md) · [Code of conduct](CODE_OF_CONDUCT.md) · [Security policy](SECURITY.md)
-- Code is released under the [MIT Licence](LICENSE). Vendored libraries keep their own licences: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
-- Not legal or medical advice.
-
----
-
-## Original README (preserved)
-
-> Everything below is the earlier README, kept word for word as a record of the work. Lines that
-> are out of date are **marked ⚠️**, not removed. The current status is the section above.
-
-
-# MediConnect — Enterprise Healthcare Infrastructure
-
-> **Start here: [engineering reviewer guide](REVIEWER-GUIDE.md).** It separates historical
-> operation, retained inactive infrastructure, locally tested code and future scale targets.
-> The historical feature inventory below is preserved; it is not a current deployment or
-> compliance certificate. [Capacity and reliability design](architecture/CAPACITY-AND-RELIABILITY.md)
-> records the1M+ concurrency objective and the validation still required.
-
-<div align="center">
-
-![Status](https://img.shields.io/badge/Status-Portfolio_Showcase-2563EB)
-![HIPAA](https://img.shields.io/badge/HIPAA-Control_Implementation-22C55E)
-![GDPR](https://img.shields.io/badge/GDPR-Control_Implementation-3B82F6)
-![FHIR](https://img.shields.io/badge/FHIR_R4-35_Resources-8B5CF6)
-![SOC 2](https://img.shields.io/badge/SOC_2-Control_Mapping-22C55E)
-![HL7](https://img.shields.io/badge/HL7_v2.5.1-4_Message_Types-E11D48)
-![SMART](https://img.shields.io/badge/SMART_on_FHIR-2.0-06B6D4)
-![Cloud](https://img.shields.io/badge/Cloud-AWS%20%7C%20GCP%20%7C%20Azure-F97316)
-![IaC](https://img.shields.io/badge/Terraform-414_Resources-7B42BC)
-![Cloud Runtime](https://img.shields.io/badge/Cloud_Runtime-Intentionally_Retired-64748B)
-![Tests](https://img.shields.io/badge/Tests-650%2B_Assertions-22C55E)
-![Scans](https://img.shields.io/badge/Compliance_Scans-20_Frameworks-06B6D4)
-![Kafka](https://img.shields.io/badge/Kafka-7_Topics-000000)
-![LightRAG](https://img.shields.io/badge/LightRAG-Graph_RAG-FF6B35)
-
-**Portfolio implementation of a multi-cloud healthcare backend with 7 microservices, 4 Lambda functions, 35 FHIR R4 resource types, Kafka event streaming, and an AI-assisted chatbot.**
-
-> **Current operating status (verified 2026-09-08):** the Kubernetes, Terraform, CI/CD,
-> database, Secrets Manager, and multi-cloud definitions are intentionally retained as engineering
-> evidence. Costly cloud resources were removed by the owner and these definitions are not proof
-> that those services are currently running. The GitHub cloud-deployment workflow is disabled and
-> cloud targets default off. Re-enabling or applying this infrastructure can incur cloud charges.
-> Control implementations and historical scan results are not compliance certification.
-
-[Live Demo](https://askme-82f72.web.app) · [Frontend Repo](https://github.com/Zahidulislam2222/mediconnect-hub) · [Author](https://zahidul-islam.vercel.app)
-
-⚠️ *Status note 2026-09-24: “Live Demo” is the retired Firebase host. Current public showcase: <https://mediconnect.zahidul-islam.com>.*
-
-[Current infrastructure/showcase status](SHOWCASE-STATUS.md)
-
-</div>
-
----
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Clinical Use Cases](#clinical-use-cases)
-- [Architecture](#architecture)
-- [Microservices](#microservices)
-- [Clinical Modules](#clinical-modules)
-- [FHIR R4 Interoperability](#fhir-r4-interoperability)
-- [Compliance Scorecard](#compliance-scorecard)
-- [Tech Stack](#tech-stack)
-- [Infrastructure as Code](#infrastructure-as-code-terraform)
-- [Security Architecture](#security-architecture)
-- [Cost Model](#cost-model)
-- [CI/CD & Deployment](#cicd--deployment)
-- [Getting Started](#getting-started)
-- [Author](#author)
-
----
-
-## Overview
-
-MediConnect is a **production-oriented portfolio implementation** of a global telemedicine platform
-designed around a three-cloud architecture. The repository preserves the complete clinical and
-infrastructure design even where the corresponding paid cloud resources are intentionally absent.
-It covers the clinical lifecycle from patient registration and identity verification through
-AI-assisted consultations, e-prescriptions, DICOM imaging, prior authorization workflows, and FHIR
-Bulk Data export.
-
-### Key Engineering Achievements
-
-| Achievement | Detail |
-|------------|--------|
-| **35 FHIR R4 Resource Types** | Full interoperability layer with US Core profile validation on all write paths |
-| **10 Terminology Systems** | ICD-10-CM, ICD-11, SNOMED CT, LOINC, RxNorm, CVX, CPT/HCPCS, NDC, NPI, DEA |
-| **Multi-Cloud Failover** | Retained AKS/EKS and GCP Cloud Run failover implementation; not currently verified live |
-| **Cost-controlled retirement** | Costly cloud resources intentionally removed; no current operating-cost claim |
-| **AI Circuit Breaker** | AWS Bedrock → GCP Vertex AI → Azure OpenAI for 99.99% AI availability ⚠️ *99.99% was a design aim, never measured; see docs/RELIABILITY.md (2026-09-24).* |
-| **Multi-Region Data Residency** | US data in `us-east-1`, EU data in `eu-central-1` — GDPR Schrems II compliant ⚠️ *Residency design only; transfer compliance needs legal assessment (2026-09-24).* |
-| **650+ Automated Assertions** | 12 backend TS + 12 Python + 4 frontend + 125 compliance + 4 verification scripts |
-| **Terraform portfolio** | 154 resource blocks and 16 module blocks retained; current remote state read found 412 addresses, while live/state parity is not established |
-| **20 Compliance Framework Scans** | Prowler + Checkov + Trivy + Healthcare Scanner across all 3 clouds |
-| **Kafka Event Streaming** | 7 topics, MSK Serverless (US + EU), feature-flagged alongside SQS |
-| **AI Chatbot (LightRAG)** | Graph-based RAG, rate limiting per tier, PII scrubbing, Redis caching |
-| **Subscription System** | Discount Pass model (Plus $19/mo, Premium $39/mo), Stripe Connect payouts |
-| **Keyless deployment design** | OIDC workload-identity implementation retained; current vulnerability status must be established by a fresh scan |
-
----
-
-## Clinical Use Cases
-
-### For Patients
-- **Video Consultations** — Amazon Chime SDK WebRTC with media pipeline recording
-- **AI Symptom Checker** — Claude 3 Haiku with PII scrubbing and clinical NLP
-- **Pharmacy** — E-prescriptions with barcode scanner, refill requests, QR fulfillment
-- **Health Records** — FHIR-compliant allergies, immunizations, care plans, vitals
-- **Blue Button 2.0** — CMS-compliant personal health data export
-- **Insurance** — Eligibility verification, prior authorization tracking
-- **GDPR Controls** — Data export (Art 15), erasure with 30-day grace (Art 17), consent ledger (Art 7)
-
-### For Providers
-- **EHR Integration** — ICD-10/ICD-11 dual coding, SNOMED CT clinical terms, LOINC lab codes
-- **e-Prescribing** — RxNorm drug lookup, real-time interaction checking, DEA schedule validation
-- **Medication Reconciliation** — 11 drug classes, conflict detection (ACE+ARB, NSAID+Anticoagulant, Opioid+Benzo, SSRI+MAOI), therapeutic duplication alerts
-- **Clinical Decision Support** — CDS Hooks 2.0 with 4 services: medication-prescribe, order-select, patient-view, appointment-book
-- **Lab Orders** — LOINC-coded ordering, result submission, US Core ServiceRequest validation
-- **Referrals** — FHIR ServiceRequest-based specialist referrals with status tracking
-- **Master Patient Index** — Soundex phonetic matching, weighted probabilistic scoring, GSI-ready for production scale
-- **Emergency Access** — HIPAA §164.312(a)(2)(ii) break-glass override with 6 reason codes, time-limited, full audit trail
-
-### For Population Health
-- **Bulk FHIR $export** — Async NDJSON export with paginated DynamoDB scan for production-scale datasets
-- **Electronic Lab Reporting (ELR)** — HL7 ORU^R01 generation, reportable condition detection for public health authorities
-- **Electronic Case Reporting (eCR)** — RCTC trigger code matching, eICR generation
-- **SDOH Screening** — Social Determinants of Health assessment and tracking
-- **C-CDA 2.1** — Clinical Document Architecture: CCD, Discharge Summary, Referral Note generation
-- **Analytics** — BigQuery streaming for revenue, appointments, and vitals data
-
-### For Operations
-- **Prior Authorization** — FHIR ClaimResponse workflow (pending → approved/denied)
-- **CPT/HCPCS Billing** — Procedure code lookup and fee schedule
-- **Appointment Reminders** — Multi-channel notification system
-- **Staff Management** — Shifts, tasks, announcements, directory
-- **DICOM Imaging** — Upload, HIPAA Safe Harbor de-identification, Orthanc PACS, FHIR ImagingStudy mapping
-- **Audit Compliance** — 191 audit points across 49 files, FHIR AuditEvent format, 7-year retention
-
----
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                     MEDICONNECT V2 — THREE-CLOUD ARCHITECTURE              │
-├─────────────────────┬─────────────────────┬─────────────────────────────────┤
-│   AWS (Primary)     │   GCP (Backup)      │   Azure (K8s Primary)          │
-│   Security + Data   │   Compute + AI      │   Compute Orchestration        │
-├─────────────────────┼─────────────────────┼─────────────────────────────────┤
-│ • Cognito (Auth)    │ • Cloud Run         │ • AKS Kubernetes               │
-│ • DynamoDB (15+     │   (scale-to-zero    │   (active-active w/ EKS)       │
-│   tables)           │    backup compute)  │ • Container Apps               │
-│ • S3 (documents,    │ • BigQuery          │   (scale to zero)              │
-│   DICOM, exports)   │   (analytics DW)    │ • Azure OpenAI                 │
-│ • KMS (PHI encrypt) │ • Vertex AI         │   (AI fallback #2)             │
-│ • SSM (secrets)     │   (AI fallback #1)  │ • ACR (Docker images)          │
-│ • SNS (breach       │ • Artifact Registry │                                │
-│   alerts)           │   (Docker images)   │                                │
-│ • IoT Core (MQTT)   │                     │                                │
-│ • Bedrock (AI)      │                     │                                │
-│ • Chime SDK (video) │                     │                                │
-│ • EKS (K8s)         │                     │                                │
-│ • Lambda (4 × 2     │                     │                                │
-│   regions)          │                     │                                │
-└─────────────────────┴─────────────────────┴─────────────────────────────────┘
-
-Data Flow:
-  Patient App → x-user-region header → API Gateway → Service → Regional DynamoDB
-  US users → us-east-1 resources  |  EU users → eu-central-1 resources
-
-Failover Chain:
-  Primary (AKS/EKS) → 5s timeout → Backup (GCP Cloud Run)
-  AI: AWS Bedrock (Claude 3) → GCP Vertex AI (Gemini) → Azure OpenAI (GPT-4)
-```
-
----
-
-## Microservices
-
-### 7 Core Services
-
-| Service | Language | Port | Key Responsibilities |
-|---------|----------|------|---------------------|
-| **patient-service** | Node.js/TS | 8081 | Registration, vitals (MQTT/IoT), FHIR Patient, allergies, immunizations, care plans, MPI, bulk $export, Blue Button 2.0, GDPR (consent/erasure/export), SDOH |
-| **doctor-service** | Node.js/TS | 8082 | EHR (ICD-10/11), e-prescriptions (RxNorm), SNOMED CT, lab orders (LOINC), CDS Hooks, med-reconciliation, referrals, C-CDA 2.1, eCR, ELR, emergency access |
-| **booking-service** | Node.js/TS | 8083 | Appointments, Stripe billing, prior authorization, insurance eligibility, CPT/HCPCS, Google Calendar sync, BigQuery analytics |
-| **communication-service** | Node.js/TS | 8084 | WebSocket chat, Chime video, AI circuit breaker (Bedrock→Vertex→Azure), FHIR mapping |
-| **admin-service** | Python/FastAPI | 8085 | User management, audit log viewer, system health, platform analytics |
-| **staff-service** | Node.js/TS | 8086 | Shift scheduling, task management, announcements, staff directory |
-| **dicom-service** | Python/FastAPI | 8005 | DICOM upload, HIPAA Safe Harbor de-identification (PS3.15 Annex E), Orthanc PACS, FHIR ImagingStudy |
-
-### 4 Lambda Functions (× 2 regions)
-
-| Function | Trigger | Purpose |
-|----------|---------|---------|
-| `cognito-triggers` | Cognito Post-Confirmation | Auto-assign user to doctor/patient group by client ID |
-| `ws-authorizer` | API Gateway WebSocket `$connect` | Verify Cognito JWT from query param, return IAM policy |
-| `cleanup-recordings` | EventBridge `MeetingEnded` | Delete Chime media pipelines to stop billing |
-| `failover-proxy` | API Gateway integration | Primary → backup failover for WebSocket events |
-
-### 11 Shared Utilities
-
-| Module | Purpose |
-|--------|---------|
-| `aws-config.ts` | Regional AWS SDK client factories, memory-cached, GDPR-aware routing |
-| `audit.ts` | FHIR AuditEvent logging — 191 call sites, 7-year TTL, breach detection trigger |
-| `kms-crypto.ts` | KMS envelope encryption for PHI fields (`phi:kms:` prefix) and OAuth tokens |
-| `logger.ts` | Winston PII masking — email, SSN, phone, passwords, base64 stripped before logging |
-| `breach-detection.ts` | Rate-based anomaly detection (50 PHI ops/5min) + 9 security event types → SNS alert |
-| `validation.ts` | Zod request validation middleware with field-level error responses |
-| `rate-limit-store.ts` | Redis-backed distributed rate limiting with in-memory fallback |
-| `fhir-metadata.ts` | FHIR R4 CapabilityStatement, SMART on FHIR well-known config, EHR launch context |
-| `emergency-access.ts` | HIPAA break-glass override — 6 reason codes, time-limited, DynamoDB audit trail |
-| `us-core-profiles.ts` | US Core FHIR profile validation — 18 profiles, 12 validators |
-| `hl7-parser.ts` | HL7 v2.5.1 message parser — ADT^A01, ORM^O01, ORU^R01, SIU^S12 |
-
----
-
-## Clinical Modules
-
-### Doctor Service — 13 Clinical Route Groups
-
-| # | Module | API Prefix | Standards |
-|---|--------|-----------|-----------|
-| 1 | Prescriptions | `/prescription(s)` | RxNorm, US Core MedicationRequest |
-| 2 | Drug Reference | `/drugs/rxnorm/*`, `/drugs/ndc/*` | RxNorm (NLM API), NDC crosswalk |
-| 3 | NPI Validation | `/doctors/npi/*` | NPPES Registry |
-| 4 | SNOMED CT | `/terminology/snomed/*` | SNOMED CT International |
-| 5 | EHR | `/ehr` | ICD-10-CM, ICD-11, FHIR resources |
-| 6 | DEA Validation | `/doctors/dea/*` | DEA registration, schedules I-V |
-| 7 | ICD-11 | `/terminology/icd11/*` | WHO ICD-11, ICD-10→11 crossmap |
-| 8 | Electronic Lab Reporting | `/public-health/elr` | HL7 ORU^R01 |
-| 9 | CDS Hooks | `/cds-hooks/*` | CDS Hooks 2.0 (4 services) |
-| 10 | Lab Orders | `/lab/*` | LOINC, US Core ServiceRequest |
-| 11 | Referrals | `/referrals/*` | FHIR ServiceRequest |
-| 12 | Med Reconciliation | `/med-reconciliation/*` | 11 drug classes, conflict detection |
-| 13 | Emergency Access | `/emergency-access/*` | HIPAA §164.312(a)(2)(ii) |
-
-### Patient Service — 11 Clinical Modules
-
-| Module | Standards | Key Features |
-|--------|-----------|-------------|
-| GDPR Consent | GDPR Art 6, Art 7 | Append-only ledger, granular purpose, withdrawal |
-| Data Erasure | GDPR Art 17 | 30-day grace, anonymization, S3 cleanup |
-| Data Export | GDPR Art 15, Art 20 | FHIR Bundle JSON export |
-| Allergies | US Core AllergyIntolerance | CRUD with US Core validation |
-| Immunizations | US Core Immunization, CVX | CRUD with vaccine code lookup |
-| Care Plans | US Core CarePlan | Goal tracking, FHIR mapping |
-| Master Patient Index | Soundex, GSI-ready | Probabilistic matching, duplicate scan |
-| Bulk $export | FHIR Bulk Data Access | Async jobs, paginated NDJSON |
-| Blue Button 2.0 | CMS Blue Button | Patient data access API |
-| SDOH | FHIR Observation | Social determinants screening |
-| FHIR Metadata | SMART on FHIR 2.0 | CapabilityStatement, well-known config |
-
----
-
-## FHIR R4 Interoperability
-
-### 35 Resource Types Implemented
-
-```
-Patient              Practitioner          PractitionerRole      Appointment
-Observation          MedicationRequest     Medication            MedicationStatement
-DiagnosticReport     RiskAssessment        Communication         Coverage
-Consent              ClinicalImpression    DocumentReference     AuditEvent
-AllergyIntolerance   Immunization          Condition             Encounter
-CarePlan             Goal                  ServiceRequest        ClaimResponse
-DetectedIssue        ImagingStudy          Bundle                OperationOutcome
-CapabilityStatement  EpisodeOfCare         Composition           Organization
-QuestionnaireResponse  FamilyMemberHistory   RelatedPerson
-```
-
-### 10 Terminology Code Systems
-
-| System | Standard | Usage |
-|--------|----------|-------|
-| ICD-10-CM | WHO/CMS | Diagnosis coding (EHR) |
-| ICD-11 | WHO 2025 | Next-gen diagnosis coding with ICD-10 crossmap |
-| SNOMED CT | IHTSDO | Clinical terminology, hierarchy, ECL queries |
-| LOINC | Regenstrief | Lab order codes, observation categories |
-| RxNorm | NLM/NIH | Drug lookup, interactions, NDC crosswalk |
-| CVX | CDC | Vaccine codes (immunizations) |
-| CPT/HCPCS | AMA/CMS | Procedure billing codes |
-| NDC | FDA | National Drug Codes |
-| NPI | CMS/NPPES | Provider identification |
-| DEA | DEA/DOJ | Controlled substance scheduling |
-
-### Interoperability Standards
-
-| Standard | Implementation |
-|----------|---------------|
-| **SMART on FHIR 2.0** | `/.well-known/smart-configuration`, EHR launch context, 10 SMART scopes |
-| **US Core 6.1** | 18 profile URLs, 12 resource validators, validation on all write paths |
-| **CDS Hooks 2.0** | 4 services: medication-prescribe, order-select, patient-view, appointment-book |
-| **HL7 v2.5.1** | ADT^A01 (admission), ORM^O01 (orders), ORU^R01 (results), SIU^S12 (scheduling) |
-| **C-CDA 2.1** | CCD, Discharge Summary, Referral Note generation |
-| **Bulk Data Access** | FHIR $export with async job model, NDJSON output |
-| **Blue Button 2.0** | CMS-compliant patient data access |
-
----
-
-## Compliance Scorecard
-
-> ⚠️ *Status note 2026-09-24: the percentages below are an internal control checklist from March 2026, not an audit, certification or legal opinion. Current position: [docs/COMPLIANCE-AND-LAW.md](docs/COMPLIANCE-AND-LAW.md).*
-
-### Application-Level Controls
-
-| Domain | Score | Controls Verified |
-|--------|-------|-------------------|
-| **HIPAA** | **100%** | 13/13 — PHI encryption, audit trails, breach detection, emergency access, session timeout, PII masking |
-| **GDPR** | **100%** | 10/10 — Consent ledger, erasure, export, data residency, cookie consent, privacy by design |
-| **FHIR R4** | **100%** | 10/10 — 35 resource types, 10 terminology systems, SMART on FHIR, CDS Hooks |
-| **SOC 2 Overall** | **96%** | 25/27 controls verified (Security, Availability, PI, Confidentiality, Privacy) |
-| **DICOM** | **100%** | 5/5 — Upload, Safe Harbor de-identification, PACS, FHIR ImagingStudy |
-
-### Infrastructure Compliance Scans (Phase 4 — 20 frameworks, 3 clouds)
-
-| Scanner | Result | Details |
-|---------|--------|---------|
-| **Checkov (IaC)** | 263 PASS / 44 remaining | 96 checks fixed (KMS encryption, access logging, attribute conditions) |
-| **Prowler HIPAA** | AWS 333/637, GCP 13/24, Azure 6/32 | GuardDuty + Security Hub added, SNS encrypted |
-| **Prowler GDPR/NIS2** | AWS 411/918, GCP 11/41, Azure 2/34 | Multi-region data residency verified |
-| **Prowler SOC 2** | AWS 849/1447, GCP 15/44, Azure 6/39 | ISO 27001 + PCI-DSS 4.0 + CIS scanned |
-| **NIST 800-53 Rev 5** | AWS 8,478 / 13,535 | Full federal compliance baseline scanned |
-| **Trivy (Container)** | 222 vulns (third-party image) | LightRAG base image — not application code |
-| **Healthcare Scanner** | 20 PASS / 1 WARN | Auth, PHI encryption, audit, FHIR, consent, validation |
-| **App-vs-IaC Verify** | **129 PASS / 0 FAIL / 0 WARN** | Every app resource matched to Terraform |
-
-Full report: [`compliance-report-phase4.md`](compliance-report-phase4.md) ⚠️ *This file was removed from the current tree in commit `86f82cd` and remains available in Git history (status note 2026-09-24).*
-
-### HIPAA Controls (13/13)
-
-| Control | Implementation | Evidence |
-|---------|---------------|----------|
-| PHI Encryption at Rest | KMS envelope encryption with `phi:kms:` prefix | `shared/kms-crypto.ts` |
-| PHI Encryption in Transit | Helmet HSTS (1yr), CSP headers | All `index.ts` files |
-| Minimum Necessary Access | Cognito RBAC, 6-tier rate limiting | `auth.middleware.ts` |
-| Audit Controls | FHIR AuditEvent format, 7-year TTL | `shared/audit.ts` — 191 call sites |
-| Breach Notification | 9 event types + rate anomaly → SNS | `shared/breach-detection.ts` |
-| De-identification | HIPAA Safe Harbor, PS3.15 Annex E | `dicom-service/services/deidentification.py` |
-| Access Controls | Cognito JWT + per-endpoint role guards | All services |
-| PII Masking in Logs | Regex scrubbing: email, SSN, phone, passwords | `shared/logger.ts` |
-| Session Timeout | 15-min inactivity auto-logout | Frontend `HipaaGuard` |
-| Tab Blur Protection | 12px Gaussian blur on visibility change | Frontend `App.tsx` |
-| Emergency Access | Break-glass with 6 reason codes, max 120 min | `shared/emergency-access.ts` |
-| Encrypted Frontend Storage | AES-GCM 256-bit via Web Crypto API | Frontend `secure-storage.ts` |
-| Business Associate Agreement | Infrastructure supports BAA requirements | DynamoDB encryption, KMS, CloudTrail |
-
-### GDPR Controls (10/10)
-
-| Article | Control | Implementation |
-|---------|---------|---------------|
-| Art 6, 7 | Consent Management | Append-only consent ledger with granular purpose tracking |
-| Art 15 | Right to Access | FHIR Bundle data export endpoint |
-| Art 17 | Right to Erasure | Multi-stage: 30-day grace → anonymize → S3 delete → audit |
-| Art 20 | Data Portability | FHIR Bundle JSON + Bulk $export NDJSON |
-| Art 44-49 | Data Residency | `x-user-region` header → strict US/EU routing |
-| Art 7 | Cookie Consent | Granular: essential/functional/analytics with timestamps |
-| Art 5 | Data Minimization | Minimal JWT claims, truncated actor IDs in alerts |
-| Art 25 | Privacy by Design | KMS encryption, secure-storage, field-level PHI encryption |
-| Art 33 | Breach Notification | Automated SNS alerting enables <72h notification |
-| — | Consent Immutability | Append-only writes, no UPDATE/DELETE on consent records |
-
----
-
-## Tech Stack
-
-### Backend Services
-| Technology | Usage |
-|-----------|-------|
-| Node.js 20 + Express + TypeScript | 5 microservices |
-| Python 3.12 + FastAPI | 2 microservices (admin, DICOM) |
-| Docker (multi-stage builds) | Containerization with workspace skeleton |
-| WebSocket + Socket.io | Real-time chat |
-| Amazon Chime SDK | Video consultations with media pipeline recording |
-
-### Infrastructure & DevOps
-| Technology | Usage |
-|-----------|-------|
-| Kubernetes (AKS + EKS) | Active-active container orchestration |
-| GCP Cloud Run | Scale-to-zero backup compute |
-| AWS Lambda | 4 functions × 2 regions = 8 deployments |
-| GitHub Actions | CI/CD pipeline (test → build → deploy) |
-| Docker Compose | Local development orchestration |
-| Apache Kafka (MSK Serverless) | Event streaming — 7 topics, dual-write with SQS, IAM auth |
-| Terraform | 414 resources across AWS (370) + GCP (40) + Azure (4) |
-
-### AI & Machine Learning
-| Service | Usage |
-|---------|-------|
-| AWS Bedrock (Claude 3 Haiku) | Primary AI — chatbot + clinical assistant |
-| GCP Vertex AI (Gemini 2.5) | AI fallback #1 |
-| Azure OpenAI (GPT-4) | AI fallback #2 |
-| LightRAG (HKUDS) | Graph-based RAG for AI chatbot knowledge |
-| AWS Rekognition | Biometric face match (selfie vs government ID) |
-| AWS Textract | AI diploma OCR for doctor credentialing |
-| AWS Comprehend Medical | FHIR term extraction from clinical text |
-| AWS IoT Core (MQTT) | Real-time wearable vitals ingestion |
-
-### Data Stores
-| Store | Usage |
-|-------|-------|
-| AWS DynamoDB | Primary database — 48+ tables, on-demand billing, per-region |
-| AWS S3 | Documents, DICOM files, verification images, export artifacts |
-| GCP BigQuery | Analytics data warehouse (revenue, appointments, vitals) |
-| Redis | Distributed rate limiting, AI response caching, session management |
-
-### Payments & Subscriptions
-| Service | Usage |
-|---------|-------|
-| Stripe Payments | Per-visit PaymentIntents with webhook signature verification |
-| Stripe Subscriptions | Discount Pass model (Plus $19/mo, Premium $39/mo) |
-| Stripe Connect | Weekly doctor payouts with 7-day hold |
-| Stripe Customer Portal | Self-service billing management |
-
----
-
-## Infrastructure as Code (Terraform)
-
-Full IaC coverage across all 3 clouds — **414 resources managed** in Terraform state.
-
-| Cloud | Resources | Key Infrastructure |
-|-------|-----------|-------------------|
-| **AWS** | 370 | 46 DynamoDB tables (23 × 2 regions), 26 SQS queues, 14 ECR repos, 12 SNS topics, 9 CloudWatch log groups, 4 Lambda functions, 2 API Gateways, KMS keys, Cognito pools, S3 buckets, IoT Core |
-| **GCP** | 40 | 7 Cloud Run services × 2 regions, 6 BigQuery datasets, 9 BQ tables, Artifact Registry, Healthcare API (DICOM), Pub/Sub, Workload Identity |
-| **Azure** | 4 | Cosmos DB (with geo-replication), 2 Resource Groups, Network Watcher |
-
-### Security Services (Terraform-managed)
-
-| Service | Scope | Purpose |
-|---------|-------|---------|
-| **AWS GuardDuty** | US + EU | Threat detection — S3, K8s audit, malware scanning |
-| **AWS Security Hub** | US + EU | HIPAA + CIS + NIST 800-53 + PCI-DSS standards |
-| **KMS Encryption** | All regions | SQS, SNS, ECR, CloudWatch, S3, SSM — all encrypted at rest |
-| **API Gateway Logging** | US + EU | WebSocket access logs with request/connection tracking |
-| **GCP Workload Identity** | GitHub + AWS | Attribute conditions restrict to specific repo owner and AWS account |
-
-### IaC Verification
-
-```
-verify_app_vs_iac.sh:  129 PASS / 0 FAIL / 0 WARN
-verify_migration.sh:   All 3 clouds verified
-```
-
-## Security Architecture
-
-| Layer | Implementation |
-|-------|---------------|
-| **Identity** | AWS Cognito RS256 JWT, verified against JWKS on every request, multi-region pools |
-| **Secrets** | AWS SSM Parameter Store with `WithDecryption` — services exit on vault sync failure |
-| **Encryption** | KMS envelope encryption for PHI, AES-GCM 256-bit for frontend, all infra encrypted at rest |
-| **Transport** | TLS 1.2+, HSTS (1 year), CSP headers via Helmet |
-| **Threat Detection** | AWS GuardDuty (S3 + K8s + malware) + Security Hub (4 compliance standards) |
-| **Rate Limiting** | 6 tiers: global (100/15m), auth (20), PHI-read (30), PHI-write (10), search (20), export (5) |
-| **Input Validation** | Zod schemas on all request bodies with field-level error responses |
-| **Breach Detection** | 9 security event types + rate anomaly (50 PHI/5min) → SNS alerting |
-| **Audit Trail** | 191 audit points across 49 files, FHIR AuditEvent format, 7-year TTL |
-| **PII Protection** | Winston PII masking (email, SSN, phone, passwords, base64) |
-| **Containers** | OIDC Workload Identity — zero static AWS/GCP keys in containers |
-| **Network** | Strict CORS whitelist, Helmet CSP, namespace isolation in K8s |
-| **Payments** | Stripe server-confirmed PaymentIntents with webhook signature verification |
-| **Emergency Access** | Break-glass with time limits, reason codes, compliance alerting |
-
----
-
-## Cost Model
-
-> ⚠️ *Status note 2026-09-24: historical design comparison, not a current or measured bill. Costs at scale are covered in [docs/SCALABILITY.md](docs/SCALABILITY.md).*
-
-| Resource | V1 (Always-On) | V2 (Zero-Cost Idle) |
-|----------|----------------|---------------------|
-| Compute | $110/mo (EC2 + Azure) | **$0/mo** (scale to zero) |
-| Database | $80/mo (RDS + ElastiCache) | **$0/mo** (DynamoDB on-demand) |
-| Auth | $0/mo | **$0/mo** (Cognito <50k MAU) |
-| Crypto | $2/mo | **$1/mo** (KMS) |
-| Storage | $100/mo | **$0/mo** (S3 pay-per-request) |
-| **Total (idle)** | **~$292/mo** | **~$1/mo** |
-
----
-
-## CI/CD & Deployment
-
-### GitHub Actions Pipeline (5 stages)
-
-> ⚠️ *Status note 2026-09-24: automatic push deployment was removed. `deploy.yml` now runs only by manual dispatch with a typed cost acknowledgement, and cloud targets default off.*
-
-```
-Push to main (backend_v2/** changes)
-  │
-  ├── 1. test-and-lint        npm ci + npm test --workspaces + npm audit
-  │   │                       + verify_app_vs_iac.sh (IaC coverage gate)
-  │   │                       ↓ (blocks deployment on critical vulnerabilities)
-  │   │
-  ├── 2. build-and-push       Docker build × 7 services
-  │   │                       → GCP Artifact Registry (when DEPLOY_GCP != false)
-  │   │                       → Azure ACR (when DEPLOY_AKS = true)
-  │   │                       → AWS ECR (when DEPLOY_EKS = true)
-  │   │
-  │   └── 3. deploy-gcp       Cloud Run deploy (scale-to-zero, 256Mi)
-  │       │                   Both us-central1 + europe-west3
-  │       │                   Skipped when DEPLOY_GCP = false
-  │       │
-  │       ├── 4. deploy-k8s   Staging → smoke tests → Production
-  │       │                   Auto-rollback via kubectl rollout undo
-  │       │
-  │       └── 5. deploy-lambdas  4 functions × 2 regions (parallel)
-  │                              Auto-create if missing, update if exists
-  │
-  └── deploy-lambdas (parallel with build-and-push — no Docker dependency)
-```
-
-**Deploy toggles** (GitHub repo variables):
-- `DEPLOY_GCP` — `false` to skip GCP (e.g., billing disabled). Default: on. ⚠️ *Historical — now defaults off (see SHOWCASE-STATUS.md).*
-- `DEPLOY_AKS` — `true` to enable Azure AKS deploys. Default: off.
-- `DEPLOY_EKS` — `true` to enable AWS EKS deploys. Default: off.
-
-### Kubernetes
-
-- **AKS** (Azure) + **EKS** (AWS) — active-active ⚠️ *Retained definitions; clusters not running (2026-09-24).*
-- HPA: 1–5 replicas, scales on CPU/Memory > 70%
-- Probes: `/health` (liveness), `/ready` (readiness)
-- Namespace isolation: staging ↔ production
-
----
-
-## Getting Started
-
-### Prerequisites
-
-- Node.js 20+ (via nvm)
-- Python 3.12+ (for admin-service and dicom-service)
-- Docker Desktop
-- AWS CLI configured with appropriate IAM role
-
-### Local Development
+| Start here and release status | [Documentation index](docs/README.md), [current releases and acceptance](docs/RELEASE-STATUS.md) |
+| Development and configuration | [Getting started](docs/GETTING-STARTED.md), [API and regional contracts](docs/API-CONTRACTS.md) |
+| System design | [Architecture](docs/ARCHITECTURE.md) |
+| Future 1M+ simultaneous users | [Scalability](docs/SCALABILITY.md), [capacity contract](architecture/CAPACITY-AND-RELIABILITY.md) |
+| Availability and recovery | [Reliability and SLOs](docs/RELIABILITY.md), [operations](docs/OPERATIONS.md) |
+| Security and supply chain | [Security architecture](docs/SECURITY-ARCHITECTURE.md), [security reporting](SECURITY.md) |
+| US/EU requirements and patient rights | [Law and compliance](docs/COMPLIANCE-AND-LAW.md), [privacy and data](docs/PRIVACY-AND-DATA.md) |
+| Knowledge and clinical AI | [AI governance](docs/AI-GOVERNANCE.md) |
+| Inclusive access | [Accessibility](docs/ACCESSIBILITY.md) |
+| Delivery and growth | [Roadmap](docs/ROADMAP.md), [engineering review](REVIEWER-GUIDE.md) |
+
+## Local development
+
+Use the supported Node version, lockfiles and environment templates documented in [getting started](docs/GETTING-STARTED.md). Configure local dependencies and test credentials before running service commands.
 
 ```bash
 cd backend_v2
-npm install                           # Install all workspace dependencies
-
-# Start individual services
-cd patient-service && npm run dev     # Port 8081
-cd doctor-service && npm run dev      # Port 8082
-cd booking-service && npm run dev     # Port 8083
-
-# Python services
-cd admin-service
-pip install -r requirements.txt
-uvicorn main:app --port 8085
-
-cd dicom-service
-pip install -r requirements.txt
-uvicorn main:app --port 8005
+npm ci
+npm test
+npm run lint
+npm run typecheck:federation
+npm run typecheck:cognito
+npm run build --workspaces --if-present
 ```
 
-### Run Tests
+From the infrastructure root, run `bash verify_app_vs_iac.sh`. Infrastructure/state work also requires `bash verify_migration.sh` and a reviewed native cloud inventory. Configuration comes from typed settings and documented environment variables; a client-supplied role or region never replaces server authorization.
 
-```bash
-cd backend_v2
+## Release and operation
 
-# Root tests (225 assertions)
-npx ts-node shared/__tests__/us-core-profiles.test.ts        # 76 assertions
-npx ts-node shared/__tests__/clinical-controllers.test.ts     # 55 assertions
-npx ts-node shared/__tests__/security-controls.test.ts        # 44 assertions
-npx ts-node shared/__tests__/audit-logging.test.ts            # 50 assertions
+Changes are developed locally, checked against live drift, independently reviewed and released as immutable application artifacts. The operator verifies every deployed file/image and the actual user flow, retains rollback material and records open gates. Cloud deployment workflows require a deliberate manual dispatch and cost acknowledgement; a Git push does not authorize cloud provisioning.
 
-# Compliance tests (133 assertions)
-npx ts-node shared/__tests__/compliance/prescription-safety.test.ts
-npx ts-node shared/__tests__/compliance/gdpr-erasure.test.ts
-npx ts-node shared/__tests__/compliance/phi-encryption.test.ts
-npx ts-node shared/__tests__/compliance/consent-enforcement.test.ts
-npx ts-node shared/__tests__/compliance/emergency-access.test.ts
-npx ts-node shared/__tests__/compliance/region-isolation.test.ts
-npx ts-node shared/__tests__/compliance/notification-coverage.test.ts
-npx ts-node shared/__tests__/compliance/audit-coverage.test.ts
+The future scale objective is **1,000,000+ concurrent users**. Critical-journey availability objectives are **99.9% at launch** and **99.95% at scale**, with defined measurement windows, error budgets and recovery drills. The roadmap specifies the measurements and operating changes required to reach these objectives.
 
-# Python tests
-cd admin-service && python -m pytest     # 101 assertions
-cd dicom-service && python -m pytest     # 28 assertions
+## Related repositories
 
-# IaC verification
-bash verify_app_vs_iac.sh                # 129 PASS / 0 FAIL / 0 WARN
-```
+- [Website and clients](https://github.com/Zahidulislam2222/mediconnect-hub)
+- [Editorial CMS](https://github.com/Zahidulislam2222/mediconnect-cms)
+- [AI knowledge service](https://github.com/Zahidulislam2222/mediconnect-rag)
 
-### Docker Build
+The earlier development checkout is retained separately as historical reference. This backend repository owns current production source.
 
-```bash
-# Build from repo root (required — Dockerfiles use repo root as context)
-docker build -f backend_v2/patient-service/Dockerfile -t patient-service .
-```
+## Support, contribution and licensing
 
-### Full Stack (docker-compose)
+General support: **muhammadzahidulislam2222@gmail.com**. Do not include health records, passwords, payment details or other sensitive information. Security reports follow [SECURITY.md](SECURITY.md).
 
-```bash
-docker-compose up                     # All 7 services + frontend
-```
+[Contributing](CONTRIBUTING.md) · [Code of conduct](CODE_OF_CONDUCT.md) · [MIT license](LICENSE) · [Third-party notices](THIRD-PARTY-NOTICES.md)
 
----
-
-## Author
-
-**Zahidul Islam** — Hybrid Cloud Architect · Full Stack Engineer · HealthTech Specialist
-
-| | |
-|--|--|
-| Portfolio | [zahidul-islam.vercel.app](https://zahidul-islam.vercel.app) |
-| GitHub | [github.com/Zahidulislam2222](https://github.com/Zahidulislam2222) |
-| Email | muhammadzahidulislam2222@gmail.com |
-
----
-
-<div align="center">
-
-**MediConnect** — Enterprise-grade healthcare infrastructure.
-Built with precision. Secured by design. Compliant by default. ⚠️ *Historical marketing line; see the compliance map for the accurate position (2026-09-24).*
-
-*© 2026 Zahidul Islam. All rights reserved.* ⚠️ *Superseded 2026-09-24: the code is now open source under the MIT Licence — see LICENSE.*
-
-</div>
+Software documentation does not establish an operating entity's legal approval or clinical authorization. Service activation requires the applicable organizational, contractual, security and clinical acceptance described in the platform documents.

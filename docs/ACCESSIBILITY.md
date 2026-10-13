@@ -1,34 +1,30 @@
-# Accessibility
+# Accessibility and inclusive journeys
 
-Last reviewed: 2026-09-24 · Target standard: **WCAG 2.2 Level AA** across web, Android and iOS
+Reviewed 2026-10-13. The web target is **WCAG 2.2 Level AA**. This is an acceptance objective, not a claim of a completed conformance audit. Native clients need platform-specific assistive-technology and device verification.
 
-Healthcare must be usable by people with visual, hearing, motor and cognitive disabilities, older
-adults, and people on slow devices or connections.
+## Required behavior
 
-## 1. Legal drivers
+Use semantic landmarks, headings and controls; accessible names; visible keyboard focus; sensible focus order and focus restoration. Ensure dialogs, menus, forms and route changes work without a mouse. Errors must identify the field, explain recovery and remain perceivable to assistive technology. Announce asynchronous status without excessive interruption.
 
-| Law | Scope | Standard / date |
-|---|---|---|
-| ADA Title III (US) | Private businesses serving the public; courts routinely apply it to websites | WCAG 2.1 AA is the common benchmark |
-| ADA Title II (US) | State and local government services (relevant for public-sector customers) | WCAG 2.1 AA; deadlines extended to April 2027 / April 2028 |
-| Section 504 (HHS rule) and Section 1557 (US) | Recipients of HHS funding, including many clinics | WCAG 2.1 AA; recipients with 15+ employees from May 2026 |
-| European Accessibility Act | E-commerce and consumer digital services in the EU | In force since 28 June 2025 (EN 301 549) |
-| UK Equality Act 2010 | Reasonable adjustments for service providers | WCAG 2.2 AA recommended |
+Support zoom, text resizing, reflow and narrow viewports without hiding essential controls or requiring two-dimensional scrolling for ordinary content. Provide adequate text/non-text contrast, sufficiently usable targets and alternatives to motion/gesture-only interactions. Honor reduced-motion preferences. Do not convey clinical or validation meaning by color alone.
 
-## 2. Design rules
+Authentication must support accessible password-manager and MFA flows, understandable expiry/recovery, and appropriate alternatives. Consent, checkout, cancellation, records export and support must remain usable with keyboard and assistive technology. Documents and video features require accessible reading order, captions/transcripts or appropriate alternatives according to their scope.
 
-- Keyboard access to every control, visible focus, logical order, and no keyboard traps.
-- Colour contrast ≥ 4.5:1 for text and ≥ 3:1 for large text and interface parts, using the design tokens.
-- Every image, icon button and video has a text alternative. Videos have captions and a pause control, and respect "reduce motion".
-- Text scales to 200% (web) and to the largest system text size (Android and iOS) without clipping. The iOS test suite already includes a largest-text settings flow.
-- Forms have labels, clear error messages and no time limits without an option to extend them. The 15-minute inactivity sign-out currently happens **without a warning**; adding a warning with a "stay signed in" option (WCAG 2.2.1 Timing Adjustable) is open work.
-- Screen reader support: semantic HTML and ARIA only where needed on the web; TalkBack and VoiceOver labels on native.
-- Video consultations support captions and sign-language interpreters as participants (PLANNED).
+## Verification matrix
 
-## 3. Testing
-
-| Method | Status |
+| Journey | Required verification |
 |---|---|
-| Playwright browser tests (exist) extended with automated axe-core accessibility checks | PLANNED (axe-core not yet added) |
-| Manual keyboard and screen-reader pass (NVDA, VoiceOver, TalkBack) | PLANNED before launch |
-| External accessibility audit and published accessibility statement | PLANNED before launch |
+| Public home, navigation, contact and legal pages | Keyboard, headings/links, 320 CSS-pixel reflow, zoom, reduced motion and screen-reader reading |
+| Editorial lists/readers | Search/filter labels, image alternatives, readable content order, focus on navigation and reload |
+| Identity/profile | Form labels/errors, password manager, MFA, expiry, focus and largest-text interaction |
+| Booking/payment/cancellation | Confirmation/readback, error recovery, deadlines, control names and status announcements |
+| Clinical/AI content | Plain-language limitations, source links, accessible status, human escalation and emergency route |
+| Android/iOS | TalkBack/VoiceOver, dynamic text, keyboard, orientation, lifecycle and physical-device checks |
+
+Combine automated browser checks with manual keyboard, screen reader, contrast and assistive-technology testing. Record browser/device/OS, viewport/text settings, route, result and defects. An automated score alone cannot establish conformance.
+
+The scoped public contact/legal checks passed content and 320-pixel wrapping tests. Existing native records include regional simulator/emulator and large-text checks. Neither result establishes complete web/native conformance or the unfinished authenticated journeys.
+
+Track defects by severity and affected journey, provide a usable alternative, retest fixes and publish an accessibility statement with supported scope and contact before wider activation. Public support: **muhammadzahidulislam2222@gmail.com**; do not send medical records through ordinary email.
+
+Primary references: [W3C WCAG 2.2](https://www.w3.org/TR/WCAG22/), [US Department of Justice web accessibility guidance](https://www.ada.gov/resources/web-guidance/). See [roadmap](ROADMAP.md) and [release status](RELEASE-STATUS.md).
